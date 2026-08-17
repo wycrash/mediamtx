@@ -18,8 +18,9 @@ var timeNow = time.Now
 
 // Cleaner removes expired recording segments from disk.
 type Cleaner struct {
-	PathConfs map[string]*conf.Path
-	Parent    logger.Writer
+	PathConfs       map[string]*conf.Path
+	Parent          logger.Writer
+	OnSegmentRemove func(fpath string)
 
 	ctx       context.Context
 	ctxCancel func()
@@ -128,6 +129,9 @@ func (c *Cleaner) deleteExpiredSegments(now time.Time, pathName string, pathConf
 	for _, seg := range segments {
 		c.Log(logger.Debug, "removing %s", seg.Fpath)
 		os.Remove(seg.Fpath)
+		if c.OnSegmentRemove != nil {
+			c.OnSegmentRemove(seg.Fpath)
+		}
 	}
 
 	return nil

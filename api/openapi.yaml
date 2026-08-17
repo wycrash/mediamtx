@@ -265,6 +265,42 @@ components:
         path:
           type: string
 
+    CompatSession:
+      type: object
+      properties:
+        created:
+          type: string
+        id:
+          type: string
+          format: uuid
+        outboundBytes:
+          type: integer
+          format: uint64
+        path:
+          type: string
+        query:
+          type: string
+        remoteAddr:
+          type: string
+        user:
+          type: string
+        userAgent:
+          type: string
+
+    CompatSessionList:
+      type: object
+      properties:
+        itemCount:
+          type: integer
+          format: int64
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/CompatSession"
+        pageCount:
+          type: integer
+          format: int64
+
     Error:
       type: object
       properties:
@@ -338,6 +374,28 @@ components:
           deprecated: true
           items:
             $ref: "#/components/schemas/RTSPAuthMethod"
+        compatAPI:
+          type: boolean
+          description: Compat API (Flussonic-style DVR endpoints on a single HTTP port)
+        compatAPIAddress:
+          type: string
+        compatAPIAllowOrigins:
+          type: array
+          items:
+            type: string
+        compatAPIEncryption:
+          type: boolean
+        compatAPIServerCert:
+          type: string
+        compatAPIServerKey:
+          type: string
+        compatAPITimeOffsetMinutes:
+          type: integer
+          format: int64
+        compatAPITrustedProxies:
+          type: array
+          items:
+            type: string
         dumpPackets:
           type: boolean
         encryption:
@@ -2625,6 +2683,123 @@ paths:
       operationId: hlssessionsKick
       tags: [HLS]
       summary: kicks out a HLS session from the server.
+      description: ""
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: ID of the session.
+          schema:
+            type: string
+      responses:
+        "200":
+          description: the request was successful.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OK"
+        "400":
+          description: invalid request.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "404":
+          description: session not found.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "500":
+          description: server error.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
+  /v3/compatsessions/list:
+    get:
+      operationId: compatsessionsList
+      tags: [Compat API]
+      summary: returns all Compat API sessions.
+      description: ""
+      parameters:
+        - name: page
+          in: query
+          description: page number.
+          schema:
+            type: integer
+            default: 0
+        - name: itemsPerPage
+          in: query
+          description: items per page.
+          schema:
+            type: integer
+            default: 100
+      responses:
+        "200":
+          description: the request was successful.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CompatSessionList"
+        "400":
+          description: invalid request.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "500":
+          description: server error.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
+  /v3/compatsessions/get/{id}:
+    get:
+      operationId: compatsessionsGet
+      tags: [Compat API]
+      summary: returns a Compat API session.
+      description: ""
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: ID of the session.
+          schema:
+            type: string
+      responses:
+        "200":
+          description: the request was successful.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CompatSession"
+        "400":
+          description: invalid request.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "404":
+          description: session not found.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "500":
+          description: server error.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
+  /v3/compatsessions/kick/{id}:
+    post:
+      operationId: compatsessionsKick
+      tags: [Compat API]
+      summary: kicks out a Compat API session from the server.
       description: ""
       parameters:
         - name: id

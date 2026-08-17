@@ -7,6 +7,7 @@ import (
 	"maps"
 	"sort"
 	"sync"
+	"time"
 
 	"github.com/google/uuid"
 
@@ -73,6 +74,12 @@ type pathManagerParent interface {
 	logger.Writer
 }
 
+type recordSegmentListener interface {
+	OnSegmentCreate(pathName, segmentPath string)
+	OnSegmentComplete(pathName, segmentPath string, duration time.Duration)
+	OnSegmentRemove(segmentPath string)
+}
+
 type pathManager struct {
 	logLevel          conf.LogLevel
 	rtspAddress       string
@@ -95,6 +102,9 @@ type pathManager struct {
 	wg        sync.WaitGroup
 	hlsServer *hls.Server
 	paths     map[string]*path
+
+	recordSegMu           sync.RWMutex
+	recordSegmentListener recordSegmentListener
 
 	// in
 	chReloadConf         chan map[string]*conf.Path
@@ -677,6 +687,40 @@ func (pm *pathManager) SetHLSServer(s *hls.Server) []defs.Path {
 
 	case <-pm.ctx.Done():
 		return nil
+	}
+}
+
+// SetRecordSegmentListener is called by core when compat API is enabled.
+func (pm *pathManager) SetRecordSegmentListener(l recordSegmentListener) {
+	pm.recordSegMu.Lock()
+	pm.recordSegmentListener = l
+	pm.recordSegMu.Unlock()
+}
+
+func (pm *pathManager) onRecordSegmentCreate(pathName, segmentPath string) {
+	pm.recordSegMu.RLock()
+	l := pm.recordSegmentListener
+	pm.recordSegMu.RUnlock()
+	if l != nil {
+		l.OnSegmentCreate(pathName, segmentPath)
+	}
+}
+
+func (pm *pathManager) onRecordSegmentComplete(pathName, segmentPath string, duration time.Duration) {
+	pm.recordSegMu.RLock()
+	l := pm.recordSegmentListener
+	pm.recordSegMu.RUnlock()
+	if l != nil {
+		l.OnSegmentComplete(pathName, segmentPath, duration)
+	}
+}
+
+func (pm *pathManager) onRecordSegmentRemove(segmentPath string) {
+	pm.recordSegMu.RLock()
+	l := pm.recordSegmentListener
+	pm.recordSegMu.RUnlock()
+	if l != nil {
+		l.OnSegmentRemove(segmentPath)
 	}
 }
 

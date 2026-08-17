@@ -38,6 +38,8 @@ type pathParent interface {
 	closePathIfIdle(*path)
 	removePath(*path)
 	AddReader(req defs.PathAddReaderReq) (*defs.PathAddReaderRes, error)
+	onRecordSegmentCreate(pathName, segmentPath string)
+	onRecordSegmentComplete(pathName, segmentPath string, duration time.Duration)
 }
 
 type pathOnDemandState int
@@ -999,6 +1001,8 @@ func (pa *path) startRecording() {
 		PathName:        pa.name,
 		Stream:          pa.stream,
 		OnSegmentCreate: func(segmentPath string) {
+			pa.parent.onRecordSegmentCreate(pa.name, segmentPath)
+
 			if pa.conf.RunOnRecordSegmentCreate != "" {
 				env := pa.ExternalCmdEnv()
 				env["MTX_SEGMENT_PATH"] = segmentPath
@@ -1014,6 +1018,8 @@ func (pa *path) startRecording() {
 			}
 		},
 		OnSegmentComplete: func(segmentPath string, segmentDuration time.Duration) {
+			pa.parent.onRecordSegmentComplete(pa.name, segmentPath, segmentDuration)
+
 			if pa.conf.RunOnRecordSegmentComplete != "" {
 				env := pa.ExternalCmdEnv()
 				env["MTX_SEGMENT_PATH"] = segmentPath

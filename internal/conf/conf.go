@@ -311,6 +311,16 @@ type Conf struct {
 	PlaybackAllowOrigins   []string   `json:"playbackAllowOrigins"`
 	PlaybackTrustedProxies IPNetworks `json:"playbackTrustedProxies"`
 
+	// Compat API (Flussonic-style DVR endpoints on a single HTTP port)
+	CompatAPI                  bool       `json:"compatAPI"`
+	CompatAPIAddress           string     `json:"compatAPIAddress"`
+	CompatAPIEncryption        bool       `json:"compatAPIEncryption"`
+	CompatAPIServerKey         string     `json:"compatAPIServerKey"`
+	CompatAPIServerCert        string     `json:"compatAPIServerCert"`
+	CompatAPIAllowOrigins      []string   `json:"compatAPIAllowOrigins"`
+	CompatAPITrustedProxies    IPNetworks `json:"compatAPITrustedProxies"`
+	CompatAPITimeOffsetMinutes int        `json:"compatAPITimeOffsetMinutes"`
+
 	// RTSP server
 	RTSP                  bool             `json:"rtsp"`
 	RTSPDisable           *bool            `json:"rtspDisable,omitempty" deprecated:"true"`
@@ -475,6 +485,12 @@ func (conf *Conf) setDefaults() {
 	conf.PlaybackServerKey = "server.key"
 	conf.PlaybackServerCert = "server.crt"
 	conf.PlaybackAllowOrigins = []string{"*"}
+
+	// Compat API
+	conf.CompatAPIAddress = ":8877"
+	conf.CompatAPIServerKey = "server.key"
+	conf.CompatAPIServerCert = "server.crt"
+	conf.CompatAPIAllowOrigins = []string{"*"}
 
 	// RTSP server
 	conf.RTSP = true
@@ -810,6 +826,17 @@ func (conf *Conf) Validate(l logger.Writer) error {
 	if conf.Playback {
 		if conf.PlaybackAddress == "" {
 			return fmt.Errorf("'playbackAddress' must be set when playback is enabled")
+		}
+	}
+
+	// Compat API
+
+	if conf.CompatAPI {
+		if conf.CompatAPIAddress == "" {
+			return fmt.Errorf("'compatAPIAddress' must be set when compatAPI is enabled")
+		}
+		if !conf.HLS {
+			return fmt.Errorf("'hls' must be enabled when compatAPI is enabled (live requests are proxied to HLS)")
 		}
 	}
 

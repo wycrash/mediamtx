@@ -35,6 +35,14 @@ var structs = []struct {
 		typ:          reflect.TypeOf(conf.AuthInternalUserPermission{}),
 	},
 	{
+		externalName: "CompatSession",
+		typ:          reflect.TypeOf(defs.APICompatSession{}),
+	},
+	{
+		externalName: "CompatSessionList",
+		typ:          reflect.TypeOf(defs.APICompatSessionList{}),
+	},
+	{
 		externalName: "Error",
 		typ:          reflect.TypeOf(defs.APIError{}),
 	},

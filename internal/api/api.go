@@ -79,6 +79,7 @@ type API struct {
 	RTMPServer     defs.APIRTMPServer
 	RTMPSServer    defs.APIRTMPServer
 	HLSServer      defs.APIHLSServer
+	CompatServer   defs.APICompatServer
 	WebRTCServer   defs.APIWebRTCServer
 	SRTServer      defs.APISRTServer
 	MoQServer      defs.APIMoQServer
@@ -125,6 +126,12 @@ func (a *API) Initialize() error {
 		group.GET("/hlssessions/list", a.onHLSSessionsList)
 		group.GET("/hlssessions/get/:id", a.onHLSSessionsGet)
 		group.POST("/hlssessions/kick/:id", a.onHLSSessionsKick)
+	}
+
+	if !interfaceIsEmpty(a.CompatServer) {
+		group.GET("/compatsessions/list", a.onCompatSessionsList)
+		group.GET("/compatsessions/get/:id", a.onCompatSessionsGet)
+		group.POST("/compatsessions/kick/:id", a.onCompatSessionsKick)
 	}
 
 	if !interfaceIsEmpty(a.RTSPServer) {

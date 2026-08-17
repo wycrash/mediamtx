@@ -643,6 +643,123 @@ paths:
               schema:
                 $ref: "#/components/schemas/Error"
 
+  /v3/compatsessions/list:
+    get:
+      operationId: compatsessionsList
+      tags: [Compat API]
+      summary: returns all Compat API sessions.
+      description: ""
+      parameters:
+        - name: page
+          in: query
+          description: page number.
+          schema:
+            type: integer
+            default: 0
+        - name: itemsPerPage
+          in: query
+          description: items per page.
+          schema:
+            type: integer
+            default: 100
+      responses:
+        "200":
+          description: the request was successful.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CompatSessionList"
+        "400":
+          description: invalid request.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "500":
+          description: server error.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
+  /v3/compatsessions/get/{id}:
+    get:
+      operationId: compatsessionsGet
+      tags: [Compat API]
+      summary: returns a Compat API session.
+      description: ""
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: ID of the session.
+          schema:
+            type: string
+      responses:
+        "200":
+          description: the request was successful.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CompatSession"
+        "400":
+          description: invalid request.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "404":
+          description: session not found.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "500":
+          description: server error.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
+  /v3/compatsessions/kick/{id}:
+    post:
+      operationId: compatsessionsKick
+      tags: [Compat API]
+      summary: kicks out a Compat API session from the server.
+      description: ""
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: ID of the session.
+          schema:
+            type: string
+      responses:
+        "200":
+          description: the request was successful.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OK"
+        "400":
+          description: invalid request.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "404":
+          description: session not found.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "500":
+          description: server error.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
   /v3/paths/list:
     get:
       operationId: pathsList

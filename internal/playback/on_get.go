@@ -3,6 +3,7 @@ package playback
 import (
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"os"
@@ -120,6 +121,28 @@ func seekAndMux(
 	return fmt.Errorf("MPEG-TS format is not supported yet")
 }
 
+// MuxSegments muxes recording segments into w.
+// format is "fmp4" (default) or "mp4".
+func MuxSegments(
+	recordFormat conf.RecordFormat,
+	segments []*recordstore.Segment,
+	start time.Time,
+	duration time.Duration,
+	format string,
+	w io.Writer,
+) error {
+	var m muxer
+	switch format {
+	case "", "fmp4":
+		m = &muxerFMP4{w: w}
+	case "mp4":
+		m = &muxerMP4{w: w}
+	default:
+		return fmt.Errorf("invalid format: %s", format)
+	}
+	return seekAndMux(recordFormat, segments, start, duration, m)
+}
+
 func (s *Server) onGet(ctx *gin.Context) {
 	pathName := ctx.Query("path")
 
@@ -146,17 +169,9 @@ func (s *Server) onGet(ctx *gin.Context) {
 		return
 	}
 
-	ww := &writerWrapper{ctx: ctx}
-	var m muxer
-
 	format := ctx.Query("format")
 	switch format {
-	case "", "fmp4":
-		m = &muxerFMP4{w: ww}
-
-	case "mp4":
-		m = &muxerMP4{w: ww}
-
+	case "", "fmp4", "mp4":
 	default:
 		s.writeError(ctx, http.StatusBadRequest, fmt.Errorf("invalid format: %s", format))
 		return
@@ -179,7 +194,8 @@ func (s *Server) onGet(ctx *gin.Context) {
 		return
 	}
 
-	err = seekAndMux(pathConf.RecordFormat, segments, start, duration, m)
+	ww := &writerWrapper{ctx: ctx}
+	err = MuxSegments(pathConf.RecordFormat, segments, start, duration, format, ww)
 	if err != nil {
 		// user aborted the download
 		if _, ok := errors.AsType[*net.OpError](err); ok {

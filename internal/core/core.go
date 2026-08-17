@@ -22,6 +22,7 @@ import (
 
 	"github.com/bluenviron/mediamtx/internal/api"
 	"github.com/bluenviron/mediamtx/internal/auth"
+	"github.com/bluenviron/mediamtx/internal/compatapi"
 	"github.com/bluenviron/mediamtx/internal/conf"
 	"github.com/bluenviron/mediamtx/internal/confwatcher"
 	"github.com/bluenviron/mediamtx/internal/externalcmd"
@@ -136,6 +137,7 @@ type Core struct {
 	rtmpServer      *rtmp.Server
 	rtmpsServer     *rtmp.Server
 	hlsServer       *hls.Server
+	compatServer    *compatapi.Server
 	webRTCServer    *webrtc.Server
 	srtServer       *srt.Server
 	moqServer       *moq.Server
@@ -430,6 +432,11 @@ func (p *Core) createResources(initial bool) error {
 		p.recordCleaner = &recordcleaner.Cleaner{
 			PathConfs: p.conf.Paths,
 			Parent:    p,
+			OnSegmentRemove: func(fpath string) {
+				if p.pathManager != nil {
+					p.pathManager.onRecordSegmentRemove(fpath)
+				}
+			},
 		}
 		p.recordCleaner.Initialize()
 	}
@@ -659,6 +666,35 @@ func (p *Core) createResources(initial bool) error {
 		p.hlsServer = i
 	}
 
+	if p.conf.CompatAPI &&
+		p.compatServer == nil {
+		i := &compatapi.Server{
+			Address:           p.conf.CompatAPIAddress,
+			Encryption:        p.conf.CompatAPIEncryption,
+			ServerKey:         p.conf.CompatAPIServerKey,
+			ServerCert:        p.conf.CompatAPIServerCert,
+			DumpPackets:       p.conf.DumpPackets,
+			AllowOrigins:      p.conf.CompatAPIAllowOrigins,
+			TrustedProxies:    p.conf.CompatAPITrustedProxies,
+			ReadTimeout:       p.conf.ReadTimeout,
+			WriteTimeout:      p.conf.WriteTimeout,
+			TimeOffsetMinutes: p.conf.CompatAPITimeOffsetMinutes,
+			HLSAddress:        p.conf.HLSAddress,
+			PathConfs:         p.conf.Paths,
+			PathManager:       p.pathManager,
+			AuthManager:       p.authManager,
+			Parent:            p,
+		}
+		err = i.Initialize()
+		if err != nil {
+			return err
+		}
+		p.compatServer = i
+		if p.pathManager != nil {
+			p.pathManager.SetRecordSegmentListener(i)
+		}
+	}
+
 	if p.conf.WebRTC &&
 		p.webRTCServer == nil {
 		i := &webrtc.Server{
@@ -763,6 +799,7 @@ func (p *Core) createResources(initial bool) error {
 			RTMPServer:     p.rtmpServer,
 			RTMPSServer:    p.rtmpsServer,
 			HLSServer:      p.hlsServer,
+			CompatServer:   p.compatServer,
 			WebRTCServer:   p.webRTCServer,
 			SRTServer:      p.srtServer,
 			MoQServer:      p.moqServer,
@@ -987,6 +1024,27 @@ func (p *Core) closeResources(newConf *conf.Conf, calledByAPI bool) {
 		closeMetrics ||
 		closeLogger
 
+	closeCompatServer := newConf == nil ||
+		newConf.CompatAPI != p.conf.CompatAPI ||
+		newConf.CompatAPIAddress != p.conf.CompatAPIAddress ||
+		newConf.CompatAPIEncryption != p.conf.CompatAPIEncryption ||
+		newConf.CompatAPIServerKey != p.conf.CompatAPIServerKey ||
+		newConf.CompatAPIServerCert != p.conf.CompatAPIServerCert ||
+		!slices.Equal(newConf.CompatAPIAllowOrigins, p.conf.CompatAPIAllowOrigins) ||
+		!reflect.DeepEqual(newConf.CompatAPITrustedProxies, p.conf.CompatAPITrustedProxies) ||
+		newConf.CompatAPITimeOffsetMinutes != p.conf.CompatAPITimeOffsetMinutes ||
+		newConf.HLSAddress != p.conf.HLSAddress ||
+		newConf.ReadTimeout != p.conf.ReadTimeout ||
+		newConf.WriteTimeout != p.conf.WriteTimeout ||
+		newConf.DumpPackets != p.conf.DumpPackets ||
+		closeAuthManager ||
+		closeHLSServer ||
+		closePathManager ||
+		closeLogger
+	if !closeCompatServer && p.compatServer != nil && !reflect.DeepEqual(newConf.Paths, p.conf.Paths) {
+		p.compatServer.ReloadPathConfs(newConf.Paths)
+	}
+
 	closeWebRTCServer := newConf == nil ||
 		newConf.WebRTC != p.conf.WebRTC ||
 		newConf.WebRTCAddress != p.conf.WebRTCAddress ||
@@ -1060,6 +1118,7 @@ func (p *Core) closeResources(newConf *conf.Conf, calledByAPI bool) {
 		closeRTMPServer ||
 		closeRTMPSServer ||
 		closeHLSServer ||
+		closeCompatServer ||
 		closeWebRTCServer ||
 		closeSRTServer ||
 		closeMoQServer ||
@@ -1092,6 +1151,14 @@ func (p *Core) closeResources(newConf *conf.Conf, calledByAPI bool) {
 	if closeWebRTCServer && p.webRTCServer != nil {
 		p.webRTCServer.Close()
 		p.webRTCServer = nil
+	}
+
+	if closeCompatServer && p.compatServer != nil {
+		if p.pathManager != nil {
+			p.pathManager.SetRecordSegmentListener(nil)
+		}
+		p.compatServer.Close()
+		p.compatServer = nil
 	}
 
 	if closeHLSServer && p.hlsServer != nil {
