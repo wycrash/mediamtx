@@ -1,0 +1,274 @@
+package compatapi
+
+import (
+	"os"
+	"path/filepath"
+	"testing"
+	"time"
+
+	"github.com/bluenviron/mediacommon/v2/pkg/formats/fmp4"
+	mcodecs "github.com/bluenviron/mediacommon/v2/pkg/formats/mp4/codecs"
+	"github.com/bluenviron/mediamtx/internal/conf"
+	"github.com/stretchr/testify/require"
+)
+
+func testH264Track() *fmp4.InitTrack {
+	return &fmp4.InitTrack{
+		ID:        1,
+		TimeScale: 1000,
+		Codec: &mcodecs.H264{
+			SPS: []byte{
+				0x67, 0x64, 0x00, 0x1e, 0xac, 0xd9, 0x40, 0xa0,
+				0x3d, 0xa1, 0x00, 0x00, 0x03, 0x00, 0x01, 0x00,
+				0x00, 0x03, 0x00, 0x32, 0x8f, 0x18, 0x32, 0x48,
+			},
+			PPS: []byte{0x68, 0xee, 0x3c, 0xb0},
+		},
+	}
+}
+
+func writeNamedFMP4(t *testing.T, path string, moofs int) {
+	t.Helper()
+	require.NoError(t, os.MkdirAll(filepath.Dir(path), 0o755))
+	f, err := os.Create(path)
+	require.NoError(t, err)
+	defer f.Close()
+	init := fmp4.Init{Tracks: []*fmp4.InitTrack{testH264Track()}}
+	require.NoError(t, init.Marshal(f))
+	for i := 0; i < moofs; i++ {
+		part := fmp4.Part{
+			SequenceNumber: uint32(i),
+			Tracks: []*fmp4.PartTrack{{
+				ID:       1,
+				BaseTime: uint64(i * 1000),
+				Samples:  []*fmp4.Sample{{Duration: 1000, Payload: []byte{0, 0, 0, 1, 9, 0xf0}}},
+			}},
+		}
+		require.NoError(t, part.Marshal(f))
+	}
+}
+
+func TestDvrSnapshotRoundTrip(t *testing.T) {
+	tracks := []*fmp4.InitTrack{testH264Track()}
+	in := dvrSnapshot{
+		Hash:   0x1122334455667788,
+		Codecs: [][]*fmp4.InitTrack{tracks},
+		Segs: []dvrSegRec{{
+			Rel:      "2020-01-01_00-00-00-000000.mp4",
+			Start:    time.Unix(1577836800, 0).UTC(),
+			Duration: 5 * time.Second,
+			Moof:     5,
+			CodecID:  1,
+			Ready:    true,
+		}},
+	}
+	raw, err := encodeSnapshot(in)
+	require.NoError(t, err)
+	out, err := decodeSnapshot(raw)
+	require.NoError(t, err)
+	require.Equal(t, in.Hash, out.Hash)
+	require.Len(t, out.Codecs, 1)
+	require.True(t, fmp4TracksCompatible(tracks, out.Codecs[0]))
+	require.Len(t, out.Segs, 1)
+	require.Equal(t, in.Segs[0].Rel, out.Segs[0].Rel)
+	require.Equal(t, in.Segs[0].Duration, out.Segs[0].Duration)
+	require.Equal(t, in.Segs[0].Moof, out.Segs[0].Moof)
+	require.True(t, in.Segs[0].Start.Equal(out.Segs[0].Start))
+}
+
+func TestDvrJournalTruncatedStops(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, ".mtx-dvr-index.journal")
+	hash := uint64(99)
+	op, err := encodeJournalOp(dvrJournalOp{
+		Op: dvrOpUpsert,
+		Seg: dvrSegRec{
+			Rel:      "a.mp4",
+			Start:    time.Unix(1000, 0).UTC(),
+			Duration: time.Second,
+			Ready:    true,
+		},
+	})
+	require.NoError(t, err)
+	data := append(journalHeader(hash), op...)
+	data = append(data, 10, 0, 0, 0) // length prefix of a truncated record
+	require.NoError(t, os.WriteFile(path, data, 0o644))
+
+	ops, err := readJournalFile(path, hash)
+	require.NoError(t, err)
+	require.Len(t, ops, 1)
+	require.Equal(t, "a.mp4", ops[0].Seg.Rel)
+}
+
+func TestIndexLoadFromDiskUsesSnapshot(t *testing.T) {
+	dir := t.TempDir()
+	cam := filepath.Join(dir, "cam1")
+	a := filepath.Join(cam, "2020-01-01_00-00-00-000000.mp4")
+	b := filepath.Join(cam, "2020-01-01_00-00-05-000000.mp4")
+	writeNamedFMP4(t, a, 2)
+	writeNamedFMP4(t, b, 3)
+
+	pathConf := &conf.Path{
+		Name:                  "cam1",
+		RecordPath:            filepath.Join(dir, "%path/%Y-%m-%d_%H-%M-%S-%f"),
+		RecordFormat:          conf.RecordFormatFMP4,
+		RecordSegmentDuration: conf.Duration(5 * time.Second),
+	}
+	confs := map[string]*conf.Path{"cam1": pathConf}
+
+	idx1 := NewIndex()
+	st1 := idx1.LoadFromDisk(confs)
+	require.Equal(t, 0, st1.Segments)
+	require.Equal(t, 0, st1.DiskPaths)
+	require.Equal(t, 0, st1.Inspected)
+	st1 = idx1.ReconcileAll(nil, false)
+	require.Equal(t, 2, st1.Segments)
+	require.Equal(t, 1, st1.Inspected)
+	idx1.ClosePersist()
+
+	snap, journal, _ := dvrIndexPaths(pathConf, "cam1")
+	require.FileExists(t, snap)
+	require.FileExists(t, journal)
+
+	idx2 := NewIndex()
+	st2 := idx2.LoadFromDisk(confs)
+	require.Equal(t, 2, st2.Segments)
+	require.Equal(t, 1, st2.DiskPaths)
+	require.Equal(t, 0, st2.Inspected)
+
+	out := idx2.SegmentsInWindow("cam1", time.Date(2020, 1, 1, 0, 0, 0, 0, time.Local), time.Minute)
+	require.Len(t, out, 2)
+	require.True(t, out[0].fmp4.Ready)
+	require.True(t, out[1].fmp4.Ready)
+	require.Equal(t, 5*time.Second, out[0].fmp4.Duration)
+	require.Equal(t, uint32(3), out[1].fmp4.MoofCount)
+	require.Equal(t, 1, idx2.MemStats().UniqueTrackPtrs)
+	idx2.ClosePersist()
+}
+
+func TestIndexLoadFromDiskReconcilesDeletedAndNew(t *testing.T) {
+	dir := t.TempDir()
+	cam := filepath.Join(dir, "cam1")
+	a := filepath.Join(cam, "2020-01-01_00-00-00-000000.mp4")
+	b := filepath.Join(cam, "2020-01-01_00-00-05-000000.mp4")
+	c := filepath.Join(cam, "2020-01-01_00-00-10-000000.mp4")
+	writeNamedFMP4(t, a, 2)
+	writeNamedFMP4(t, b, 2)
+
+	pathConf := &conf.Path{
+		Name:                  "cam1",
+		RecordPath:            filepath.Join(dir, "%path/%Y-%m-%d_%H-%M-%S-%f"),
+		RecordFormat:          conf.RecordFormatFMP4,
+		RecordSegmentDuration: conf.Duration(5 * time.Second),
+	}
+	confs := map[string]*conf.Path{"cam1": pathConf}
+
+	idx := NewIndex()
+	require.Equal(t, 0, idx.LoadFromDisk(confs).Segments)
+	require.Equal(t, 2, idx.ReconcileAll(nil, false).Segments)
+	idx.ClosePersist()
+
+	require.NoError(t, os.Remove(b))
+	writeNamedFMP4(t, c, 4)
+
+	idx = NewIndex()
+	st := idx.LoadFromDisk(confs)
+	require.Equal(t, 2, st.Segments)
+	require.Equal(t, 1, st.DiskPaths)
+	require.Equal(t, 0, st.Inspected)
+	require.Equal(t, 0, st.Removed)
+	require.Equal(t, 0, st.Added)
+	_, ok := idx.FindByName("cam1", filepath.Base(b))
+	require.True(t, ok, "startup trusts snapshot and does not drop deleted files yet")
+
+	st = idx.ReconcileAll(nil, false)
+	require.Equal(t, 0, st.Inspected)
+	require.Equal(t, 1, st.Removed)
+	require.Equal(t, 1, st.Added)
+
+	_, ok = idx.FindByName("cam1", filepath.Base(b))
+	require.False(t, ok)
+	fpath, ok := idx.FindByName("cam1", filepath.Base(c))
+	require.True(t, ok)
+	require.Equal(t, c, fpath)
+	segs := idx.SegmentsInWindow("cam1", time.Date(2020, 1, 1, 0, 0, 0, 0, time.Local), time.Minute)
+	require.Len(t, segs, 2)
+	var foundC bool
+	for _, s := range segs {
+		if s.Name == filepath.Base(c) {
+			foundC = true
+			require.True(t, s.fmp4.Ready)
+			require.Equal(t, 5*time.Second, s.fmp4.Duration)
+		}
+	}
+	require.True(t, foundC)
+	idx.ClosePersist()
+}
+
+func TestIndexPersistUpsertReplayedFromJournal(t *testing.T) {
+	dir := t.TempDir()
+	cam := filepath.Join(dir, "cam1")
+	a := filepath.Join(cam, "2020-01-01_00-00-00-000000.mp4")
+	b := filepath.Join(cam, "2020-01-01_00-00-05-000000.mp4")
+	writeNamedFMP4(t, a, 2)
+
+	pathConf := &conf.Path{
+		Name:                  "cam1",
+		RecordPath:            filepath.Join(dir, "%path/%Y-%m-%d_%H-%M-%S-%f"),
+		RecordFormat:          conf.RecordFormatFMP4,
+		RecordSegmentDuration: conf.Duration(5 * time.Second),
+	}
+	confs := map[string]*conf.Path{"cam1": pathConf}
+
+	idx := NewIndex()
+	require.Equal(t, 0, idx.LoadFromDisk(confs).Segments)
+	require.Equal(t, 1, idx.ReconcileAll(nil, false).Segments)
+
+	writeNamedFMP4(t, b, 3)
+	start := time.Date(2020, 1, 1, 0, 0, 5, 0, time.Local)
+	idx.Add("cam1", b, start)
+	meta, err := inspectFMP4Segment(b)
+	require.NoError(t, err)
+	idx.SetFMP4Meta("cam1", b, meta)
+	idx.PersistUpsert("cam1", b)
+	// do not ClosePersist: snapshot still has 1 file, journal has the upsert
+
+	idx2 := NewIndex()
+	st := idx2.LoadFromDisk(confs)
+	require.Equal(t, 2, st.Segments)
+	require.Equal(t, 1, st.DiskPaths)
+	out := idx2.SegmentsInWindow("cam1", time.Date(2020, 1, 1, 0, 0, 0, 0, time.Local), time.Minute)
+	require.Len(t, out, 2)
+	require.Equal(t, uint32(3), out[1].fmp4.MoofCount)
+	idx2.ClosePersist()
+}
+
+func TestIndexCompleteSegmentUsesRecorderDuration(t *testing.T) {
+	dir := t.TempDir()
+	cam := filepath.Join(dir, "cam1")
+	a := filepath.Join(cam, "2020-01-01_00-00-00-000000.mp4")
+	b := filepath.Join(cam, "2020-01-01_00-00-05-000000.mp4")
+	writeNamedFMP4(t, a, 2)
+	writeNamedFMP4(t, b, 3)
+
+	pathConf := &conf.Path{
+		Name:                  "cam1",
+		RecordPath:            filepath.Join(dir, "%path/%Y-%m-%d_%H-%M-%S-%f"),
+		RecordFormat:          conf.RecordFormatFMP4,
+		RecordSegmentDuration: conf.Duration(5 * time.Second),
+		RecordPartDuration:    conf.Duration(time.Second),
+	}
+	confs := map[string]*conf.Path{"cam1": pathConf}
+
+	idx := NewIndex()
+	idx.LoadFromDisk(confs)
+	idx.CompleteSegment("cam1", a, 5*time.Second)
+	idx.CompleteSegment("cam1", b, 5*time.Second)
+
+	out := idx.SegmentsInWindow("cam1", time.Date(2020, 1, 1, 0, 0, 0, 0, time.Local), time.Minute)
+	require.Len(t, out, 2)
+	require.Equal(t, 5*time.Second, out[0].fmp4.Duration)
+	require.Equal(t, 5*time.Second, out[1].fmp4.Duration)
+	require.Equal(t, 1, idx.MemStats().UniqueTrackPtrs)
+	idx.ClosePersist()
+}

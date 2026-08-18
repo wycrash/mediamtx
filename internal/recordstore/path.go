@@ -4,6 +4,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/bluenviron/mediamtx/internal/conf"
@@ -110,10 +111,24 @@ type Path struct {
 	Path  string
 }
 
-// Decode decodes a Path.
-func (p *Path) Decode(format string, v string) bool {
-	re := format
+type pathDecoder struct {
+	re           *regexp.Regexp
+	groupMapping []string
+}
 
+var pathDecoders sync.Map // format -> *pathDecoder
+
+func getPathDecoder(format string) *pathDecoder {
+	if v, ok := pathDecoders.Load(format); ok {
+		return v.(*pathDecoder)
+	}
+	d := compilePathDecoder(format)
+	actual, _ := pathDecoders.LoadOrStore(format, d)
+	return actual.(*pathDecoder)
+}
+
+func compilePathDecoder(format string) *pathDecoder {
+	re := format
 	for _, ch := range []uint8{
 		'\\',
 		'.',
@@ -132,7 +147,6 @@ func (p *Path) Decode(format string, v string) bool {
 	} {
 		re = strings.ReplaceAll(re, string(ch), "\\"+string(ch))
 	}
-
 	re = strings.ReplaceAll(re, "%path", "(.*?)")
 	re = strings.ReplaceAll(re, "%Y", "([0-9]{4})")
 	re = strings.ReplaceAll(re, "%m", "([0-9]{2})")
@@ -143,7 +157,6 @@ func (p *Path) Decode(format string, v string) bool {
 	re = strings.ReplaceAll(re, "%f", "([0-9]{6})")
 	re = strings.ReplaceAll(re, "%z", "(Z|\\+[0-9]{4}|-[0-9]{4})")
 	re = strings.ReplaceAll(re, "%s", "([0-9]{10})")
-	r := regexp.MustCompile(re)
 
 	var groupMapping []string
 	cur := format
@@ -152,9 +165,7 @@ func (p *Path) Decode(format string, v string) bool {
 		if i < 0 {
 			break
 		}
-
 		cur = cur[i:]
-
 		for _, va := range []string{
 			"%path",
 			"%Y",
@@ -171,14 +182,22 @@ func (p *Path) Decode(format string, v string) bool {
 				groupMapping = append(groupMapping, va)
 			}
 		}
-
 		cur = cur[1:]
 	}
+	return &pathDecoder{
+		re:           regexp.MustCompile(re),
+		groupMapping: groupMapping,
+	}
+}
 
-	matches := r.FindStringSubmatch(v)
+// Decode decodes a Path.
+func (p *Path) Decode(format string, v string) bool {
+	dec := getPathDecoder(format)
+	matches := dec.re.FindStringSubmatch(v)
 	if matches == nil {
 		return false
 	}
+	groupMapping := dec.groupMapping
 
 	values := make(map[string]string)
 

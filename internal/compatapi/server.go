@@ -47,13 +47,15 @@ type Server struct {
 	AuthManager       serverAuthManager
 	Parent            logger.Writer
 
-	Index       *Index
-	httpServer  *httpp.Server
-	hlsProxy    *httputil.ReverseProxy
-	hlsProxyURL *url.URL
-	mutex       sync.RWMutex
-	sessionsMu  sync.RWMutex
-	sessions    map[uuid.UUID]*session
+	Index         *Index
+	httpServer    *httpp.Server
+	hlsProxy      *httputil.ReverseProxy
+	hlsProxyURL   *url.URL
+	mutex         sync.RWMutex
+	sessionsMu    sync.RWMutex
+	sessions      map[uuid.UUID]*session
+	reconcileStop chan struct{}
+	reconcileDone chan struct{}
 }
 
 // Initialize initializes Server.
@@ -81,11 +83,12 @@ func (s *Server) Initialize() error {
 	before := readProcMem()
 	s.Log(logger.Info, "loading recording index (%s)", before.logLine())
 	t0 := time.Now()
-	s.Index.LoadFromDisk(s.PathConfs)
+	loadSt := s.Index.LoadFromDisk(s.PathConfs)
 	elapsed := time.Since(t0)
 	after := readProcMem()
 	st := s.Index.MemStats()
-	s.Log(logger.Info, "recording index loaded (%d segments, %d paths) in %s", st.Segments, st.Paths, elapsed)
+	s.Log(logger.Info, "recording index loaded (%d segments, %d paths, %d from disk) in %s",
+		loadSt.Segments, loadSt.Paths, loadSt.DiskPaths, elapsed)
 	s.logIndexMem(st, before, after)
 
 	s.sessions = make(map[uuid.UUID]*session)
@@ -119,6 +122,7 @@ func (s *Server) Initialize() error {
 		proto = "TCP/HTTPS"
 	}
 	s.Log(logger.Info, "started with listener on %s (%s)", s.Address, proto)
+	s.startBackgroundReconcile(loadSt)
 	return nil
 }
 
@@ -135,23 +139,7 @@ func (s *Server) OnSegmentComplete(pathName, segmentPath string, duration time.D
 	if s.Index == nil {
 		return
 	}
-	s.Index.AddFromPath(pathName, segmentPath)
-
-	pathConf, err := s.safeFindPathConf(pathName)
-	if err != nil || pathConf.RecordFormat != conf.RecordFormatFMP4 {
-		return
-	}
-
-	meta, err := inspectFMP4Segment(segmentPath)
-	if err != nil {
-		if duration <= 0 {
-			return
-		}
-		meta = fmp4SegMeta{Duration: duration, Ready: true}
-	} else if meta.Duration == 0 && duration > 0 {
-		meta.Duration = duration
-	}
-	s.Index.SetFMP4Meta(pathName, segmentPath, meta)
+	s.Index.CompleteSegment(pathName, segmentPath, duration)
 }
 
 // OnSegmentRemove is called when a recording segment file is deleted.
@@ -165,8 +153,56 @@ func (s *Server) OnSegmentRemove(segmentPath string) {
 // Close closes Server.
 func (s *Server) Close() {
 	s.Log(logger.Info, "closing")
+	s.stopBackgroundReconcile()
 	s.sessionsKickAll()
+	if s.Index != nil {
+		s.Index.ClosePersist()
+	}
 	s.httpServer.Close()
+}
+
+func (s *Server) startBackgroundReconcile(_ IndexLoadStats) {
+	if s.Index == nil {
+		return
+	}
+	s.reconcileStop = make(chan struct{})
+	s.reconcileDone = make(chan struct{})
+	go func() {
+		defer close(s.reconcileDone)
+		s.runBackgroundReconcile()
+		ticker := time.NewTicker(5 * time.Minute)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-s.reconcileStop:
+				return
+			case <-ticker.C:
+				s.runBackgroundReconcile()
+			}
+		}
+	}()
+}
+
+func (s *Server) runBackgroundReconcile() {
+	s.Log(logger.Info, "recording index background update started")
+	t0 := time.Now()
+	st := s.Index.ReconcileAll(s.reconcileStop, true)
+	s.Log(logger.Info, "recording index background update done (built=%d added=%d removed=%d inspected=%d) in %s",
+		st.Built, st.Added, st.Removed, st.Inspected, time.Since(t0))
+}
+
+func (s *Server) stopBackgroundReconcile() {
+	if s.reconcileStop == nil {
+		return
+	}
+	select {
+	case <-s.reconcileStop:
+	default:
+		close(s.reconcileStop)
+	}
+	if s.reconcileDone != nil {
+		<-s.reconcileDone
+	}
 }
 
 // Log implements logger.Writer.
