@@ -1,12 +1,14 @@
 package compatapi
 
 import (
-	"context"
-	"fmt"
 	"net/http"
+	"net/http/httptest"
 	"testing"
 
+	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/require"
+
+	"github.com/bluenviron/mediamtx/internal/test"
 )
 
 func TestLocationToRelative(t *testing.T) {
@@ -28,24 +30,63 @@ func TestLocationToRelative(t *testing.T) {
 	)
 }
 
-func TestRewriteHLSProxyResponse(t *testing.T) {
-	req, err := http.NewRequest(http.MethodGet, "http://127.0.0.1:8877/cam1/index.m3u8", nil)
-	require.NoError(t, err)
+func TestServeLiveUsesHandler(t *testing.T) {
+	gin.SetMode(gin.TestMode)
 
-	resp := &http.Response{
-		StatusCode: http.StatusFound,
-		Header:     make(http.Header),
-		Request:    req,
+	var gotPath string
+	s := &Server{
+		HLSHandler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			gotPath = r.URL.Path
+			w.Header().Set("Content-Type", "application/vnd.apple.mpegurl")
+			w.Header().Set("Location", "/cam1/index.m3u8?cookieCheck=1")
+			w.WriteHeader(http.StatusFound)
+		}),
+		Parent: test.NilLogger,
 	}
-	resp.Header.Set("Location", "/cam1/index.m3u8?cookieCheck=1")
 
-	require.NoError(t, rewriteHLSProxyResponse(resp))
-	require.Equal(t, "index.m3u8?cookieCheck=1", resp.Header.Get("Location"))
+	r := gin.New()
+	r.NoRoute(s.onRequest)
+
+	req := httptest.NewRequest(http.MethodGet, "/cam1/index.m3u8", nil)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	require.Equal(t, "/cam1/index.m3u8", gotPath)
+	require.Equal(t, http.StatusFound, w.Code)
+	require.Equal(t, "index.m3u8?cookieCheck=1", w.Header().Get("Location"))
 }
 
-func TestIsHLSProxyClientGone(t *testing.T) {
-	require.True(t, isHLSProxyClientGone(context.Canceled))
-	require.True(t, isHLSProxyClientGone(fmt.Errorf("proxy: %w", context.Canceled)))
-	require.True(t, isHLSProxyClientGone(http.ErrAbortHandler))
-	require.False(t, isHLSProxyClientGone(fmt.Errorf("connection refused")))
+func TestServeLiveRewritesFMP4Playlist(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	var gotPath string
+	s := &Server{
+		HLSHandler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			gotPath = r.URL.Path
+			w.WriteHeader(http.StatusOK)
+		}),
+		Parent: test.NilLogger,
+	}
+
+	r := gin.New()
+	r.NoRoute(s.onRequest)
+
+	req := httptest.NewRequest(http.MethodGet, "/cam1/index.fmp4.m3u8", nil)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	require.Equal(t, "/cam1/index.m3u8", gotPath)
+	require.Equal(t, http.StatusOK, w.Code)
+}
+
+func TestServeLiveWithoutHandler(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	s := &Server{Parent: test.NilLogger}
+	r := gin.New()
+	r.NoRoute(s.onRequest)
+
+	req := httptest.NewRequest(http.MethodGet, "/cam1/index.m3u8", nil)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+	require.Equal(t, http.StatusBadGateway, w.Code)
 }

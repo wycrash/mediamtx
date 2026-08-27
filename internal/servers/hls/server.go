@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
 	"reflect"
 	"sort"
 	"sync"
@@ -198,6 +199,15 @@ func (s *Server) Initialize() error {
 	}
 
 	return nil
+}
+
+// ServeHTTP serves a live HLS request with the same muxer used by the HLS listener.
+func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if s == nil || s.httpServer == nil {
+		http.Error(w, "HLS backend unavailable", http.StatusBadGateway)
+		return
+	}
+	s.httpServer.ServeHTTP(w, r)
 }
 
 // Log implements logger.Writer.

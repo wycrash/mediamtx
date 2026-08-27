@@ -836,7 +836,7 @@ func (conf *Conf) Validate(l logger.Writer) error {
 			return fmt.Errorf("'compatAPIAddress' must be set when compatAPI is enabled")
 		}
 		if !conf.HLS {
-			return fmt.Errorf("'hls' must be enabled when compatAPI is enabled (live requests are proxied to HLS)")
+			return fmt.Errorf("'hls' must be enabled when compatAPI is enabled (live playlists are served by the HLS muxer)")
 		}
 	}
 

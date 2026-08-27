@@ -679,7 +679,7 @@ func (p *Core) createResources(initial bool) error {
 			ReadTimeout:       p.conf.ReadTimeout,
 			WriteTimeout:      p.conf.WriteTimeout,
 			TimeOffsetMinutes: p.conf.CompatAPITimeOffsetMinutes,
-			HLSAddress:        p.conf.HLSAddress,
+			HLSHandler:        p.hlsServer,
 			PathConfs:         p.conf.Paths,
 			PathManager:       p.pathManager,
 			AuthManager:       p.authManager,
@@ -1033,7 +1033,6 @@ func (p *Core) closeResources(newConf *conf.Conf, calledByAPI bool) {
 		!slices.Equal(newConf.CompatAPIAllowOrigins, p.conf.CompatAPIAllowOrigins) ||
 		!reflect.DeepEqual(newConf.CompatAPITrustedProxies, p.conf.CompatAPITrustedProxies) ||
 		newConf.CompatAPITimeOffsetMinutes != p.conf.CompatAPITimeOffsetMinutes ||
-		newConf.HLSAddress != p.conf.HLSAddress ||
 		newConf.ReadTimeout != p.conf.ReadTimeout ||
 		newConf.WriteTimeout != p.conf.WriteTimeout ||
 		newConf.DumpPackets != p.conf.DumpPackets ||

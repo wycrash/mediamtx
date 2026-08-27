@@ -1,49 +1,60 @@
 package compatapi
 
 import (
-	"context"
-	"errors"
-	"net"
 	"net/http"
 	"net/url"
 	"path"
 	"strings"
 )
 
-func isHLSProxyClientGone(err error) bool {
-	if err == nil {
-		return false
-	}
-	if errors.Is(err, context.Canceled) ||
-		errors.Is(err, http.ErrAbortHandler) ||
-		errors.Is(err, net.ErrClosed) {
-		return true
-	}
-	s := err.Error()
-	return strings.Contains(s, "context canceled") ||
-		strings.Contains(s, "request canceled")
+type relativeLocationWriter struct {
+	http.ResponseWriter
+	reqPath     string
+	wroteHeader bool
 }
 
-// rewriteHLSProxyResponse rewrites absolute-path Location headers to relative ones.
+func (w *relativeLocationWriter) WriteHeader(status int) {
+	if w.wroteHeader {
+		return
+	}
+	w.wroteHeader = true
+	rewriteLocationHeader(w.Header(), w.reqPath)
+	w.ResponseWriter.WriteHeader(status)
+}
+
+func (w *relativeLocationWriter) Write(p []byte) (int, error) {
+	if !w.wroteHeader {
+		w.WriteHeader(http.StatusOK)
+	}
+	return w.ResponseWriter.Write(p)
+}
+
+func (w *relativeLocationWriter) Flush() {
+	if !w.wroteHeader {
+		w.WriteHeader(http.StatusOK)
+	}
+	if f, ok := w.ResponseWriter.(http.Flusher); ok {
+		f.Flush()
+	}
+}
+
+func (w *relativeLocationWriter) Unwrap() http.ResponseWriter {
+	return w.ResponseWriter
+}
+
+func rewriteLocationHeader(h http.Header, reqPath string) {
+	loc := h.Get("Location")
+	if loc == "" {
+		return
+	}
+	rel := locationToRelative(reqPath, loc)
+	if rel != loc {
+		h.Set("Location", rel)
+	}
+}
+
 // Absolute paths like /cam1/index.m3u8 break front proxies that mount MediaMTX under a prefix
 // (e.g. /dvr1/<token>/cam1/...), because the browser resolves them from the host root.
-func rewriteHLSProxyResponse(resp *http.Response) error {
-	if resp == nil || resp.Request == nil {
-		return nil
-	}
-
-	loc := resp.Header.Get("Location")
-	if loc == "" {
-		return nil
-	}
-
-	rel := locationToRelative(resp.Request.URL.Path, loc)
-	if rel != loc {
-		resp.Header.Set("Location", rel)
-	}
-	return nil
-}
-
 func locationToRelative(reqPath, location string) string {
 	u, err := url.Parse(location)
 	if err != nil {

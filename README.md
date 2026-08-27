@@ -45,3 +45,6 @@ _MediaMTX_ is a ready-to-use and zero-dependency live media server and media pro
 - [Run hooks](https://mediamtx.org/docs/features/hooks) (external commands) when clients connect, disconnect, read or publish streams
 - Compatible with Linux, Windows and macOS, does not require any dependency or interpreter, it's a single executable
 - ...and many [others](https://mediamtx.org/docs/kickoff/introduction).
+
+MTX_VERSION=v1.15.0 go generate ./...
+CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build .

@@ -5,8 +5,6 @@ import (
 	"fmt"
 	"net"
 	"net/http"
-	"net/http/httputil"
-	"net/url"
 	"runtime"
 	"sync"
 	"time"
@@ -41,16 +39,14 @@ type Server struct {
 	ReadTimeout       conf.Duration
 	WriteTimeout      conf.Duration
 	TimeOffsetMinutes int
-	HLSAddress        string
 	PathConfs         map[string]*conf.Path
 	PathManager       pathAPIGetter
 	AuthManager       serverAuthManager
+	HLSHandler        http.Handler
 	Parent            logger.Writer
 
 	Index         *Index
 	httpServer    *httpp.Server
-	hlsProxy      *httputil.ReverseProxy
-	hlsProxyURL   *url.URL
 	mutex         sync.RWMutex
 	sessionsMu    sync.RWMutex
 	sessions      map[uuid.UUID]*session
@@ -60,25 +56,6 @@ type Server struct {
 
 // Initialize initializes Server.
 func (s *Server) Initialize() error {
-	hlsHost, err := loopbackHost(s.HLSAddress)
-	if err != nil {
-		return fmt.Errorf("invalid HLS address for compat proxy: %w", err)
-	}
-	s.hlsProxyURL = &url.URL{
-		Scheme: "http",
-		Host:   hlsHost,
-	}
-	s.hlsProxy = httputil.NewSingleHostReverseProxy(s.hlsProxyURL)
-	s.hlsProxy.ErrorHandler = func(w http.ResponseWriter, _ *http.Request, e error) {
-		if isHLSProxyClientGone(e) {
-			s.Log(logger.Debug, "HLS proxy: client disconnected (%v)", e)
-			return
-		}
-		s.Log(logger.Error, "HLS proxy error: %v", e)
-		http.Error(w, "HLS backend unavailable", http.StatusBadGateway)
-	}
-	s.hlsProxy.ModifyResponse = rewriteHLSProxyResponse
-
 	s.Index = NewIndex()
 	before := readProcMem()
 	s.Log(logger.Info, "loading recording index (%s)", before.logLine())
@@ -112,7 +89,7 @@ func (s *Server) Initialize() error {
 		Handler:           router,
 		Parent:            s,
 	}
-	err = s.httpServer.Initialize()
+	err := s.httpServer.Initialize()
 	if err != nil {
 		return err
 	}
@@ -161,15 +138,20 @@ func (s *Server) Close() {
 	s.httpServer.Close()
 }
 
-func (s *Server) startBackgroundReconcile(_ IndexLoadStats) {
+func (s *Server) startBackgroundReconcile(loadSt IndexLoadStats) {
 	if s.Index == nil {
 		return
 	}
 	s.reconcileStop = make(chan struct{})
 	s.reconcileDone = make(chan struct{})
+	// Deleted/missing snapshot: rebuild now, no throttle, no 5-minute wait.
+	// A healthy index is only edge-checked on the scheduler.
+	missing := loadSt.DiskPaths < loadSt.Paths
 	go func() {
 		defer close(s.reconcileDone)
-		s.runBackgroundReconcile()
+		if missing {
+			s.runBackgroundReconcile(false)
+		}
 		ticker := time.NewTicker(5 * time.Minute)
 		defer ticker.Stop()
 		for {
@@ -177,18 +159,22 @@ func (s *Server) startBackgroundReconcile(_ IndexLoadStats) {
 			case <-s.reconcileStop:
 				return
 			case <-ticker.C:
-				s.runBackgroundReconcile()
+				s.runBackgroundReconcile(true)
 			}
 		}
 	}()
 }
 
-func (s *Server) runBackgroundReconcile() {
-	s.Log(logger.Info, "recording index background update started")
+func (s *Server) runBackgroundReconcile(slow bool) {
+	kind := "background update"
+	if !slow {
+		kind = "full rebuild"
+	}
+	s.Log(logger.Info, "recording index %s started", kind)
 	t0 := time.Now()
-	st := s.Index.ReconcileAll(s.reconcileStop, true)
-	s.Log(logger.Info, "recording index background update done (built=%d added=%d removed=%d inspected=%d) in %s",
-		st.Built, st.Added, st.Removed, st.Inspected, time.Since(t0))
+	st := s.Index.ReconcileAll(s.reconcileStop, slow)
+	s.Log(logger.Info, "recording index %s done (built=%d added=%d removed=%d inspected=%d) in %s",
+		kind, st.Built, st.Added, st.Removed, st.Inspected, time.Since(t0))
 }
 
 func (s *Server) stopBackgroundReconcile() {
@@ -320,22 +306,4 @@ func (s *Server) doAuth(ctx *gin.Context, pathName string) bool {
 	}
 
 	return true
-}
-
-func loopbackHost(addr string) (string, error) {
-	if addr == "" {
-		return "", fmt.Errorf("empty address")
-	}
-	host, port, err := net.SplitHostPort(addr)
-	if err != nil {
-		// address may be ":8888"
-		host, port, err = net.SplitHostPort("0.0.0.0" + addr)
-		if err != nil {
-			return "", err
-		}
-	}
-	if host == "" || host == "0.0.0.0" || host == "::" {
-		host = "127.0.0.1"
-	}
-	return net.JoinHostPort(host, port), nil
 }

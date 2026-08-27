@@ -95,7 +95,7 @@ func (idx *Index) ReloadPathConfs(pathConfs map[string]*conf.Path) {
 
 // LoadFromDisk loads snapshot+journal if present. It never walks recordings:
 // the HTTP API can start immediately. A missing or broken index is rebuilt
-// later by ReconcileAll.
+// immediately by ReconcileAll without I/O throttling.
 func (idx *Index) LoadFromDisk(pathConfs map[string]*conf.Path) IndexLoadStats {
 	var st IndexLoadStats
 	idx.mutex.Lock()
@@ -221,8 +221,9 @@ func (idx *Index) loadPath(pathConf *conf.Path, pathName string) pathLoadStats {
 }
 
 // ReconcileAll repairs the index without re-reading known files.
-// An empty/broken path is listed once in the background (filenames only).
-// A healthy index is checked only at the old and new edges of the archive.
+// An empty/broken path (deleted or missing snapshot) is listed immediately
+// from filenames, without the slow I/O scheduler. A healthy index is checked
+// only at the old and new edges of the archive.
 func (idx *Index) ReconcileAll(stop <-chan struct{}, slow bool) IndexLoadStats {
 	var st IndexLoadStats
 	if stopped(stop) {
@@ -251,7 +252,7 @@ func (idx *Index) ReconcileAll(stop <-chan struct{}, slow bool) IndexLoadStats {
 		idx.mutex.RUnlock()
 		var ins, add, del int
 		if empty {
-			ins, add, del = idx.buildPathFromDir(pathName, pathConf, stop, slow)
+			ins, add, del = idx.buildPathFromDir(pathName, pathConf, stop, false)
 			if add > 0 {
 				st.Built++
 			}

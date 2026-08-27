@@ -256,7 +256,7 @@ playbackTrustedProxies: []
 # - GET /{path}/preview.mp4                   (latest segment, same 1-frame MP4)
 # - GET /{path}/preview.jpeg                  (same as preview.mp4; native, no JPEG decode)
 # - other /{path}/... requests are proxied to the HLS server (live) 
-compatAPI: false
+compatAPI: true
 # Address of the TCP/HTTP listener.
 compatAPIAddress: :8877
 # Allowed CORS origins.
@@ -583,7 +583,7 @@ pathDefaults:
   # Default path settings -> Record
 
   # Record streams to disk.
-  record: false
+  record: true
   # Path of recording segments.
   # Extension is added automatically.
   # Available variables are %path (path name), %Y %m %d (year, month, day),

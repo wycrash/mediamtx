@@ -117,6 +117,10 @@ func (s *httpServer) close() {
 	s.inner.Close()
 }
 
+func (s *httpServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	s.inner.Handler.ServeHTTP(w, r)
+}
+
 func (s *httpServer) middlewarePreflightRequests(ctx *gin.Context) {
 	if ctx.Request.Method == http.MethodOptions &&
 		ctx.Request.Header.Get("Access-Control-Request-Method") != "" {

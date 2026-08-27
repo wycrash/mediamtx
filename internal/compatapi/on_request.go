@@ -152,7 +152,7 @@ func (s *Server) onRequest(ctx *gin.Context) {
 	case strings.HasSuffix(pa, ".ts") || strings.HasSuffix(pa, ".mp4"):
 		dir, fname := path.Dir(pa), path.Base(pa)
 		if dir == "." {
-			s.proxyLive(ctx)
+			s.serveLive(ctx)
 			return
 		}
 		served, err := s.tryServeArchiveSegment(ctx, dir, fname)
@@ -161,11 +161,11 @@ func (s *Server) onRequest(ctx *gin.Context) {
 			return
 		}
 		if !served {
-			s.proxyLive(ctx)
+			s.serveLive(ctx)
 		}
 
 	default:
-		s.proxyLive(ctx)
+		s.serveLive(ctx)
 	}
 }
 
@@ -419,6 +419,7 @@ func (s *Server) tryServeArchiveSegment(ctx *gin.Context, pathName string, fileN
 // serveFMP4ArchivePart serves a recording fMP4 as a whole resource.
 // hls=init / hls=media split the file so VLC does not need EXT-X-BYTERANGE.
 // hls=media&sn=&td= rewrites mfhd/tfdt into a continuous timeline for VLC seek.
+// Tracks Chrome MSE cannot play (LPCM/ipcm) are stripped from HLS parts.
 func serveFMP4ArchivePart(ctx *gin.Context, fpath string) error {
 	part := ctx.Query("hls")
 	switch part {
@@ -453,9 +454,23 @@ func serveFMP4ArchivePart(ctx *gin.Context, fpath string) error {
 	}
 
 	name := path.Base(fpath)
+	_, _, init, initErr := readFMP4Init(fpath)
+	var drop map[uint32]struct{}
+	if initErr == nil {
+		drop = hlsDropTrackIDs(init)
+	}
+
 	if part == "init" {
-		section := io.NewSectionReader(f, 0, initSize)
 		name = strings.TrimSuffix(name, ".mp4") + "_init.mp4"
+		initBytes, err2 := marshalFMP4InitForHLS(init, drop)
+		if err2 != nil {
+			return err2
+		}
+		if initBytes != nil {
+			http.ServeContent(ctx.Writer, ctx.Request, name, fi.ModTime(), bytes.NewReader(initBytes))
+			return nil
+		}
+		section := io.NewSectionReader(f, 0, initSize)
 		http.ServeContent(ctx.Writer, ctx.Request, name, fi.ModTime(), section)
 		return nil
 	}
@@ -463,18 +478,6 @@ func serveFMP4ArchivePart(ctx *gin.Context, fpath string) error {
 	mediaLen := size - initSize
 	snStr := ctx.Query("sn")
 	tdStr := ctx.Query("td")
-	if (snStr == "" && tdStr == "") || (snStr == "0" && tdStr == "0") {
-		section := io.NewSectionReader(f, initSize, mediaLen)
-		name = strings.TrimSuffix(name, ".mp4") + "_media.mp4"
-		http.ServeContent(ctx.Writer, ctx.Request, name, fi.ModTime(), section)
-		return nil
-	}
-
-	media := make([]byte, mediaLen)
-	if _, err = f.ReadAt(media, initSize); err != nil {
-		return err
-	}
-
 	var startSeq uint64
 	var tdMs int64
 	if snStr != "" {
@@ -492,24 +495,37 @@ func serveFMP4ArchivePart(ctx *gin.Context, fpath string) error {
 		}
 	}
 
-	var trackOffsets map[uint32]uint64
-	if tdMs > 0 {
-		_, _, init, initErr := readFMP4Init(fpath)
-		if initErr != nil {
-			return initErr
-		}
-		trackOffsets = trackDecodeOffsets(init.Tracks, time.Duration(tdMs)*time.Millisecond)
+	name = strings.TrimSuffix(name, ".mp4") + "_media.mp4"
+	needRewrite := len(drop) > 0 || startSeq != 0 || tdMs != 0
+	if !needRewrite {
+		section := io.NewSectionReader(f, initSize, mediaLen)
+		http.ServeContent(ctx.Writer, ctx.Request, name, fi.ModTime(), section)
+		return nil
 	}
-	if err = patchFMP4MediaTimeline(media, uint32(startSeq), trackOffsets); err != nil {
+
+	media := make([]byte, mediaLen)
+	if _, err = f.ReadAt(media, initSize); err != nil {
 		return err
 	}
 
-	name = strings.TrimSuffix(name, ".mp4") + "_media.mp4"
+	var trackOffsets map[uint32]uint64
+	if tdMs > 0 && init != nil {
+		trackOffsets = trackDecodeOffsets(init.Tracks, time.Duration(tdMs)*time.Millisecond)
+	}
+	if len(drop) > 0 {
+		media, err = rewriteFMP4MediaForHLS(media, drop, uint32(startSeq), trackOffsets)
+	} else {
+		err = patchFMP4MediaTimeline(media, uint32(startSeq), trackOffsets)
+	}
+	if err != nil {
+		return err
+	}
+
 	http.ServeContent(ctx.Writer, ctx.Request, name, fi.ModTime(), bytes.NewReader(media))
 	return nil
 }
 
-func (s *Server) proxyLive(ctx *gin.Context) {
+func (s *Server) serveLive(ctx *gin.Context) {
 	req := ctx.Request.Clone(ctx.Request.Context())
 
 	// Flussonic / nginx rewrite: index.fmp4.m3u8 -> index.m3u8
@@ -518,8 +534,14 @@ func (s *Server) proxyLive(ctx *gin.Context) {
 		req.URL.RawPath = ""
 	}
 
-	s.Log(logger.Debug, "[conn %v] proxy live %s -> %s%s",
-		httpp.RemoteAddr(ctx), ctx.Request.URL.Path, s.hlsProxyURL.Host, req.URL.Path)
+	if s.HLSHandler == nil {
+		http.Error(ctx.Writer, "HLS backend unavailable", http.StatusBadGateway)
+		return
+	}
 
-	s.hlsProxy.ServeHTTP(ctx.Writer, req)
+	s.Log(logger.Debug, "[conn %v] serve live %s", httpp.RemoteAddr(ctx), req.URL.Path)
+	s.HLSHandler.ServeHTTP(&relativeLocationWriter{
+		ResponseWriter: ctx.Writer,
+		reqPath:        ctx.Request.URL.Path,
+	}, req)
 }

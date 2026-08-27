@@ -146,6 +146,48 @@ func TestIndexLoadFromDiskUsesSnapshot(t *testing.T) {
 	idx2.ClosePersist()
 }
 
+func TestIndexRebuildsWhenSnapshotDeleted(t *testing.T) {
+	dir := t.TempDir()
+	cam := filepath.Join(dir, "cam1")
+	a := filepath.Join(cam, "2020-01-01_00-00-00-000000.mp4")
+	b := filepath.Join(cam, "2020-01-01_00-00-05-000000.mp4")
+	writeNamedFMP4(t, a, 2)
+	writeNamedFMP4(t, b, 3)
+
+	pathConf := &conf.Path{
+		Name:                  "cam1",
+		RecordPath:            filepath.Join(dir, "%path/%Y-%m-%d_%H-%M-%S-%f"),
+		RecordFormat:          conf.RecordFormatFMP4,
+		RecordSegmentDuration: conf.Duration(5 * time.Second),
+	}
+	confs := map[string]*conf.Path{"cam1": pathConf}
+
+	idx := NewIndex()
+	require.Equal(t, 0, idx.LoadFromDisk(confs).DiskPaths)
+	require.Equal(t, 2, idx.ReconcileAll(nil, false).Segments)
+	idx.ClosePersist()
+
+	snap, journal, _ := dvrIndexPaths(pathConf, "cam1")
+	require.NoError(t, os.Remove(snap))
+	require.NoError(t, os.Remove(journal))
+
+	idx = NewIndex()
+	st := idx.LoadFromDisk(confs)
+	require.Equal(t, 0, st.Segments)
+	require.Equal(t, 0, st.DiskPaths)
+	require.True(t, st.DiskPaths < st.Paths)
+
+	// slow=true is what the periodic scheduler uses; a deleted index must
+	// still rebuild immediately without that throttle.
+	st = idx.ReconcileAll(nil, true)
+	require.Equal(t, 2, st.Segments)
+	require.Equal(t, 1, st.Built)
+	require.Equal(t, 1, st.Inspected)
+	out := idx.SegmentsInWindow("cam1", time.Date(2020, 1, 1, 0, 0, 0, 0, time.Local), time.Minute)
+	require.Len(t, out, 2)
+	idx.ClosePersist()
+}
+
 func TestIndexLoadFromDiskReconcilesDeletedAndNew(t *testing.T) {
 	dir := t.TempDir()
 	cam := filepath.Join(dir, "cam1")
