@@ -52,6 +52,7 @@ type Server struct {
 	sessions      map[uuid.UUID]*session
 	reconcileStop chan struct{}
 	reconcileDone chan struct{}
+	reconcileKick chan struct{}
 }
 
 // Initialize initializes Server.
@@ -144,6 +145,7 @@ func (s *Server) startBackgroundReconcile(loadSt IndexLoadStats) {
 	}
 	s.reconcileStop = make(chan struct{})
 	s.reconcileDone = make(chan struct{})
+	s.reconcileKick = make(chan struct{}, 1)
 	// Deleted/missing snapshot: rebuild now, no throttle, no 5-minute wait.
 	// A healthy index is only edge-checked on the scheduler.
 	missing := loadSt.DiskPaths < loadSt.Paths
@@ -158,11 +160,23 @@ func (s *Server) startBackgroundReconcile(loadSt IndexLoadStats) {
 			select {
 			case <-s.reconcileStop:
 				return
+			case <-s.reconcileKick:
+				s.runBackgroundReconcile(false)
 			case <-ticker.C:
 				s.runBackgroundReconcile(true)
 			}
 		}
 	}()
+}
+
+func (s *Server) kickBackgroundReconcile() {
+	if s.reconcileKick == nil {
+		return
+	}
+	select {
+	case s.reconcileKick <- struct{}{}:
+	default:
+	}
 }
 
 func (s *Server) runBackgroundReconcile(slow bool) {
@@ -237,8 +251,17 @@ func (s *Server) ReloadPathConfs(pathConfs map[string]*conf.Path) {
 	s.mutex.Lock()
 	s.PathConfs = pathConfs
 	s.mutex.Unlock()
-	if s.Index != nil {
-		s.Index.ReloadPathConfs(pathConfs)
+	if s.Index == nil {
+		return
+	}
+	st := s.Index.ReloadPathConfs(pathConfs)
+	if st.Paths == 0 {
+		return
+	}
+	s.Log(logger.Info, "recording index loaded for new paths (%d segments, %d new paths, %d from disk)",
+		st.Segments, st.Paths, st.DiskPaths)
+	if st.DiskPaths < st.Paths {
+		s.kickBackgroundReconcile()
 	}
 }
 

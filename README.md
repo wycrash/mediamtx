@@ -48,3 +48,6 @@ _MediaMTX_ is a ready-to-use and zero-dependency live media server and media pro
 
 MTX_VERSION=v1.15.0 go generate ./...
 CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build .
+
+MTX_VERSION=v1.15.0 go generate ./...
+CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build .

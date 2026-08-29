@@ -49,6 +49,11 @@ type pathIndex struct {
 	internedTracks  [][]*fmp4.InitTrack
 	persist         *dvrPersist
 	commonPath      string
+	// complete is true after a trusted snapshot load or a finished directory
+	// rebuild. Live OnSegmentComplete inserts must not set this: otherwise a
+	// path that is still missing its on-disk index looks non-empty and only
+	// the new edge is indexed while other cameras are still rebuilding.
+	complete bool
 }
 
 // IndexLoadStats is returned by Index.LoadFromDisk.
@@ -78,11 +83,16 @@ func NewIndex() *Index {
 }
 
 // ReloadPathConfs updates path configuration used for decoding / durations.
-func (idx *Index) ReloadPathConfs(pathConfs map[string]*conf.Path) {
+// Paths that were not previously indexed load their on-disk snapshot+journal,
+// the same way LoadFromDisk does at startup. Otherwise an API-added path whose
+// recordings already exist on disk stays empty until the next reconcile.
+func (idx *Index) ReloadPathConfs(pathConfs map[string]*conf.Path) IndexLoadStats {
+	var st IndexLoadStats
 	idx.mutex.Lock()
-	defer idx.mutex.Unlock()
 	idx.pathConfs = pathConfs
+	known := make(map[string]struct{}, len(idx.paths))
 	for name, pe := range idx.paths {
+		known[name] = struct{}{}
 		if pathConf, _, err := conf.FindPathConf(pathConfs, name); err == nil {
 			dur := time.Duration(pathConf.RecordSegmentDuration)
 			if pe.segmentDuration != dur {
@@ -91,6 +101,25 @@ func (idx *Index) ReloadPathConfs(pathConfs map[string]*conf.Path) {
 			}
 		}
 	}
+	idx.mutex.Unlock()
+
+	before := idx.SegmentCount()
+	for _, pathName := range recordingPathNames(pathConfs) {
+		if _, ok := known[pathName]; ok {
+			continue
+		}
+		pathConf, _, err := conf.FindPathConf(pathConfs, pathName)
+		if err != nil {
+			continue
+		}
+		st.Paths++
+		ps := idx.loadPath(pathConf, pathName)
+		if ps.fromDisk {
+			st.DiskPaths++
+		}
+	}
+	st.Segments = idx.SegmentCount() - before
+	return st
 }
 
 // LoadFromDisk loads snapshot+journal if present. It never walks recordings:
@@ -204,16 +233,18 @@ func (idx *Index) loadPath(pathConf *conf.Path, pathName string) pathLoadStats {
 		idx.applyJournal(pathName, common, ops)
 		st.fromDisk = true
 	} else if hasDisk && len(ops) > 0 {
+		// Journal without a trusted snapshot is a partial index (corrupt or
+		// never compacted). Keep the segments for immediate API use, but do
+		// not mark the path complete: ReconcileAll must still walk history.
 		idx.mutex.Lock()
 		pe := idx.ensurePathLocked(pathName)
 		pe.persist = p
 		pe.commonPath = common
 		idx.mutex.Unlock()
 		idx.applyJournal(pathName, common, ops)
-		st.fromDisk = true
 	}
 
-	if st.fromDisk {
+	if st.fromDisk || (hasDisk && len(ops) > 0) {
 		p.journalOps = len(ops)
 		_ = p.openJournalAppend()
 	}
@@ -221,9 +252,9 @@ func (idx *Index) loadPath(pathConf *conf.Path, pathName string) pathLoadStats {
 }
 
 // ReconcileAll repairs the index without re-reading known files.
-// An empty/broken path (deleted or missing snapshot) is listed immediately
-// from filenames, without the slow I/O scheduler. A healthy index is checked
-// only at the old and new edges of the archive.
+// A path with no trusted snapshot (deleted, corrupt, or never built) is listed
+// from filenames immediately, even if live recording already inserted a few
+// new segments. A healthy index is checked only at the archive edges.
 func (idx *Index) ReconcileAll(stop <-chan struct{}, slow bool) IndexLoadStats {
 	var st IndexLoadStats
 	if stopped(stop) {
@@ -246,12 +277,8 @@ func (idx *Index) ReconcileAll(stop <-chan struct{}, slow bool) IndexLoadStats {
 		if err != nil {
 			continue
 		}
-		idx.mutex.RLock()
-		pe := idx.paths[pathName]
-		empty := pe == nil || len(pe.segments) == 0
-		idx.mutex.RUnlock()
 		var ins, add, del int
-		if empty {
+		if idx.pathNeedsRebuild(pathName) {
 			ins, add, del = idx.buildPathFromDir(pathName, pathConf, stop, false)
 			if add > 0 {
 				st.Built++
@@ -268,12 +295,20 @@ func (idx *Index) ReconcileAll(stop <-chan struct{}, slow bool) IndexLoadStats {
 	return st
 }
 
+func (idx *Index) pathNeedsRebuild(pathName string) bool {
+	idx.mutex.RLock()
+	defer idx.mutex.RUnlock()
+	pe := idx.paths[pathName]
+	return pe == nil || !pe.complete || len(pe.segments) == 0
+}
+
 func (idx *Index) applySnapshot(pathName string, common string, p *dvrPersist, snap dvrSnapshot) {
 	idx.mutex.Lock()
 	defer idx.mutex.Unlock()
 	pe := idx.ensurePathLocked(pathName)
 	pe.persist = p
 	pe.commonPath = common
+	pe.complete = true
 	pe.internedTracks = append([][]*fmp4.InitTrack(nil), snap.Codecs...)
 	for i := range pe.internedTracks {
 		p.savedCodec[uint8(i+1)] = struct{}{}
@@ -352,8 +387,15 @@ func (idx *Index) buildPathFromDir(
 
 	idx.mutex.Lock()
 	pe := idx.ensurePathLocked(pathName)
-	pe.persist = p
-	pe.commonPath = common
+	if pe.persist == nil {
+		pe.persist = p
+		pe.commonPath = common
+	} else {
+		p = pe.persist
+		if pe.commonPath == "" {
+			pe.commonPath = common
+		}
+	}
 	idx.mutex.Unlock()
 	_ = p.openJournalAppend()
 
@@ -391,6 +433,7 @@ func (idx *Index) buildPathFromDir(
 		}
 		return nil
 	})
+	finished := walkErr == nil || os.IsNotExist(walkErr)
 	if walkErr != nil && !errors.Is(walkErr, errReconcileStop) && !os.IsNotExist(walkErr) {
 		return 0, added, 0
 	}
@@ -411,6 +454,13 @@ func (idx *Index) buildPathFromDir(
 	}
 	idx.fillMetaFromGaps(pathName, nominal, part)
 	idx.compactPath(pathName)
+	if finished {
+		idx.mutex.Lock()
+		if pe := idx.paths[pathName]; pe != nil {
+			pe.complete = true
+		}
+		idx.mutex.Unlock()
+	}
 	return inspected, added, 0
 }
 

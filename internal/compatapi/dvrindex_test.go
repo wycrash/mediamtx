@@ -224,6 +224,7 @@ func TestIndexLoadFromDiskReconcilesDeletedAndNew(t *testing.T) {
 	require.True(t, ok, "startup trusts snapshot and does not drop deleted files yet")
 
 	st = idx.ReconcileAll(nil, false)
+	require.Equal(t, 0, st.Built)
 	require.Equal(t, 0, st.Inspected)
 	require.Equal(t, 1, st.Removed)
 	require.Equal(t, 1, st.Added)
@@ -283,6 +284,143 @@ func TestIndexPersistUpsertReplayedFromJournal(t *testing.T) {
 	require.Len(t, out, 2)
 	require.Equal(t, uint32(3), out[1].fmp4.MoofCount)
 	idx2.ClosePersist()
+}
+
+func TestIndexReloadPathConfsLoadsSnapshot(t *testing.T) {
+	dir := t.TempDir()
+	cam := filepath.Join(dir, "cam1")
+	a := filepath.Join(cam, "2020-01-01_00-00-00-000000.mp4")
+	b := filepath.Join(cam, "2020-01-01_00-00-05-000000.mp4")
+	writeNamedFMP4(t, a, 2)
+	writeNamedFMP4(t, b, 3)
+
+	pathConf := &conf.Path{
+		Name:                  "cam1",
+		RecordPath:            filepath.Join(dir, "%path/%Y-%m-%d_%H-%M-%S-%f"),
+		RecordFormat:          conf.RecordFormatFMP4,
+		RecordSegmentDuration: conf.Duration(5 * time.Second),
+	}
+	confs := map[string]*conf.Path{"cam1": pathConf}
+
+	idx1 := NewIndex()
+	require.Equal(t, 0, idx1.LoadFromDisk(confs).Segments)
+	require.Equal(t, 2, idx1.ReconcileAll(nil, false).Segments)
+	idx1.ClosePersist()
+
+	idx2 := NewIndex()
+	require.Equal(t, 0, idx2.LoadFromDisk(nil).Segments)
+	st := idx2.ReloadPathConfs(confs)
+	require.Equal(t, 1, st.Paths)
+	require.Equal(t, 1, st.DiskPaths)
+	require.Equal(t, 2, st.Segments)
+	out := idx2.SegmentsInWindow("cam1", time.Date(2020, 1, 1, 0, 0, 0, 0, time.Local), time.Minute)
+	require.Len(t, out, 2)
+	require.True(t, out[0].fmp4.Ready)
+	require.True(t, out[1].fmp4.Ready)
+	require.Equal(t, uint32(3), out[1].fmp4.MoofCount)
+	idx2.ClosePersist()
+}
+
+func datedFMP4(t *testing.T, dir, pathName string, start time.Time, moofs int) string {
+	t.Helper()
+	name := start.Format("2006-01-02_15-04-05") + "-000000.mp4"
+	fpath := filepath.Join(dir, pathName, name)
+	writeNamedFMP4(t, fpath, moofs)
+	return fpath
+}
+
+func testRecordPathConf(dir, name string) *conf.Path {
+	return &conf.Path{
+		Name:                  name,
+		RecordPath:            filepath.Join(dir, "%path/%Y-%m-%d_%H-%M-%S-%f"),
+		RecordFormat:          conf.RecordFormatFMP4,
+		RecordSegmentDuration: conf.Duration(5 * time.Second),
+		RecordPartDuration:    conf.Duration(time.Second),
+	}
+}
+
+func TestIndexRebuildsOtherPathsWhenLiveSegmentsArriveFirst(t *testing.T) {
+	dir := t.TempDir()
+	hist := time.Date(2020, 1, 1, 0, 0, 0, 0, time.Local)
+	cam1a := datedFMP4(t, dir, "cam1", hist, 2)
+	cam1b := datedFMP4(t, dir, "cam1", hist.Add(5*time.Second), 2)
+	cam2a := datedFMP4(t, dir, "cam2", hist, 2)
+	cam2b := datedFMP4(t, dir, "cam2", hist.Add(5*time.Second), 3)
+
+	confs := map[string]*conf.Path{
+		"cam1": testRecordPathConf(dir, "cam1"),
+		"cam2": testRecordPathConf(dir, "cam2"),
+	}
+
+	idx := NewIndex()
+	st := idx.LoadFromDisk(confs)
+	require.Equal(t, 0, st.Segments)
+	require.Equal(t, 0, st.DiskPaths)
+	require.True(t, st.DiskPaths < st.Paths)
+
+	// While cam1 is still being rebuilt, live recording already indexed cam2.
+	liveStart := time.Now().Truncate(time.Second)
+	live := datedFMP4(t, dir, "cam2", liveStart, 2)
+	idx.CompleteSegment("cam2", live, 5*time.Second)
+	_, ok := idx.FindByName("cam2", filepath.Base(live))
+	require.True(t, ok)
+	require.Len(t, idx.SegmentsInWindow("cam2", liveStart.Add(-time.Minute), 2*time.Minute), 1)
+
+	st = idx.ReconcileAll(nil, false)
+	require.Equal(t, 2, st.Built)
+
+	out1 := idx.SegmentsInWindow("cam1", hist, time.Minute)
+	require.Len(t, out1, 2)
+	require.Equal(t, filepath.Base(cam1a), out1[0].Name)
+	require.Equal(t, filepath.Base(cam1b), out1[1].Name)
+
+	out2 := idx.SegmentsInWindow("cam2", hist, time.Minute)
+	require.Len(t, out2, 2, "historical cam2 segments must be rebuilt, not only the live edge")
+	require.Equal(t, filepath.Base(cam2a), out2[0].Name)
+	require.Equal(t, filepath.Base(cam2b), out2[1].Name)
+	_, ok = idx.FindByName("cam2", filepath.Base(live))
+	require.True(t, ok)
+	idx.ClosePersist()
+}
+
+func TestIndexRebuildsWhenSnapshotCorruptAndLiveSegmentsExist(t *testing.T) {
+	dir := t.TempDir()
+	hist := time.Date(2020, 1, 1, 0, 0, 0, 0, time.Local)
+	datedFMP4(t, dir, "cam1", hist, 2)
+	datedFMP4(t, dir, "cam1", hist.Add(5*time.Second), 2)
+	datedFMP4(t, dir, "cam2", hist, 2)
+	datedFMP4(t, dir, "cam2", hist.Add(5*time.Second), 2)
+
+	confs := map[string]*conf.Path{
+		"cam1": testRecordPathConf(dir, "cam1"),
+		"cam2": testRecordPathConf(dir, "cam2"),
+	}
+
+	idx := NewIndex()
+	require.Equal(t, 0, idx.LoadFromDisk(confs).DiskPaths)
+	require.Equal(t, 4, idx.ReconcileAll(nil, false).Segments)
+	idx.ClosePersist()
+
+	snap1, _, _ := dvrIndexPaths(confs["cam1"], "cam1")
+	snap2, _, _ := dvrIndexPaths(confs["cam2"], "cam2")
+	require.NoError(t, os.WriteFile(snap1, []byte("not-an-index"), 0o644))
+	require.NoError(t, os.WriteFile(snap2, []byte("not-an-index"), 0o644))
+
+	idx = NewIndex()
+	st := idx.LoadFromDisk(confs)
+	require.Equal(t, 0, st.DiskPaths)
+	require.True(t, st.DiskPaths < st.Paths)
+
+	live := datedFMP4(t, dir, "cam2", time.Now().Truncate(time.Second), 2)
+	idx.CompleteSegment("cam2", live, 5*time.Second)
+
+	st = idx.ReconcileAll(nil, true)
+	require.Equal(t, 2, st.Built)
+	require.Len(t, idx.SegmentsInWindow("cam1", hist, time.Minute), 2)
+	require.Len(t, idx.SegmentsInWindow("cam2", hist, time.Minute), 2)
+	_, ok := idx.FindByName("cam2", filepath.Base(live))
+	require.True(t, ok)
+	idx.ClosePersist()
 }
 
 func TestIndexCompleteSegmentUsesRecorderDuration(t *testing.T) {
