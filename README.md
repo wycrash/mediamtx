@@ -51,3 +51,5 @@ CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build .
 
 MTX_VERSION=v1.15.0 go generate ./...
 CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build .
+
+go test ./internal/compatapi/ -count=1 -run 'TestDvr|TestIndex'

@@ -22,14 +22,17 @@ import (
 const (
 	dvrSnapMagic     = "MTXI"
 	dvrJournalMagic  = "MTXJ"
+	dvrMetaMagic     = "MTXM"
 	dvrIndexVersion  = uint16(1)
 	dvrSnapName      = ".mtx-dvr-index"
+	dvrMetaName      = ".mtx-dvr-meta"
 	dvrJournalSuffix = ".journal"
 	dvrOpUpsert      = uint8(1)
 	dvrOpDelete      = uint8(2)
 	dvrOpCodec       = uint8(3)
 	dvrSegReady      = uint8(1)
 	dvrCompactEvery  = 512
+	dayCacheLimit    = 8
 )
 
 var errDvrIndexBadMagic = errors.New("dvr index: bad magic")
@@ -92,20 +95,95 @@ func sanitizeIndexName(pathName string) string {
 	return b.String()
 }
 
-func dvrIndexPaths(pathConf *conf.Path, pathName string) (snapPath, journalPath string, common string) {
+type dvrDayInfo struct {
+	Date string
+	NSeg uint32
+}
+
+type dvrMeta struct {
+	Hash   uint64
+	Ranges []RecordingRange
+	Days   []dvrDayInfo
+}
+
+type dvrPathLayout struct {
+	common  string
+	meta    string
+	dateDir bool
+	fileTag string
+}
+
+func recordPathHasDateDir(recordPath string) bool {
+	for _, part := range strings.Split(filepath.ToSlash(recordPath), "/") {
+		if part == "%Y-%m-%d" {
+			return true
+		}
+	}
+	return false
+}
+
+func dvrDayDate(t time.Time) string {
+	if t.IsZero() {
+		return ""
+	}
+	return t.In(time.Local).Format("2006-01-02")
+}
+
+func isDayDirName(name string) bool {
+	if len(name) != 10 || name[4] != '-' || name[7] != '-' {
+		return false
+	}
+	_, err := time.ParseInLocation("2006-01-02", name, time.Local)
+	return err == nil
+}
+
+func makeDvrLayout(pathConf *conf.Path, pathName string) dvrPathLayout {
 	recordPath := recordstore.PathAddExtension(
 		strings.ReplaceAll(pathConf.RecordPath, "%path", pathName),
 		pathConf.RecordFormat,
 	)
 	recordPath, _ = filepath.Abs(recordPath)
-	common = recordstore.CommonPath(recordPath)
-	base := dvrSnapName
-	if filepath.Base(common) != pathName && filepath.Base(common) != filepath.Base(pathName) {
-		base += "." + sanitizeIndexName(pathName)
+	common := recordstore.CommonPath(recordPath)
+	l := dvrPathLayout{
+		common:  common,
+		dateDir: recordPathHasDateDir(pathConf.RecordPath),
 	}
-	snapPath = filepath.Join(common, base)
-	journalPath = snapPath + dvrJournalSuffix
-	return snapPath, journalPath, common
+	if filepath.Base(common) != pathName && filepath.Base(common) != filepath.Base(pathName) {
+		l.fileTag = "." + sanitizeIndexName(pathName)
+	}
+	l.meta = filepath.Join(common, dvrMetaName+l.fileTag)
+	return l
+}
+
+func (l dvrPathLayout) daySnap(day string) string {
+	if l.dateDir {
+		return filepath.Join(l.common, day, dvrSnapName+l.fileTag)
+	}
+	return filepath.Join(l.common, dvrSnapName+l.fileTag+"."+day)
+}
+
+func (l dvrPathLayout) dayJournal(day string) string {
+	return l.daySnap(day) + dvrJournalSuffix
+}
+
+func (l dvrPathLayout) removeLegacyMonolith() {
+	if l.common == "" {
+		return
+	}
+	base := filepath.Join(l.common, dvrSnapName+l.fileTag)
+	_ = os.Remove(base)
+	_ = os.Remove(base + dvrJournalSuffix)
+}
+
+func isDvrIndexFile(name string) bool {
+	return name == dvrSnapName || strings.HasPrefix(name, dvrSnapName) ||
+		name == dvrMetaName || strings.HasPrefix(name, dvrMetaName)
+}
+
+func dvrIndexPaths(pathConf *conf.Path, pathName string) (snapPath, journalPath string, common string) {
+	l := makeDvrLayout(pathConf, pathName)
+	day := dvrDayDate(time.Now())
+	return l.daySnap(day), l.dayJournal(day), l.common
 }
 
 func dvrRelPath(common, fpath string) string {
@@ -322,6 +400,103 @@ func writeSnapshotFile(path string, s dvrSnapshot) error {
 	}
 	tmp := path + ".tmp"
 	if err = os.WriteFile(tmp, data, 0o644); err != nil {
+		return err
+	}
+	return os.Rename(tmp, path)
+}
+
+func encodeMeta(m dvrMeta) []byte {
+	out := append([]byte(dvrMetaMagic), 0, 0)
+	binary.LittleEndian.PutUint16(out[4:], dvrIndexVersion)
+	out = appendU64(out, m.Hash)
+	out = appendU32(out, uint32(len(m.Ranges)))
+	for _, r := range m.Ranges {
+		out = appendU64(out, uint64(r.From))
+		out = appendU64(out, uint64(r.Duration))
+	}
+	out = appendU32(out, uint32(len(m.Days)))
+	for _, d := range m.Days {
+		date := d.Date
+		if len(date) > 10 {
+			date = date[:10]
+		}
+		for len(date) < 10 {
+			date += " "
+		}
+		out = append(out, date...)
+		out = appendU32(out, d.NSeg)
+	}
+	sum := crc32.ChecksumIEEE(out)
+	return appendU32(out, sum)
+}
+
+func decodeMeta(data []byte) (dvrMeta, error) {
+	if len(data) < 4+2+8+4+4+4 {
+		return dvrMeta{}, io.ErrUnexpectedEOF
+	}
+	body, crcBytes := data[:len(data)-4], data[len(data)-4:]
+	if crc32.ChecksumIEEE(body) != binary.LittleEndian.Uint32(crcBytes) {
+		return dvrMeta{}, errors.New("dvr meta: crc mismatch")
+	}
+	if string(body[:4]) != dvrMetaMagic {
+		return dvrMeta{}, errDvrIndexBadMagic
+	}
+	n := 4
+	ver := binary.LittleEndian.Uint16(body[n : n+2])
+	n += 2
+	if ver != dvrIndexVersion {
+		return dvrMeta{}, errors.New("dvr meta: unsupported version")
+	}
+	var m dvrMeta
+	m.Hash = binary.LittleEndian.Uint64(body[n : n+8])
+	n += 8
+	nRange := int(binary.LittleEndian.Uint32(body[n : n+4]))
+	n += 4
+	if n+nRange*16 > len(body) {
+		return dvrMeta{}, io.ErrUnexpectedEOF
+	}
+	m.Ranges = make([]RecordingRange, 0, nRange)
+	for i := 0; i < nRange; i++ {
+		from := int64(binary.LittleEndian.Uint64(body[n : n+8]))
+		n += 8
+		dur := int64(binary.LittleEndian.Uint64(body[n : n+8]))
+		n += 8
+		m.Ranges = append(m.Ranges, RecordingRange{From: from, Duration: dur})
+	}
+	if n+4 > len(body) {
+		return dvrMeta{}, io.ErrUnexpectedEOF
+	}
+	nDays := int(binary.LittleEndian.Uint32(body[n : n+4]))
+	n += 4
+	if n+nDays*14 > len(body) {
+		return dvrMeta{}, io.ErrUnexpectedEOF
+	}
+	m.Days = make([]dvrDayInfo, 0, nDays)
+	for i := 0; i < nDays; i++ {
+		date := strings.TrimSpace(string(body[n : n+10]))
+		n += 10
+		nseg := binary.LittleEndian.Uint32(body[n : n+4])
+		n += 4
+		m.Days = append(m.Days, dvrDayInfo{Date: date, NSeg: nseg})
+	}
+	return m, nil
+}
+
+func readMetaFile(path string) (dvrMeta, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return dvrMeta{}, err
+	}
+	return decodeMeta(data)
+}
+
+func writeMetaFile(path string, m dvrMeta) error {
+	data := encodeMeta(m)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return err
+	}
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, data, 0o644); err != nil {
 		return err
 	}
 	return os.Rename(tmp, path)
@@ -547,11 +722,24 @@ func (p *dvrPersist) writeOp(op dvrJournalOp) error {
 }
 
 func newDvrPersist(pathConf *conf.Path, pathName string) *dvrPersist {
-	snap, journal, _ := dvrIndexPaths(pathConf, pathName)
 	return &dvrPersist{
-		hash:        dvrIndexHash(pathConf, pathName),
-		snapPath:    snap,
-		journalPath: journal,
-		savedCodec:  make(map[uint8]struct{}),
+		hash:       dvrIndexHash(pathConf, pathName),
+		savedCodec: make(map[uint8]struct{}),
 	}
+}
+
+func (p *dvrPersist) bindDay(l dvrPathLayout, day string) {
+	if p == nil || day == "" {
+		return
+	}
+	nextSnap := l.daySnap(day)
+	if p.snapPath == nextSnap && p.ready {
+		return
+	}
+	p.closeJournal()
+	p.snapPath = nextSnap
+	p.journalPath = l.dayJournal(day)
+	p.ready = false
+	p.journalOps = 0
+	p.savedCodec = make(map[uint8]struct{})
 }

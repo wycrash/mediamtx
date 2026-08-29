@@ -49,7 +49,11 @@ type pathIndex struct {
 	internedTracks  [][]*fmp4.InitTrack
 	persist         *dvrPersist
 	commonPath      string
-	// complete is true after a trusted snapshot load or a finished directory
+	layout          dvrPathLayout
+	days            []dvrDayInfo
+	openDay         string
+	pinnedDays      map[string]struct{}
+	// complete is true after a trusted meta load or a finished directory
 	// rebuild. Live OnSegmentComplete inserts must not set this: otherwise a
 	// path that is still missing its on-disk index looks non-empty and only
 	// the new edge is indexed while other cameras are still rebuilding.
@@ -73,12 +77,15 @@ type Index struct {
 	paths     map[string]*pathIndex
 	pathConfs map[string]*conf.Path
 	persistOK bool
+	dayCache  map[dayCacheKey]*loadedDay
+	dayLRU    []dayCacheKey
 }
 
 // NewIndex allocates an Index.
 func NewIndex() *Index {
 	return &Index{
-		paths: make(map[string]*pathIndex),
+		paths:    make(map[string]*pathIndex),
+		dayCache: make(map[dayCacheKey]*loadedDay),
 	}
 }
 
@@ -188,16 +195,10 @@ func regexpPathNamesFromDirs(pathConf *conf.Path) map[string]struct{} {
 	hasPathVar := strings.Contains(pathConf.RecordPath, "%path")
 	for _, e := range entries {
 		name := e.Name()
-		if strings.HasPrefix(name, dvrSnapName) {
-			if name == dvrSnapName || strings.HasSuffix(name, dvrJournalSuffix) {
-				continue
-			}
-			if strings.HasPrefix(name, dvrSnapName+".") {
-				pname := strings.TrimPrefix(name, dvrSnapName+".")
-				if pathConf.Regexp != nil && pathConf.Regexp.MatchString(pname) {
-					ret[pname] = struct{}{}
-				}
-			}
+		if strings.HasPrefix(name, dvrSnapName) || strings.HasPrefix(name, dvrMetaName) {
+			continue
+		}
+		if isDayDirName(name) {
 			continue
 		}
 		if hasPathVar && e.IsDir() {
@@ -218,36 +219,74 @@ type pathLoadStats struct {
 
 func (idx *Index) loadPath(pathConf *conf.Path, pathName string) pathLoadStats {
 	var st pathLoadStats
-	p := newDvrPersist(pathConf, pathName)
-	_, _, common := dvrIndexPaths(pathConf, pathName)
-	snap, snapErr := readSnapshotFile(p.snapPath)
-	if snapErr != nil || snap.Hash != p.hash {
-		snap = dvrSnapshot{}
-		snapErr = errDvrIndexBadMagic
-	}
-	ops, _ := readJournalFile(p.journalPath, p.hash)
-	hasDisk := snapErr == nil || len(ops) > 0
+	layout := makeDvrLayout(pathConf, pathName)
+	layout.removeLegacyMonolith()
 
-	if hasDisk && snapErr == nil {
-		idx.applySnapshot(pathName, common, p, snap)
-		idx.applyJournal(pathName, common, ops)
-		st.fromDisk = true
-	} else if hasDisk && len(ops) > 0 {
-		// Journal without a trusted snapshot is a partial index (corrupt or
-		// never compacted). Keep the segments for immediate API use, but do
-		// not mark the path complete: ReconcileAll must still walk history.
+	p := newDvrPersist(pathConf, pathName)
+	meta, metaErr := readMetaFile(layout.meta)
+	if metaErr != nil || meta.Hash != p.hash {
 		idx.mutex.Lock()
 		pe := idx.ensurePathLocked(pathName)
+		pe.layout = layout
+		pe.commonPath = layout.common
 		pe.persist = p
-		pe.commonPath = common
 		idx.mutex.Unlock()
-		idx.applyJournal(pathName, common, ops)
+		return st
 	}
 
-	if st.fromDisk || (hasDisk && len(ops) > 0) {
-		p.journalOps = len(ops)
-		_ = p.openJournalAppend()
+	idx.mutex.Lock()
+	pe := idx.ensurePathLocked(pathName)
+	pe.layout = layout
+	pe.commonPath = layout.common
+	pe.persist = p
+	pe.ranges = append([]RecordingRange(nil), meta.Ranges...)
+	pe.rangesOK = true
+	pe.days = append([]dvrDayInfo(nil), meta.Days...)
+	pe.complete = true
+	pe.pinnedDays = make(map[string]struct{})
+	last := pe.lastDay()
+	idx.mutex.Unlock()
+
+	today := dvrDayDate(time.Now())
+	hotStart := time.Now().Add(-reconcileEdgeWindow)
+	for _, d := range meta.Days {
+		if d.Date == today || d.Date == last || dayOverlapsWindow(d.Date, hotStart, time.Now().Add(time.Second)) {
+			idx.pinDay(pathName, d.Date)
+		}
 	}
+	if today != "" {
+		hasToday := false
+		for _, d := range meta.Days {
+			if d.Date == today {
+				hasToday = true
+				break
+			}
+		}
+		if hasToday {
+			idx.bindPersist(pathName, today)
+			ops, _ := readJournalFile(layout.dayJournal(today), p.hash)
+			if len(ops) > 0 {
+				idx.applyJournal(pathName, layout.common, ops)
+				idx.mutex.Lock()
+				if pe := idx.paths[pathName]; pe != nil && pe.persist != nil {
+					pe.persist.journalOps = len(ops)
+				}
+				idx.mutex.Unlock()
+			}
+		}
+	}
+	idx.mutex.Lock()
+	if pe := idx.paths[pathName]; pe != nil {
+		counts := make(map[string]int)
+		for _, s := range pe.segments {
+			counts[dvrDayDate(s.Start)]++
+		}
+		for day, n := range counts {
+			pe.setDayNSeg(day, n)
+		}
+	}
+	idx.mutex.Unlock()
+	st.fromDisk = true
 	return st
 }
 
@@ -299,25 +338,7 @@ func (idx *Index) pathNeedsRebuild(pathName string) bool {
 	idx.mutex.RLock()
 	defer idx.mutex.RUnlock()
 	pe := idx.paths[pathName]
-	return pe == nil || !pe.complete || len(pe.segments) == 0
-}
-
-func (idx *Index) applySnapshot(pathName string, common string, p *dvrPersist, snap dvrSnapshot) {
-	idx.mutex.Lock()
-	defer idx.mutex.Unlock()
-	pe := idx.ensurePathLocked(pathName)
-	pe.persist = p
-	pe.commonPath = common
-	pe.complete = true
-	pe.internedTracks = append([][]*fmp4.InitTrack(nil), snap.Codecs...)
-	for i := range pe.internedTracks {
-		p.savedCodec[uint8(i+1)] = struct{}{}
-	}
-	for _, rec := range snap.Segs {
-		fpath := dvrAbsPath(common, rec.Rel)
-		idx.addLocked(pe, fpath, rec.Start)
-		idx.applySegMetaLocked(pe, fpath, rec)
-	}
+	return pe == nil || !pe.complete
 }
 
 func (idx *Index) applyJournal(pathName, common string, ops []dvrJournalOp) {
@@ -374,35 +395,94 @@ func (idx *Index) buildPathFromDir(
 	stop <-chan struct{},
 	slow bool,
 ) (inspected, added, removed int) {
-	p := newDvrPersist(pathConf, pathName)
-	_, _, common := dvrIndexPaths(pathConf, pathName)
-	if common == "" {
+	layout := makeDvrLayout(pathConf, pathName)
+	if layout.common == "" {
 		return 0, 0, 0
 	}
+	layout.removeLegacyMonolith()
 	recordPath := recordstore.PathAddExtension(
 		strings.ReplaceAll(pathConf.RecordPath, "%path", pathName),
 		pathConf.RecordFormat,
 	)
 	recordPath, _ = filepath.Abs(recordPath)
+	nominal := time.Duration(pathConf.RecordSegmentDuration)
+	part := time.Duration(pathConf.RecordPartDuration)
 
 	idx.mutex.Lock()
 	pe := idx.ensurePathLocked(pathName)
 	if pe.persist == nil {
-		pe.persist = p
-		pe.commonPath = common
-	} else {
-		p = pe.persist
-		if pe.commonPath == "" {
-			pe.commonPath = common
-		}
+		pe.persist = newDvrPersist(pathConf, pathName)
 	}
+	pe.layout = layout
+	pe.commonPath = layout.common
+	pe.days = nil
+	pe.ranges = nil
+	pe.rangesOK = false
+	pe.complete = false
+	hash := pe.persist.hash
 	idx.mutex.Unlock()
-	_ = p.openJournalAppend()
 
+	type recFile struct {
+		fpath string
+		start time.Time
+	}
+	var curDay string
+	var cur []recFile
 	nWalk := 0
-	var newest string
-	var newestStart time.Time
-	walkErr := filepath.WalkDir(common, func(fpath string, info fs.DirEntry, err error) error {
+
+	flush := func(day string, files []recFile) int {
+		if day == "" || len(files) == 0 {
+			return 0
+		}
+		sort.Slice(files, func(i, j int) bool { return files[i].start.Before(files[j].start) })
+		segs := make([]*IndexedSegment, 0, len(files))
+		var codecs [][]*fmp4.InitTrack
+		newest := files[len(files)-1].fpath
+		var tracks []*fmp4.InitTrack
+		var inspectedMeta fmp4SegMeta
+		if pathConf.RecordFormat == conf.RecordFormatFMP4 && newest != "" {
+			if meta, err := inspectFMP4Segment(newest); err == nil && meta.Ready {
+				tracks = internTracksInto(&codecs, meta.Tracks)
+				inspectedMeta = meta
+				inspected++
+			}
+		}
+		for _, f := range files {
+			seg := &IndexedSegment{Fpath: f.fpath, Start: f.start, Name: filepath.Base(f.fpath)}
+			segs = append(segs, seg)
+		}
+		if inspectedMeta.Ready {
+			last := segs[len(segs)-1]
+			last.fmp4 = inspectedMeta
+			last.fmp4.Tracks = tracks
+		}
+		fillSegsMeta(segs, tracks, nominal, part)
+		if len(tracks) > 0 {
+			for _, seg := range segs {
+				if len(seg.fmp4.Tracks) == 0 {
+					seg.fmp4.Tracks = tracks
+				}
+			}
+		}
+		snap := snapshotFromSegs(hash, layout.common, segs, codecs)
+		_ = writeSnapshotFile(layout.daySnap(day), snap)
+		idx.mutex.Lock()
+		pe := idx.paths[pathName]
+		if pe != nil {
+			pe.setDayNSeg(day, len(snap.Segs))
+			for _, seg := range segs {
+				dur := seg.fmp4.Duration
+				if dur <= 0 {
+					dur = nominal
+				}
+				pe.appendSegRange(seg.Start, dur)
+			}
+		}
+		idx.mutex.Unlock()
+		return len(files)
+	}
+
+	walkErr := filepath.WalkDir(layout.common, func(fpath string, info fs.DirEntry, err error) error {
 		if err != nil {
 			if os.IsNotExist(err) {
 				return nil
@@ -418,46 +498,76 @@ func (idx *Index) buildPathFromDir(
 				return errReconcileStop
 			}
 		}
-		if info.IsDir() || strings.HasPrefix(info.Name(), dvrSnapName) {
+		if info.IsDir() || isDvrIndexFile(info.Name()) {
 			return nil
 		}
 		var pa recordstore.Path
 		if !pa.Decode(recordPath, fpath) {
 			return nil
 		}
-		idx.Add(pathName, fpath, pa.Start)
-		added++
-		if newestStart.IsZero() || pa.Start.After(newestStart) {
-			newestStart = pa.Start
-			newest = fpath
+		day := dvrDayDate(pa.Start)
+		if curDay != "" && day != curDay {
+			added += flush(curDay, cur)
+			cur = cur[:0]
 		}
+		curDay = day
+		cur = append(cur, recFile{fpath: fpath, start: pa.Start})
 		return nil
 	})
 	finished := walkErr == nil || os.IsNotExist(walkErr)
 	if walkErr != nil && !errors.Is(walkErr, errReconcileStop) && !os.IsNotExist(walkErr) {
-		return 0, added, 0
+		return inspected, added, 0
+	}
+	if curDay != "" {
+		added += flush(curDay, cur)
 	}
 	if added == 0 {
-		return 0, 0, 0
+		return inspected, 0, 0
 	}
 
-	nominal := time.Duration(pathConf.RecordSegmentDuration)
-	part := time.Duration(pathConf.RecordPartDuration)
-	if pathConf.RecordFormat == conf.RecordFormatFMP4 && newest != "" && idx.internedTracksOf(pathName) == nil {
-		if meta, err := inspectFMP4Segment(newest); err == nil && meta.Ready {
-			idx.SetFMP4Meta(pathName, newest, meta)
-			inspected = 1
-			if slow {
-				_ = sleepOrStop(stop, reconcileInspectPause)
+	idx.mutex.Lock()
+	last := ""
+	if pe := idx.paths[pathName]; pe != nil {
+		last = pe.lastDay()
+	}
+	idx.mutex.Unlock()
+	today := dvrDayDate(time.Now())
+	hotStart := time.Now().Add(-reconcileEdgeWindow)
+	idx.mutex.RLock()
+	var toPin []string
+	if pe := idx.paths[pathName]; pe != nil {
+		for _, d := range pe.days {
+			if d.Date == today || d.Date == last || dayOverlapsWindow(d.Date, hotStart, time.Now().Add(time.Second)) {
+				toPin = append(toPin, d.Date)
 			}
 		}
 	}
-	idx.fillMetaFromGaps(pathName, nominal, part)
-	idx.compactPath(pathName)
+	idx.mutex.RUnlock()
+	for _, day := range toPin {
+		idx.pinDay(pathName, day)
+	}
+	if today != "" {
+		hasToday := false
+		idx.mutex.RLock()
+		if pe := idx.paths[pathName]; pe != nil {
+			for _, d := range pe.days {
+				if d.Date == today {
+					hasToday = true
+					break
+				}
+			}
+		}
+		idx.mutex.RUnlock()
+		if hasToday {
+			idx.bindPersist(pathName, today)
+		}
+	}
+	idx.writeMeta(pathName)
 	if finished {
 		idx.mutex.Lock()
 		if pe := idx.paths[pathName]; pe != nil {
 			pe.complete = true
+			pe.rangesOK = true
 		}
 		idx.mutex.Unlock()
 	}
@@ -472,7 +582,11 @@ func (idx *Index) reconcilePathEdges(
 ) (inspected, added, removed int) {
 	idx.mutex.Lock()
 	pe := idx.paths[pathName]
-	if pe == nil || len(pe.segments) == 0 {
+	if pe == nil {
+		idx.mutex.Unlock()
+		return 0, 0, 0
+	}
+	if !pe.complete && len(pe.segments) == 0 {
 		idx.mutex.Unlock()
 		return 0, 0, 0
 	}
@@ -496,6 +610,7 @@ func (idx *Index) reconcilePathEdges(
 	added += n
 	inspected += ins
 	removed += drop
+	idx.evictStalePinned(pathName)
 	idx.compactPathIfDirty(pathName, added > 0 || inspected > 0 || removed > 0)
 	return inspected, added, removed
 }
@@ -506,12 +621,29 @@ func (idx *Index) pruneExpired(pathName string, deleteAfter time.Duration) int {
 	}
 	cutoff := time.Now().Add(-deleteAfter)
 	idx.mutex.Lock()
-	defer idx.mutex.Unlock()
 	pe := idx.paths[pathName]
 	if pe == nil {
+		idx.mutex.Unlock()
 		return 0
 	}
 	removed := 0
+	var dropDays []string
+	for len(pe.days) > 0 {
+		d := pe.days[0]
+		t, err := time.ParseInLocation("2006-01-02", d.Date, time.Local)
+		if err != nil {
+			break
+		}
+		if t.Add(24 * time.Hour).After(cutoff) {
+			break
+		}
+		dropDays = append(dropDays, d.Date)
+		removed += int(d.NSeg)
+		pe.days = pe.days[1:]
+	}
+	pe.ranges = trimRangesBefore(pe.ranges, cutoff)
+	pe.rangesOK = true
+	layout := pe.layout
 	for len(pe.segments) > 0 {
 		seg := pe.segments[0]
 		if !seg.Start.Before(cutoff) {
@@ -520,6 +652,20 @@ func (idx *Index) pruneExpired(pathName string, deleteAfter time.Duration) int {
 		idx.persistDeleteLocked(pe, seg.Fpath)
 		idx.removeRelLocked(pe, dvrRelPath(pe.commonPath, seg.Fpath))
 		removed++
+	}
+	idx.mutex.Unlock()
+	for _, day := range dropDays {
+		_ = os.Remove(layout.daySnap(day))
+		_ = os.Remove(layout.dayJournal(day))
+		if layout.dateDir {
+			_ = os.Remove(filepath.Join(layout.common, day))
+		}
+		idx.mutex.Lock()
+		if pe := idx.paths[pathName]; pe != nil {
+			idx.unpinDayLocked(pe, day)
+			delete(idx.dayCache, dayCacheKey{path: pathName, day: day})
+		}
+		idx.mutex.Unlock()
 	}
 	return removed
 }
@@ -851,6 +997,12 @@ func (idx *Index) SegmentCount() int {
 	defer idx.mutex.RUnlock()
 	n := 0
 	for _, pe := range idx.paths {
+		if pe.complete && len(pe.days) > 0 {
+			for _, d := range pe.days {
+				n += int(d.NSeg)
+			}
+			continue
+		}
 		n += len(pe.segments)
 	}
 	return n
@@ -973,60 +1125,9 @@ func (idx *Index) removeRelLocked(pe *pathIndex, rel string) {
 	fmp4InitSizeCache.Delete(seg.Fpath)
 }
 
-func (idx *Index) snapshotFromPathLocked(pe *pathIndex) dvrSnapshot {
-	var s dvrSnapshot
-	if pe.persist != nil {
-		s.Hash = pe.persist.hash
-	}
-	s.Codecs = append([][]*fmp4.InitTrack(nil), pe.internedTracks...)
-	s.Segs = make([]dvrSegRec, 0, len(pe.segments))
-	for _, seg := range pe.segments {
-		if !seg.fmp4.Ready {
-			continue
-		}
-		rel := seg.Name
-		if pe.commonPath != "" {
-			rel = dvrRelPath(pe.commonPath, seg.Fpath)
-		}
-		s.Segs = append(s.Segs, dvrSegRec{
-			Rel:      rel,
-			Start:    seg.Start,
-			Duration: seg.fmp4.Duration,
-			Moof:     seg.fmp4.MoofCount,
-			CodecID:  internCodecID(pe, seg.fmp4.Tracks),
-			Ready:    true,
-		})
-	}
-	return s
-}
-
 func (idx *Index) compactPath(pathName string) {
-	idx.mutex.Lock()
-	pe := idx.paths[pathName]
-	if pe == nil || pe.persist == nil {
-		idx.mutex.Unlock()
-		return
-	}
-	snap := idx.snapshotFromPathLocked(pe)
-	p := pe.persist
-	idx.mutex.Unlock()
-
-	err := writeSnapshotFile(p.snapPath, snap)
-
-	idx.mutex.Lock()
-	defer idx.mutex.Unlock()
-	pe = idx.paths[pathName]
-	if pe == nil || pe.persist != p {
-		return
-	}
-	if err != nil {
-		_ = p.openJournalAppend()
-		return
-	}
-	_ = p.truncateJournal()
-	for i := range pe.internedTracks {
-		p.savedCodec[uint8(i+1)] = struct{}{}
-	}
+	idx.compactOpenDay(pathName)
+	idx.writeMeta(pathName)
 }
 
 func (idx *Index) persistCodecsLocked(pe *pathIndex) {
@@ -1059,13 +1160,27 @@ func (idx *Index) PersistUpsert(pathName, fpath string) {
 	if pe == nil {
 		return
 	}
-	idx.ensurePersistLocked(pathName, pe)
-	if pe.persist == nil || !pe.persist.ready {
-		return
-	}
 	name := filepath.Base(fpath)
 	seg, ok := pe.byName[name]
 	if !ok || !seg.fmp4.Ready {
+		return
+	}
+	day := dvrDayDate(seg.Start)
+	if pe.openDay != day && pe.openDay != "" {
+		idx.mutex.Unlock()
+		idx.compactOpenDay(pathName)
+		idx.mutex.Lock()
+		pe = idx.paths[pathName]
+		if pe == nil {
+			return
+		}
+		seg, ok = pe.byName[name]
+		if !ok || !seg.fmp4.Ready {
+			return
+		}
+	}
+	idx.bindPersistLocked(pathName, pe, day)
+	if pe.persist == nil || !pe.persist.ready {
 		return
 	}
 	idx.persistCodecsLocked(pe)
@@ -1078,6 +1193,15 @@ func (idx *Index) PersistUpsert(pathName, fpath string) {
 		Ready:    true,
 	}
 	_ = pe.persist.writeOp(dvrJournalOp{Op: dvrOpUpsert, Seg: rec})
+	pe.appendSegRange(seg.Start, seg.fmp4.Duration)
+	n := 0
+	day = dvrDayDate(seg.Start)
+	for _, s := range pe.segments {
+		if dvrDayDate(s.Start) == day {
+			n++
+		}
+	}
+	pe.setDayNSeg(day, n)
 	if pe.persist.journalOps >= dvrCompactEvery {
 		idx.mutex.Unlock()
 		idx.compactPath(pathName)
@@ -1094,24 +1218,11 @@ func (idx *Index) persistDeleteLocked(pe *pathIndex, fpath string) {
 }
 
 func (idx *Index) ensurePersistLocked(pathName string, pe *pathIndex) {
-	if pe.persist != nil {
-		if !pe.persist.ready {
-			_ = pe.persist.openJournalAppend()
-		}
-		return
+	day := pe.openDay
+	if day == "" {
+		day = dvrDayDate(time.Now())
 	}
-	if idx.pathConfs == nil {
-		return
-	}
-	pathConf, _, err := conf.FindPathConf(idx.pathConfs, pathName)
-	if err != nil {
-		return
-	}
-	p := newDvrPersist(pathConf, pathName)
-	_, _, common := dvrIndexPaths(pathConf, pathName)
-	pe.persist = p
-	pe.commonPath = common
-	_ = p.openJournalAppend()
+	idx.bindPersistLocked(pathName, pe, day)
 }
 
 // ClosePersist flushes snapshots and closes journal files.
@@ -1161,7 +1272,23 @@ func (idx *Index) CompleteSegment(pathName, fpath string, duration time.Duration
 	if pathName == "" || fpath == "" {
 		return
 	}
-	idx.AddFromPath(pathName, fpath)
+	start, ok := idx.decodeStart(pathName, fpath)
+	if !ok {
+		return
+	}
+	day := dvrDayDate(start)
+	idx.mutex.RLock()
+	prev := ""
+	if pe := idx.paths[pathName]; pe != nil && pe.openDay != "" && pe.openDay != day {
+		prev = pe.openDay
+	}
+	idx.mutex.RUnlock()
+	if prev != "" {
+		idx.compactOpenDay(pathName)
+		idx.writeMeta(pathName)
+	}
+	idx.Add(pathName, fpath, start)
+	idx.bindPersist(pathName, day)
 
 	idx.mutex.RLock()
 	pathConfs := idx.pathConfs
@@ -1256,18 +1383,22 @@ func (idx *Index) Ranges(pathName string) []RecordingRange {
 	defer idx.mutex.Unlock()
 
 	pe := idx.paths[pathName]
-	if pe == nil || len(pe.segments) == 0 {
+	if pe == nil {
 		return []RecordingRange{}
 	}
-	if !pe.rangesOK {
+	if !pe.complete && len(pe.segments) == 0 {
+		return []RecordingRange{}
+	}
+	if !pe.rangesOK && len(pe.segments) > 0 {
 		pe.ranges = buildRanges(pe.timedSegsLocked(time.Now()), pe.segmentDuration, time.Now())
 		pe.rangesOK = true
+	}
+	if len(pe.ranges) == 0 {
+		return []RecordingRange{}
 	}
 	out := make([]RecordingRange, len(pe.ranges))
 	copy(out, pe.ranges)
 
-	// Last fMP4/mpegts segment may still be open: grow the tail to now, but only
-	// if it started within one nominal segment (otherwise it is already closed).
 	if n := len(pe.segments); n > 0 && !pe.segments[n-1].fmp4.Ready {
 		last := pe.segments[n-1]
 		maxAge := pe.segmentDuration + rangeMergeTolerance(pe.segmentDuration)
@@ -1324,28 +1455,49 @@ func (idx *Index) SegmentsInWindow(pathName string, start time.Time, duration ti
 	end := start.Add(duration)
 
 	idx.mutex.RLock()
-	defer idx.mutex.RUnlock()
-
 	pe := idx.paths[pathName]
 	if pe == nil {
+		idx.mutex.RUnlock()
 		return nil
 	}
+	days := daysForWindow(pe.days, start, end)
+	liveOnly := len(days) == 0 && len(pe.segments) > 0
+	nominal := pe.segmentDuration
+	idx.mutex.RUnlock()
+	if nominal <= 0 {
+		nominal = time.Hour
+	}
 
-	i := sort.Search(len(pe.segments), func(i int) bool {
-		return !pe.segments[i].Start.Before(start)
-	})
-	if i > 0 && segmentOverlaps(pe.segments[i-1], start, end, pe.segmentDuration) {
-		i--
+	collect := func(segs []*IndexedSegment) []*IndexedSegment {
+		var out []*IndexedSegment
+		for _, s := range segs {
+			if s.Start.After(end) {
+				continue
+			}
+			inWindow := !s.Start.Before(start) && !s.Start.After(end)
+			if inWindow || segmentOverlaps(s, start, end, nominal) {
+				cp := *s
+				out = append(out, &cp)
+			}
+		}
+		return out
+	}
+
+	if liveOnly {
+		idx.mutex.RLock()
+		defer idx.mutex.RUnlock()
+		pe = idx.paths[pathName]
+		if pe == nil {
+			return nil
+		}
+		return collect(pe.segments)
 	}
 
 	var out []*IndexedSegment
-	for _, s := range pe.segments[i:] {
-		if s.Start.After(end) {
-			break
-		}
-		cp := *s
-		out = append(out, &cp)
+	for _, day := range days {
+		out = append(out, collect(idx.segsForDay(pathName, day))...)
 	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Start.Before(out[j].Start) })
 	return out
 }
 
@@ -1363,25 +1515,58 @@ func segmentOverlaps(s *IndexedSegment, start, end time.Time, nominal time.Durat
 
 // FindNearest returns the segment that best matches timestamp t:
 // the last segment with Start <= t, or the first segment after t if none.
-func (idx *Index) FindNearest(pathName string, t time.Time) (*IndexedSegment, bool) {
-	idx.mutex.RLock()
-	defer idx.mutex.RUnlock()
+func dayFromFileName(name string) (string, bool) {
+	if len(name) >= 10 && name[4] == '-' && name[7] == '-' {
+		day := name[:10]
+		if isDayDirName(day) {
+			return day, true
+		}
+	}
+	return "", false
+}
 
-	pe := idx.paths[pathName]
-	if pe == nil || len(pe.segments) == 0 {
+func (idx *Index) FindNearest(pathName string, t time.Time) (*IndexedSegment, bool) {
+	day := dvrDayDate(t)
+	segs := idx.segsForDay(pathName, day)
+	if len(segs) == 0 {
+		idx.mutex.RLock()
+		pe := idx.paths[pathName]
+		prev := ""
+		if pe != nil {
+			for _, d := range pe.days {
+				if d.Date >= day {
+					break
+				}
+				prev = d.Date
+			}
+			if len(segs) == 0 && len(pe.days) == 0 && len(pe.segments) > 0 {
+				copied := make([]*IndexedSegment, len(pe.segments))
+				for i, s := range pe.segments {
+					cp := *s
+					copied[i] = &cp
+				}
+				idx.mutex.RUnlock()
+				segs = copied
+			} else {
+				idx.mutex.RUnlock()
+			}
+		} else {
+			idx.mutex.RUnlock()
+		}
+		if prev != "" && len(segs) == 0 {
+			segs = idx.segsForDay(pathName, prev)
+		}
+	}
+	if len(segs) == 0 {
 		return nil, false
 	}
-
-	segs := pe.segments
 	i := sort.Search(len(segs), func(i int) bool {
 		return segs[i].Start.After(t)
 	})
 	if i == 0 {
-		// all segments start after t — take the first
 		seg := *segs[0]
 		return &seg, true
 	}
-	// last with Start <= t
 	seg := *segs[i-1]
 	return &seg, true
 }
@@ -1429,30 +1614,51 @@ func (idx *Index) LatestFMP4Tracks(pathName string) []*fmp4.InitTrack {
 // FindLatest returns the most recent segment for a path.
 func (idx *Index) FindLatest(pathName string) (*IndexedSegment, bool) {
 	idx.mutex.RLock()
-	defer idx.mutex.RUnlock()
-
 	pe := idx.paths[pathName]
-	if pe == nil || len(pe.segments) == 0 {
+	if pe == nil {
+		idx.mutex.RUnlock()
 		return nil, false
 	}
-	seg := *pe.segments[len(pe.segments)-1]
+	if n := len(pe.segments); n > 0 {
+		seg := *pe.segments[n-1]
+		idx.mutex.RUnlock()
+		return &seg, true
+	}
+	last := pe.lastDay()
+	idx.mutex.RUnlock()
+	if last == "" {
+		return nil, false
+	}
+	segs := idx.segsForDay(pathName, last)
+	if len(segs) == 0 {
+		return nil, false
+	}
+	seg := *segs[len(segs)-1]
 	return &seg, true
 }
 
 // FindByName returns the absolute path of a segment basename, if present.
 func (idx *Index) FindByName(pathName, fileName string) (string, bool) {
 	idx.mutex.RLock()
-	defer idx.mutex.RUnlock()
-
 	pe := idx.paths[pathName]
-	if pe == nil {
-		return "", false
+	if pe != nil {
+		if seg, ok := pe.byName[fileName]; ok {
+			fpath := seg.Fpath
+			idx.mutex.RUnlock()
+			return fpath, true
+		}
 	}
-	seg, ok := pe.byName[fileName]
+	idx.mutex.RUnlock()
+	day, ok := dayFromFileName(fileName)
 	if !ok {
 		return "", false
 	}
-	return seg.Fpath, true
+	for _, s := range idx.segsForDay(pathName, day) {
+		if s.Name == fileName {
+			return s.Fpath, true
+		}
+	}
+	return "", false
 }
 
 func (idx *Index) ensurePathLocked(pathName string) *pathIndex {
@@ -1468,6 +1674,7 @@ func (idx *Index) ensurePathLocked(pathName string) *pathIndex {
 	}
 	pe = &pathIndex{
 		byName:          make(map[string]*IndexedSegment),
+		pinnedDays:      make(map[string]struct{}),
 		segmentDuration: dur,
 	}
 	idx.paths[pathName] = pe
