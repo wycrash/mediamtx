@@ -24,15 +24,13 @@ func TestIndexMemStats(t *testing.T) {
 	idx.SetFMP4Meta("cam1", "/recordings/cam1/a.mp4", fmp4SegMeta{
 		Duration:  5 * time.Second,
 		MoofCount: 5,
-		Tracks:    tracks,
 		Ready:     true,
-	})
+	}, tracks)
 	idx.SetFMP4Meta("cam1", "/recordings/cam1/b.mp4", fmp4SegMeta{
 		Duration:  5 * time.Second,
 		MoofCount: 5,
-		Tracks:    tracks,
 		Ready:     true,
-	})
+	}, tracks)
 
 	st := idx.MemStats()
 	require.Equal(t, 2, st.Paths)
@@ -62,23 +60,20 @@ func TestIndexInternsCompatibleTracks(t *testing.T) {
 	}
 	idx.SetFMP4Meta("cam1", "/rec/a.mp4", fmp4SegMeta{
 		Duration: time.Second, Ready: true,
-		Tracks: []*fmp4.InitTrack{{ID: 1, TimeScale: 90000, Codec: h264()}},
-	})
+	}, []*fmp4.InitTrack{{ID: 1, TimeScale: 90000, Codec: h264()}})
 	idx.SetFMP4Meta("cam1", "/rec/b.mp4", fmp4SegMeta{
 		Duration: time.Second, Ready: true,
-		Tracks: []*fmp4.InitTrack{{ID: 1, TimeScale: 90000, Codec: h264()}},
-	})
+	}, []*fmp4.InitTrack{{ID: 1, TimeScale: 90000, Codec: h264()}})
 	idx.SetFMP4Meta("cam1", "/rec/c.mp4", fmp4SegMeta{
 		Duration: time.Second, Ready: true,
-		Tracks: []*fmp4.InitTrack{{ID: 1, TimeScale: 90000, Codec: &mcodecs.H264{
-			SPS: []byte{0x67, 0x64, 0x00, 0x1f}, PPS: []byte{0x68, 0xee},
-		}}},
-	})
+	}, []*fmp4.InitTrack{{ID: 1, TimeScale: 90000, Codec: &mcodecs.H264{
+		SPS: []byte{0x67, 0x64, 0x00, 0x1f}, PPS: []byte{0x68, 0xee},
+	}}})
 
 	segs := idx.SegmentsInWindow("cam1", base, time.Minute)
 	require.Len(t, segs, 3)
-	require.Same(t, segs[0].fmp4.Tracks[0], segs[1].fmp4.Tracks[0])
-	require.NotSame(t, segs[0].fmp4.Tracks[0], segs[2].fmp4.Tracks[0])
+	require.Same(t, segs[0].tracks()[0], segs[1].tracks()[0])
+	require.NotSame(t, segs[0].tracks()[0], segs[2].tracks()[0])
 
 	st := idx.MemStats()
 	require.Equal(t, 2, st.UniqueTrackPtrs)

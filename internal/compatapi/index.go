@@ -25,19 +25,89 @@ const (
 var errReconcileStop = errors.New("dvr index reconcile stopped")
 
 // fmp4SegMeta is cached fMP4 playlist metadata so m3u8 generation does not touch disk.
+// Tracks are interned on pathIndex and referenced by codecID (1-based).
 type fmp4SegMeta struct {
 	Duration  time.Duration
 	MoofCount uint32
-	Tracks    []*fmp4.InitTrack
+	codecID   uint8
 	Ready     bool
 }
 
 // IndexedSegment is a recording segment tracked in memory.
+// Rel is relative to common (or an absolute path when common is empty).
 type IndexedSegment struct {
-	Fpath string
-	Start time.Time
-	Name  string
-	fmp4  fmp4SegMeta
+	Rel    string
+	Start  time.Time
+	common string
+	fmp4   fmp4SegMeta
+	codecs *[][]*fmp4.InitTrack
+}
+
+// Name is the segment basename used in playlists and byName lookups.
+func (s *IndexedSegment) Name() string {
+	if s == nil || s.Rel == "" {
+		return ""
+	}
+	return filepath.Base(s.Rel)
+}
+
+// Fpath is the absolute file path reconstructed from the interned common prefix.
+func (s *IndexedSegment) Fpath() string {
+	if s == nil {
+		return ""
+	}
+	if s.common == "" || filepath.IsAbs(filepath.FromSlash(s.Rel)) {
+		return filepath.FromSlash(s.Rel)
+	}
+	return dvrAbsPath(s.common, s.Rel)
+}
+
+func (s *IndexedSegment) tracks() []*fmp4.InitTrack {
+	if s == nil || s.codecs == nil {
+		return nil
+	}
+	return codecTracks(*s.codecs, s.fmp4.codecID)
+}
+
+func codecTracks(codecs [][]*fmp4.InitTrack, id uint8) []*fmp4.InitTrack {
+	if id == 0 || int(id) > len(codecs) {
+		return nil
+	}
+	return codecs[id-1]
+}
+
+// segmentRelFast derives a relative path without filepath.Abs syscalls.
+func segmentRelFast(common, fpath string) string {
+	if fpath == "" {
+		return ""
+	}
+	if common == "" {
+		return filepath.ToSlash(fpath)
+	}
+	rest, ok := strings.CutPrefix(fpath, common)
+	if !ok {
+		return dvrRelPath(common, fpath)
+	}
+	rest = strings.TrimLeft(rest, `/\`)
+	if rest == "" {
+		return filepath.ToSlash(filepath.Base(fpath))
+	}
+	return filepath.ToSlash(rest)
+}
+
+func bindSeg(pe *pathIndex, fpath string, start time.Time) *IndexedSegment {
+	common := ""
+	var codecs *[][]*fmp4.InitTrack
+	if pe != nil {
+		common = pe.commonPath
+		codecs = &pe.internedTracks
+	}
+	return &IndexedSegment{
+		Rel:    segmentRelFast(common, fpath),
+		Start:  start,
+		common: common,
+		codecs: codecs,
+	}
 }
 
 type pathIndex struct {
@@ -286,6 +356,9 @@ func (idx *Index) loadPath(pathConf *conf.Path, pathName string) pathLoadStats {
 		}
 	}
 	idx.mutex.Unlock()
+	if !rangesCoverDays(meta.Ranges, meta.Days) {
+		idx.rebuildRangesFromDayFiles(pathName)
+	}
 	st.fromDisk = true
 	return st
 }
@@ -323,6 +396,9 @@ func (idx *Index) ReconcileAll(stop <-chan struct{}, slow bool) IndexLoadStats {
 				st.Built++
 			}
 		} else {
+			if idx.rangesNeedRepair(pathName) {
+				idx.rebuildRangesFromDayFiles(pathName)
+			}
 			ins, add, del = idx.reconcilePathEdges(pathName, pathConf, stop, slow)
 		}
 		st.Inspected += ins
@@ -378,14 +454,12 @@ func (idx *Index) applySegMetaLocked(pe *pathIndex, fpath string, rec dvrSegRec)
 	if !ok {
 		return
 	}
-	meta := fmp4SegMeta{Duration: rec.Duration, MoofCount: rec.Moof, Ready: rec.Ready}
-	if rec.CodecID > 0 && int(rec.CodecID) <= len(pe.internedTracks) {
-		meta.Tracks = pe.internedTracks[rec.CodecID-1]
-	}
-	if !meta.Ready && (meta.Duration > 0 || meta.MoofCount > 0 || len(meta.Tracks) > 0) {
+	meta := fmp4SegMeta{Duration: rec.Duration, MoofCount: rec.Moof, codecID: rec.CodecID, Ready: rec.Ready}
+	if !meta.Ready && (meta.Duration > 0 || meta.MoofCount > 0 || meta.codecID > 0) {
 		meta.Ready = true
 	}
 	seg.fmp4 = meta
+	seg.codecs = &pe.internedTracks
 	pe.rangesOK = false
 }
 
@@ -441,29 +515,26 @@ func (idx *Index) buildPathFromDir(
 		var tracks []*fmp4.InitTrack
 		var inspectedMeta fmp4SegMeta
 		if pathConf.RecordFormat == conf.RecordFormatFMP4 && newest != "" {
-			if meta, err := inspectFMP4Segment(newest); err == nil && meta.Ready {
-				tracks = internTracksInto(&codecs, meta.Tracks)
+			if meta, tr, err := inspectFMP4Segment(newest); err == nil && meta.Ready {
+				tracks = internTracksInto(&codecs, tr)
 				inspectedMeta = meta
 				inspected++
 			}
 		}
 		for _, f := range files {
-			seg := &IndexedSegment{Fpath: f.fpath, Start: f.start, Name: filepath.Base(f.fpath)}
+			seg := &IndexedSegment{
+				Rel:    segmentRelFast(layout.common, f.fpath),
+				Start:  f.start,
+				common: layout.common,
+			}
 			segs = append(segs, seg)
 		}
 		if inspectedMeta.Ready {
 			last := segs[len(segs)-1]
 			last.fmp4 = inspectedMeta
-			last.fmp4.Tracks = tracks
+			last.fmp4.codecID = codecIDFrom(codecs, tracks)
 		}
-		fillSegsMeta(segs, tracks, nominal, part)
-		if len(tracks) > 0 {
-			for _, seg := range segs {
-				if len(seg.fmp4.Tracks) == 0 {
-					seg.fmp4.Tracks = tracks
-				}
-			}
-		}
+		fillSegsMeta(segs, tracks, codecs, nominal, part)
 		snap := snapshotFromSegs(hash, layout.common, segs, codecs)
 		_ = writeSnapshotFile(layout.daySnap(day), snap)
 		idx.mutex.Lock()
@@ -649,8 +720,8 @@ func (idx *Index) pruneExpired(pathName string, deleteAfter time.Duration) int {
 		if !seg.Start.Before(cutoff) {
 			break
 		}
-		idx.persistDeleteLocked(pe, seg.Fpath)
-		idx.removeRelLocked(pe, dvrRelPath(pe.commonPath, seg.Fpath))
+		idx.persistDeleteLocked(pe, seg.Fpath())
+		idx.removeRelLocked(pe, seg.Rel)
 		removed++
 	}
 	idx.mutex.Unlock()
@@ -684,7 +755,7 @@ func (idx *Index) dropMissingOldEdge(pathName string, stop <-chan struct{}) int 
 			return removed
 		}
 		seg := pe.segments[0]
-		fpath := seg.Fpath
+		fpath := seg.Fpath()
 		start := seg.Start
 		idx.mutex.RUnlock()
 		if windowEnd.IsZero() {
@@ -743,7 +814,7 @@ func (idx *Index) adoptNewEdge(
 		}
 		last := pe.segments[len(pe.segments)-1]
 		lastStart := last.Start
-		lastPath := last.Fpath
+		lastPath := last.Fpath()
 		idx.mutex.RUnlock()
 		err := fileExists(lastPath)
 		if err == nil {
@@ -830,15 +901,15 @@ func (idx *Index) adoptDiskSegment(
 	meta := fmp4SegMeta{
 		Duration:  nominal,
 		MoofCount: estimateMoofCount(nominal, part, nominal),
-		Tracks:    tracks,
 		Ready:     true,
 	}
 	if pathConf.RecordFormat == conf.RecordFormatFMP4 && len(tracks) == 0 {
-		if ins, err := inspectFMP4Segment(fpath); err == nil && ins.Ready {
+		if ins, tr, err := inspectFMP4Segment(fpath); err == nil && ins.Ready {
 			meta = ins
+			tracks = tr
 		}
 	}
-	idx.SetFMP4Meta(pathName, fpath, meta)
+	idx.SetFMP4Meta(pathName, fpath, meta, tracks)
 	idx.PersistUpsert(pathName, fpath)
 	return true
 }
@@ -870,13 +941,13 @@ func (idx *Index) fillMetaFromGaps(pathName string, nominal, part time.Duration)
 		if seg.fmp4.Duration > 0 {
 			dur = seg.fmp4.Duration
 		}
-		if !seg.fmp4.Ready || seg.fmp4.Duration == 0 || (seg.fmp4.Tracks == nil && tracks != nil) {
+		if !seg.fmp4.Ready || seg.fmp4.Duration == 0 || (seg.fmp4.codecID == 0 && tracks != nil) {
 			if seg.fmp4.MoofCount == 0 {
 				seg.fmp4.MoofCount = estimateMoofCount(dur, part, nominal)
 			}
 			seg.fmp4.Duration = dur
-			if seg.fmp4.Tracks == nil {
-				seg.fmp4.Tracks = tracks
+			if seg.fmp4.codecID == 0 && tracks != nil {
+				seg.fmp4.codecID = internCodecID(pe, internTracks(pe, tracks))
 			}
 			seg.fmp4.Ready = true
 			pe.rangesOK = false
@@ -1009,7 +1080,7 @@ func (idx *Index) SegmentCount() int {
 }
 
 // SetFMP4Meta stores inspected fMP4 playlist metadata for a segment.
-func (idx *Index) SetFMP4Meta(pathName, fpath string, meta fmp4SegMeta) {
+func (idx *Index) SetFMP4Meta(pathName, fpath string, meta fmp4SegMeta, tracks ...[]*fmp4.InitTrack) {
 	if pathName == "" || fpath == "" || !meta.Ready {
 		return
 	}
@@ -1026,10 +1097,25 @@ func (idx *Index) SetFMP4Meta(pathName, fpath string, meta fmp4SegMeta) {
 	if !ok {
 		return
 	}
-	meta.Tracks = internTracks(pe, meta.Tracks)
-	seg.Fpath = fpath
+	var tr []*fmp4.InitTrack
+	if len(tracks) > 0 {
+		tr = tracks[0]
+	}
+	if interned := internTracks(pe, metaTracks(meta, tr)); len(interned) > 0 {
+		meta.codecID = internCodecID(pe, interned)
+	}
+	seg.Rel = segmentRelFast(pe.commonPath, fpath)
+	seg.common = pe.commonPath
+	seg.codecs = &pe.internedTracks
 	seg.fmp4 = meta
 	pe.rangesOK = false
+}
+
+func metaTracks(meta fmp4SegMeta, tracks []*fmp4.InitTrack) []*fmp4.InitTrack {
+	if len(tracks) > 0 {
+		return tracks
+	}
+	return codecTracks(nil, meta.codecID)
 }
 
 func internTracks(pe *pathIndex, tracks []*fmp4.InitTrack) []*fmp4.InitTrack {
@@ -1073,7 +1159,9 @@ func (idx *Index) addLocked(pe *pathIndex, fpath string, start time.Time) {
 	}
 	name := filepath.Base(fpath)
 	if existing, ok := pe.byName[name]; ok {
-		existing.Fpath = fpath
+		existing.Rel = segmentRelFast(pe.commonPath, fpath)
+		existing.common = pe.commonPath
+		existing.codecs = &pe.internedTracks
 		if !existing.Start.Equal(start) {
 			existing.Start = start
 			sort.Slice(pe.segments, func(i, j int) bool {
@@ -1084,11 +1172,7 @@ func (idx *Index) addLocked(pe *pathIndex, fpath string, start time.Time) {
 		return
 	}
 
-	seg := &IndexedSegment{
-		Fpath: fpath,
-		Start: start,
-		Name:  name,
-	}
+	seg := bindSeg(pe, fpath, start)
 	pe.byName[name] = seg
 	i := sort.Search(len(pe.segments), func(i int) bool {
 		return !pe.segments[i].Start.Before(start)
@@ -1110,7 +1194,7 @@ func (idx *Index) removeRelLocked(pe *pathIndex, rel string) {
 	}
 	if pe.commonPath != "" {
 		want := dvrAbsPath(pe.commonPath, rel)
-		if seg.Fpath != want && filepath.Base(seg.Fpath) != name {
+		if seg.Fpath() != want && seg.Name() != name {
 			return
 		}
 	}
@@ -1122,7 +1206,7 @@ func (idx *Index) removeRelLocked(pe *pathIndex, rel string) {
 		}
 	}
 	pe.rangesOK = false
-	fmp4InitSizeCache.Delete(seg.Fpath)
+	fmp4InitSizeCache.Delete(seg.Fpath())
 }
 
 func (idx *Index) compactPath(pathName string) {
@@ -1185,11 +1269,11 @@ func (idx *Index) PersistUpsert(pathName, fpath string) {
 	}
 	idx.persistCodecsLocked(pe)
 	rec := dvrSegRec{
-		Rel:      dvrRelPath(pe.commonPath, seg.Fpath),
+		Rel:      seg.Rel,
 		Start:    seg.Start,
 		Duration: seg.fmp4.Duration,
 		Moof:     seg.fmp4.MoofCount,
-		CodecID:  internCodecID(pe, seg.fmp4.Tracks),
+		CodecID:  seg.fmp4.codecID,
 		Ready:    true,
 	}
 	_ = pe.persist.writeOp(dvrJournalOp{Op: dvrOpUpsert, Seg: rec})
@@ -1310,22 +1394,22 @@ func (idx *Index) CompleteSegment(pathName, fpath string, duration time.Duration
 	meta := fmp4SegMeta{
 		Duration:  duration,
 		MoofCount: estimateMoofCount(duration, part, nominal),
-		Tracks:    tracks,
 		Ready:     duration > 0,
 	}
 	if !meta.Ready {
 		return
 	}
 	if len(tracks) == 0 {
-		if ins, ierr := inspectFMP4Segment(fpath); ierr == nil && ins.Ready {
+		if ins, tr, ierr := inspectFMP4Segment(fpath); ierr == nil && ins.Ready {
 			ins.Duration = duration
 			if ins.MoofCount == 0 {
 				ins.MoofCount = meta.MoofCount
 			}
 			meta = ins
+			tracks = tr
 		}
 	}
-	idx.SetFMP4Meta(pathName, fpath, meta)
+	idx.SetFMP4Meta(pathName, fpath, meta, tracks)
 	idx.PersistUpsert(pathName, fpath)
 }
 
@@ -1345,7 +1429,7 @@ func (idx *Index) Remove(fpath string) {
 		if !ok {
 			continue
 		}
-		if seg.Fpath != fpath && filepath.Clean(seg.Fpath) != clean {
+		if seg.Fpath() != fpath && filepath.Clean(seg.Fpath()) != clean {
 			continue
 		}
 		delete(pe.byName, name)
@@ -1389,7 +1473,7 @@ func (idx *Index) Ranges(pathName string) []RecordingRange {
 	if !pe.complete && len(pe.segments) == 0 {
 		return []RecordingRange{}
 	}
-	if !pe.rangesOK && len(pe.segments) > 0 {
+	if !pe.complete && !pe.rangesOK && len(pe.segments) > 0 {
 		pe.ranges = buildRanges(pe.timedSegsLocked(time.Now()), pe.segmentDuration, time.Now())
 		pe.rangesOK = true
 	}
@@ -1579,13 +1663,12 @@ func (idx *Index) LatestFMP4Tracks(pathName string) []*fmp4.InitTrack {
 	if pe != nil {
 		for i := len(pe.segments) - 1; i >= 0; i-- {
 			seg := pe.segments[i]
-			if len(seg.fmp4.Tracks) > 0 {
-				tracks := seg.fmp4.Tracks
+			if tr := seg.tracks(); len(tr) > 0 {
 				idx.mutex.RUnlock()
-				return tracks
+				return tr
 			}
-			if seg.Fpath != "" {
-				fpath = seg.Fpath
+			if p := seg.Fpath(); p != "" {
+				fpath = p
 				break
 			}
 		}
@@ -1604,7 +1687,8 @@ func (idx *Index) LatestFMP4Tracks(pathName string) []*fmp4.InitTrack {
 	if pe := idx.paths[pathName]; pe != nil {
 		tracks = internTracks(pe, tracks)
 		if seg, ok := pe.byName[filepath.Base(fpath)]; ok {
-			seg.fmp4.Tracks = tracks
+			seg.fmp4.codecID = internCodecID(pe, tracks)
+			seg.codecs = &pe.internedTracks
 		}
 	}
 	idx.mutex.Unlock()
@@ -1643,7 +1727,7 @@ func (idx *Index) FindByName(pathName, fileName string) (string, bool) {
 	pe := idx.paths[pathName]
 	if pe != nil {
 		if seg, ok := pe.byName[fileName]; ok {
-			fpath := seg.Fpath
+			fpath := seg.Fpath()
 			idx.mutex.RUnlock()
 			return fpath, true
 		}
@@ -1654,8 +1738,8 @@ func (idx *Index) FindByName(pathName, fileName string) (string, bool) {
 		return "", false
 	}
 	for _, s := range idx.segsForDay(pathName, day) {
-		if s.Name == fileName {
-			return s.Fpath, true
+		if s.Name() == fileName {
+			return s.Fpath(), true
 		}
 	}
 	return "", false

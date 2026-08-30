@@ -72,8 +72,12 @@ func requestPathName(rawPath string) string {
 	return dir
 }
 
+func requestIsHead(ctx *gin.Context) bool {
+	return ctx.Request.Method == http.MethodHead
+}
+
 func (s *Server) onRequest(ctx *gin.Context) {
-	if ctx.Request.Method != http.MethodGet {
+	if ctx.Request.Method != http.MethodGet && ctx.Request.Method != http.MethodHead {
 		ctx.AbortWithStatus(http.StatusMethodNotAllowed)
 		return
 	}
@@ -313,7 +317,7 @@ func (s *Server) onPreviewAt(ctx *gin.Context, pathName string, ts time.Time) {
 		return
 	}
 
-	s.servePreviewMP4(ctx, seg.Fpath)
+	s.servePreviewMP4(ctx, seg.Fpath())
 }
 
 func (s *Server) onLatestPreview(ctx *gin.Context, pathName, contentType, filename string) {
@@ -336,29 +340,28 @@ func (s *Server) onLatestPreview(ctx *gin.Context, pathName, contentType, filena
 		return
 	}
 
-	mp4, err := ExtractPreviewMP4(seg.Fpath)
-	if err != nil {
-		s.writeError(ctx, http.StatusInternalServerError, err)
-		return
-	}
-
-	ctx.Header("Content-Type", contentType)
-	ctx.Header("Content-Disposition", `inline; filename="`+filename+`"`)
-	ctx.Header("Cache-Control", "no-cache")
-	ctx.Data(http.StatusOK, contentType, mp4)
+	s.writePreview(ctx, contentType, filename, seg.Fpath())
 }
 
 func (s *Server) servePreviewMP4(ctx *gin.Context, segPath string) {
+	s.writePreview(ctx, "video/mp4", "snapshot.mp4", segPath)
+}
+
+func (s *Server) writePreview(ctx *gin.Context, contentType, filename, segPath string) {
+	ctx.Header("Content-Type", contentType)
+	ctx.Header("Content-Disposition", `inline; filename="`+filename+`"`)
+	ctx.Header("Cache-Control", "no-cache")
+	if requestIsHead(ctx) {
+		ctx.Status(http.StatusOK)
+		return
+	}
+
 	mp4, err := ExtractPreviewMP4(segPath)
 	if err != nil {
 		s.writeError(ctx, http.StatusInternalServerError, err)
 		return
 	}
-
-	ctx.Header("Content-Type", "video/mp4")
-	ctx.Header("Content-Disposition", `inline; filename="snapshot.mp4"`)
-	ctx.Header("Cache-Control", "no-cache")
-	ctx.Data(http.StatusOK, "video/mp4", mp4)
+	ctx.Data(http.StatusOK, contentType, mp4)
 }
 
 func previewCivilTime(year, month, day, hour, minute, second, offsetMinutes int) time.Time {
@@ -525,12 +528,20 @@ func serveFMP4ArchivePart(ctx *gin.Context, fpath string) error {
 	return nil
 }
 
+func rewriteLivePlaylistPath(p string) string {
+	for _, alias := range []string{"/index.fmp4.m3u8", "/video.fmp4.m3u8", "/video.m3u8"} {
+		if strings.HasSuffix(p, alias) {
+			return strings.TrimSuffix(p, alias) + "/index.m3u8"
+		}
+	}
+	return p
+}
+
 func (s *Server) serveLive(ctx *gin.Context) {
 	req := ctx.Request.Clone(ctx.Request.Context())
 
-	// Flussonic / nginx rewrite: index.fmp4.m3u8 -> index.m3u8
-	if strings.HasSuffix(req.URL.Path, "/index.fmp4.m3u8") {
-		req.URL.Path = strings.TrimSuffix(req.URL.Path, "/index.fmp4.m3u8") + "/index.m3u8"
+	if rewritten := rewriteLivePlaylistPath(req.URL.Path); rewritten != req.URL.Path {
+		req.URL.Path = rewritten
 		req.URL.RawPath = ""
 	}
 

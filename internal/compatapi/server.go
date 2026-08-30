@@ -290,7 +290,7 @@ func (s *Server) safeFindPathConf(name string) (*conf.Path, error) {
 func (s *Server) middlewarePreflightRequests(ctx *gin.Context) {
 	if ctx.Request.Method == http.MethodOptions &&
 		ctx.Request.Header.Get("Access-Control-Request-Method") != "" {
-		ctx.Header("Access-Control-Allow-Methods", "OPTIONS, GET")
+		ctx.Header("Access-Control-Allow-Methods", "OPTIONS, GET, HEAD")
 		ctx.Header("Access-Control-Allow-Headers", "Authorization, Content-Type")
 		ctx.AbortWithStatus(http.StatusNoContent)
 		return

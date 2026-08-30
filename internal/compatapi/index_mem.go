@@ -105,29 +105,28 @@ func (idx *Index) MemStats() IndexMemStats {
 		st.Segments += len(pe.segments)
 		st.InternedSets += len(pe.internedTracks)
 		for _, seg := range pe.segments {
-			st.FpathBytes += len(seg.Fpath)
-			st.NameBytes += len(seg.Name)
-			ps.FpathBytes += len(seg.Fpath)
-			ps.NameBytes += len(seg.Name)
+			st.FpathBytes += len(seg.Rel)
+			ps.FpathBytes += len(seg.Rel)
 			if seg.fmp4.Ready {
 				st.FMP4Ready++
 			}
-			if len(seg.fmp4.Tracks) == 0 {
+			tr := seg.tracks()
+			if len(tr) == 0 {
 				continue
 			}
 			st.SegsWithTracks++
 			ps.WithTracks++
-			st.TrackPtrs += len(seg.fmp4.Tracks)
-			for _, tr := range seg.fmp4.Tracks {
-				if tr == nil {
+			st.TrackPtrs += len(tr)
+			for _, t := range tr {
+				if t == nil {
 					continue
 				}
-				ptr := uintptr(unsafe.Pointer(tr))
+				ptr := uintptr(unsafe.Pointer(t))
 				if _, ok := unique[ptr]; ok {
 					continue
 				}
 				unique[ptr] = struct{}{}
-				st.CodecPayloadBytes += codecPayloadBytes(tr.Codec)
+				st.CodecPayloadBytes += codecPayloadBytes(t.Codec)
 			}
 		}
 		st.PathsDetail = append(st.PathsDetail, ps)

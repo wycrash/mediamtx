@@ -308,10 +308,10 @@ func TestFormatProgramDateTimeUTC(t *testing.T) {
 func TestGenerateArchiveM3U8IndexedMPEGTS(t *testing.T) {
 	base := time.Unix(1758456000, 0).UTC()
 	body := GenerateArchiveM3U8Indexed(conf.RecordFormatMPEGTS, []*IndexedSegment{
-		{Fpath: filepath.Join("disk", "other.ts"), Start: base, Name: "a.ts"},
-		{Fpath: filepath.Join("disk", "b.ts"), Start: base.Add(10 * time.Second), Name: "b.ts"},
-		{Fpath: filepath.Join("disk", "c.ts"), Start: base.Add(40 * time.Second), Name: "c.ts"},
-		{Fpath: filepath.Join("disk", "skip.ts"), Start: base.Add(50 * time.Second), Name: ""},
+		{Rel: "a.ts", Start: base},
+		{Rel: "b.ts", Start: base.Add(10 * time.Second)},
+		{Rel: "c.ts", Start: base.Add(40 * time.Second)},
+		{Rel: "", Start: base.Add(50 * time.Second)},
 	}, 10*time.Second, 180, time.Time{})
 	require.Contains(t, body, "#EXTINF:10.0,")
 	require.Contains(t, body, "a.ts")
@@ -325,21 +325,18 @@ func TestGenerateArchiveM3U8IndexedFMP4NoDisk(t *testing.T) {
 	base := time.Unix(1000, 0).UTC()
 	body := GenerateArchiveM3U8Indexed(conf.RecordFormatFMP4, []*IndexedSegment{
 		{
-			Fpath: "/disk/other.mp4",
+			Rel:   "from-memory.mp4",
 			Start: base,
-			Name:  "from-memory.mp4",
 			fmp4:  fmp4SegMeta{Duration: 10 * time.Second, MoofCount: 2, Ready: true},
 		},
 		{
-			Fpath: "/disk/b.mp4",
+			Rel:   "b.mp4",
 			Start: base.Add(12 * time.Second),
-			Name:  "b.mp4",
 			fmp4:  fmp4SegMeta{Duration: 10 * time.Second, MoofCount: 3, Ready: true},
 		},
 		{
-			Fpath: "/disk/skip.mp4",
+			Rel:   "",
 			Start: base.Add(22 * time.Second),
-			Name:  "",
 			fmp4:  fmp4SegMeta{Duration: 10 * time.Second, MoofCount: 1, Ready: true},
 		},
 	}, 10*time.Second, 0, time.Time{})
@@ -362,12 +359,12 @@ func TestGenerateArchiveM3U8IndexedFMP4UsesExactDuration(t *testing.T) {
 	body := GenerateArchiveM3U8Indexed(conf.RecordFormatFMP4, []*IndexedSegment{
 		{
 			Start: base,
-			Name:  "a.mp4",
+			Rel:   "a.mp4",
 			fmp4:  fmp4SegMeta{Duration: 4010 * time.Millisecond, MoofCount: 4, Ready: true},
 		},
 		{
 			Start: base.Add(4010 * time.Millisecond),
-			Name:  "b.mp4",
+			Rel:   "b.mp4",
 			fmp4:  fmp4SegMeta{Duration: 3990 * time.Millisecond, MoofCount: 4, Ready: true},
 		},
 	}, 10*time.Second, 0, time.Time{})
@@ -383,15 +380,13 @@ func TestGenerateArchiveM3U8IndexedStartOffsetAndMonotonicPDT(t *testing.T) {
 	base := time.Unix(1000, 0).UTC()
 	body := GenerateArchiveM3U8Indexed(conf.RecordFormatFMP4, []*IndexedSegment{
 		{
-			Fpath: "/missing/a.mp4",
+			Rel:   "a.mp4",
 			Start: base,
-			Name:  "a.mp4",
 			fmp4:  fmp4SegMeta{Duration: 10 * time.Second, MoofCount: 2, Ready: true},
 		},
 		{
-			Fpath: "/missing/b.mp4",
+			Rel:   "b.mp4",
 			Start: base.Add(8 * time.Second), // overlap: Start goes backwards vs EXTINF
-			Name:  "b.mp4",
 			fmp4:  fmp4SegMeta{Duration: 10 * time.Second, MoofCount: 2, Ready: true},
 		},
 	}, 10*time.Second, 0, base.Add(4*time.Second))
@@ -456,12 +451,12 @@ func TestGenerateArchiveM3U8IndexedMatchesDisk(t *testing.T) {
 	idx := NewIndex()
 	idx.Add("cam1", a, base)
 	idx.Add("cam1", b, base.Add(12*time.Second))
-	metaA, err := inspectFMP4Segment(a)
+	metaA, tracksA, err := inspectFMP4Segment(a)
 	require.NoError(t, err)
-	metaB, err := inspectFMP4Segment(b)
+	metaB, tracksB, err := inspectFMP4Segment(b)
 	require.NoError(t, err)
-	idx.SetFMP4Meta("cam1", a, metaA)
-	idx.SetFMP4Meta("cam1", b, metaB)
+	idx.SetFMP4Meta("cam1", a, metaA, tracksA)
+	idx.SetFMP4Meta("cam1", b, metaB, tracksB)
 
 	fromIndex := GenerateArchiveM3U8Indexed(
 		conf.RecordFormatFMP4,

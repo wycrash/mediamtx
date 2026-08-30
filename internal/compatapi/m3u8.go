@@ -31,10 +31,10 @@ func generateM3U8MPEGTSIndexed(
 	items := make([]*recordstore.Segment, 0, len(segs))
 	names := make([]string, 0, len(segs))
 	for _, s := range segs {
-		if s.Name == "" {
+		if s.Name() == "" {
 			continue
 		}
-		names = append(names, s.Name)
+		names = append(names, s.Name())
 		items = append(items, &recordstore.Segment{Start: s.Start})
 	}
 	return writeM3U8MPEGTS(items, names, segmentDuration, timeOffsetMinutes, windowStart)
@@ -163,7 +163,7 @@ func generateM3U8FMP4(
 ) string {
 	infos := make([]fmp4PlaylistSeg, 0, len(segments))
 	for _, seg := range segments {
-		meta, err := inspectFMP4Segment(seg.Fpath)
+		meta, tracks, err := inspectFMP4Segment(seg.Fpath)
 		if err != nil {
 			continue
 		}
@@ -175,7 +175,7 @@ func generateM3U8FMP4(
 			start:     seg.Start,
 			duration:  meta.Duration,
 			moofCount: meta.MoofCount,
-			tracks:    meta.Tracks,
+			tracks:    tracks,
 		})
 	}
 	return writeM3U8FMP4(infos, segmentDuration, timeOffsetMinutes, time.Time{})
@@ -190,7 +190,7 @@ func generateM3U8FMP4Indexed(
 	infos := make([]fmp4PlaylistSeg, 0, len(segs))
 	now := time.Now()
 	for i, seg := range segs {
-		if seg.Name == "" {
+		if seg.Name() == "" {
 			continue
 		}
 		dur := segmentDurationForPlaylist(seg, segs, i, segmentDuration, now)
@@ -198,11 +198,11 @@ func generateM3U8FMP4Indexed(
 			continue
 		}
 		infos = append(infos, fmp4PlaylistSeg{
-			name:      seg.Name,
+			name:      seg.Name(),
 			start:     seg.Start,
 			duration:  dur,
 			moofCount: seg.fmp4.MoofCount,
-			tracks:    seg.fmp4.Tracks,
+			tracks:    seg.tracks(),
 		})
 	}
 	return writeM3U8FMP4(infos, segmentDuration, timeOffsetMinutes, windowStart)

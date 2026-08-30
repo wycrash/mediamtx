@@ -54,12 +54,12 @@ func TestInspectFMP4SegmentReadsDurationAndMoofCount(t *testing.T) {
 	}).Marshal(f))
 	require.NoError(t, f.Close())
 
-	meta, err := inspectFMP4Segment(path)
+	meta, tracks, err := inspectFMP4Segment(path)
 	require.NoError(t, err)
 	require.True(t, meta.Ready)
 	require.Equal(t, uint32(2), meta.MoofCount)
 	require.Equal(t, 2*time.Second, meta.Duration)
-	require.NotEmpty(t, meta.Tracks)
+	require.NotEmpty(t, tracks)
 
 	initSize, err := fmp4InitSize(path)
 	require.NoError(t, err)

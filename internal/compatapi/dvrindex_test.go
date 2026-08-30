@@ -253,7 +253,7 @@ func TestIndexLoadFromDiskReconcilesDeletedAndNew(t *testing.T) {
 	require.Len(t, segs, 2)
 	var foundC bool
 	for _, s := range segs {
-		if s.Name == filepath.Base(c) {
+		if s.Name() == filepath.Base(c) {
 			foundC = true
 			require.True(t, s.fmp4.Ready)
 			require.Equal(t, 5*time.Second, s.fmp4.Duration)
@@ -285,9 +285,9 @@ func TestIndexPersistUpsertReplayedFromJournal(t *testing.T) {
 	writeNamedFMP4(t, b, 3)
 	start := time.Date(2020, 1, 1, 0, 0, 5, 0, time.Local)
 	idx.Add("cam1", b, start)
-	meta, err := inspectFMP4Segment(b)
+	meta, tracks, err := inspectFMP4Segment(b)
 	require.NoError(t, err)
-	idx.SetFMP4Meta("cam1", b, meta)
+	idx.SetFMP4Meta("cam1", b, meta, tracks)
 	idx.PersistUpsert("cam1", b)
 	// do not ClosePersist: snapshot still has 1 file, journal has the upsert
 
@@ -386,13 +386,13 @@ func TestIndexRebuildsOtherPathsWhenLiveSegmentsArriveFirst(t *testing.T) {
 
 	out1 := idx.SegmentsInWindow("cam1", hist, time.Minute)
 	require.Len(t, out1, 2)
-	require.Equal(t, filepath.Base(cam1a), out1[0].Name)
-	require.Equal(t, filepath.Base(cam1b), out1[1].Name)
+	require.Equal(t, filepath.Base(cam1a), out1[0].Name())
+	require.Equal(t, filepath.Base(cam1b), out1[1].Name())
 
 	out2 := idx.SegmentsInWindow("cam2", hist, time.Minute)
 	require.Len(t, out2, 2, "historical cam2 segments must be rebuilt, not only the live edge")
-	require.Equal(t, filepath.Base(cam2a), out2[0].Name)
-	require.Equal(t, filepath.Base(cam2b), out2[1].Name)
+	require.Equal(t, filepath.Base(cam2a), out2[0].Name())
+	require.Equal(t, filepath.Base(cam2b), out2[1].Name())
 	_, ok = idx.FindByName("cam2", filepath.Base(live))
 	require.True(t, ok)
 	idx.ClosePersist()
@@ -503,5 +503,41 @@ func TestIndexDateDirStoresShardInDayFolder(t *testing.T) {
 	require.Equal(t, 2, st.Segments)
 	out := idx.SegmentsInWindow("cam1", hist, time.Minute)
 	require.Len(t, out, 2)
+	idx.ClosePersist()
+}
+
+func TestIndexRangesSurviveLiveAddAndRepairFromDays(t *testing.T) {
+	dir := t.TempDir()
+	hist := time.Date(2020, 1, 1, 0, 0, 0, 0, time.Local)
+	datedFMP4(t, dir, "cam1", hist, 2)
+	datedFMP4(t, dir, "cam1", hist.Add(5*time.Second), 2)
+
+	pathConf := testRecordPathConf(dir, "cam1")
+	confs := map[string]*conf.Path{"cam1": pathConf}
+
+	idx := NewIndex()
+	require.Equal(t, 0, idx.LoadFromDisk(confs).DiskPaths)
+	require.Equal(t, 2, idx.ReconcileAll(nil, false).Segments)
+	histRanges := idx.Ranges("cam1")
+	require.NotEmpty(t, histRanges)
+	require.LessOrEqual(t, histRanges[0].From, hist.Unix())
+
+	live := datedFMP4(t, dir, "cam1", time.Now().Truncate(time.Second), 2)
+	idx.AddFromPath("cam1", live)
+	got := idx.Ranges("cam1")
+	require.LessOrEqual(t, got[0].From, hist.Unix(), "live Add must not rebuild ranges from hot segments only")
+
+	idx.ClosePersist()
+	layout := makeDvrLayout(pathConf, "cam1")
+	meta, err := readMetaFile(layout.meta)
+	require.NoError(t, err)
+	meta.Ranges = []RecordingRange{{From: time.Now().Add(-2 * time.Hour).Unix(), Duration: 3600}}
+	require.NoError(t, writeMetaFile(layout.meta, meta))
+
+	idx = NewIndex()
+	require.Equal(t, 1, idx.LoadFromDisk(confs).DiskPaths)
+	repaired := idx.Ranges("cam1")
+	require.NotEmpty(t, repaired)
+	require.LessOrEqual(t, repaired[0].From, hist.Unix(), "truncated meta ranges must be rebuilt from day shards")
 	idx.ClosePersist()
 }

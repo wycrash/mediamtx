@@ -71,8 +71,8 @@ func TestIndexSegmentsInWindow(t *testing.T) {
 
 	out := idx.SegmentsInWindow("cam1", base, 10*time.Second)
 	require.Len(t, out, 2)
-	require.Equal(t, "/a.ts", out[0].Fpath)
-	require.Equal(t, "/b.ts", out[1].Fpath)
+	require.Equal(t, "/a.ts", out[0].Fpath())
+	require.Equal(t, "/b.ts", out[1].Fpath())
 }
 
 func TestIndexSegmentsInWindowIncludesOverlap(t *testing.T) {
@@ -92,8 +92,8 @@ func TestIndexSegmentsInWindowIncludesOverlap(t *testing.T) {
 	// Seek 10 minutes into the first hour-long file.
 	out := idx.SegmentsInWindow("cam1", base.Add(10*time.Minute), time.Hour)
 	require.Len(t, out, 2)
-	require.Equal(t, "/a.mp4", out[0].Fpath)
-	require.Equal(t, "/b.mp4", out[1].Fpath)
+	require.Equal(t, "/a.mp4", out[0].Fpath())
+	require.Equal(t, "/b.mp4", out[1].Fpath())
 }
 
 func TestIndexSetFMP4Meta(t *testing.T) {
@@ -147,4 +147,19 @@ func TestIndexRangesOpenSegmentGrowsToNow(t *testing.T) {
 	r := idx.Ranges("cam1")
 	require.Len(t, r, 1)
 	require.InDelta(t, 5, r[0].Duration, 2)
+}
+
+func TestSegmentRelFastAndFpath(t *testing.T) {
+	require.Equal(t, "file.mp4", segmentRelFast("/rec/cam1", "/rec/cam1/file.mp4"))
+	require.Equal(t, "2026-08-30/file.mp4", segmentRelFast("/rec/cam1", "/rec/cam1/2026-08-30/file.mp4"))
+
+	seg := &IndexedSegment{Rel: "2026-08-30/file.mp4", common: "/rec/cam1"}
+	require.Equal(t, "file.mp4", seg.Name())
+	require.Equal(t, "/rec/cam1/2026-08-30/file.mp4", seg.Fpath())
+
+	idx := NewIndex()
+	idx.Add("cam1", "/abs/a.mp4", time.Unix(1, 0).UTC())
+	got, ok := idx.FindByName("cam1", "a.mp4")
+	require.True(t, ok)
+	require.Equal(t, "/abs/a.mp4", got)
 }

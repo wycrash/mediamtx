@@ -204,9 +204,8 @@ func TestIndexLatestFMP4Tracks(t *testing.T) {
 		},
 	}}
 	idx.SetFMP4Meta("cam1", "/rec/b.mp4", fmp4SegMeta{
-		Tracks: tracks,
-		Ready:  true,
-	})
+		Ready: true,
+	}, tracks)
 	got := idx.LatestFMP4Tracks("cam1")
 	require.Equal(t, tracks, got)
 	require.Nil(t, idx.LatestFMP4Tracks("missing"))

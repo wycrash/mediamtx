@@ -18,6 +18,7 @@ type dayCacheKey struct {
 type loadedDay struct {
 	segs   []*IndexedSegment
 	byName map[string]*IndexedSegment
+	codecs [][]*fmp4.InitTrack
 }
 
 func codecIDFrom(codecs [][]*fmp4.InitTrack, tracks []*fmp4.InitTrack) uint8 {
@@ -37,23 +38,29 @@ func codecIDFrom(codecs [][]*fmp4.InitTrack, tracks []*fmp4.InitTrack) uint8 {
 
 func segsFromSnapshot(common string, snap dvrSnapshot) []*IndexedSegment {
 	out := make([]*IndexedSegment, 0, len(snap.Segs))
-	byName := make(map[string]*IndexedSegment, len(snap.Segs))
+	codecs := snap.Codecs
 	for _, rec := range snap.Segs {
-		fpath := dvrAbsPath(common, rec.Rel)
-		name := filepath.Base(fpath)
-		seg := &IndexedSegment{Fpath: fpath, Start: rec.Start, Name: name}
-		meta := fmp4SegMeta{Duration: rec.Duration, MoofCount: rec.Moof, Ready: rec.Ready}
-		if rec.CodecID > 0 && int(rec.CodecID) <= len(snap.Codecs) {
-			meta.Tracks = snap.Codecs[rec.CodecID-1]
+		rel := rec.Rel
+		if rel == "" {
+			continue
 		}
-		if !meta.Ready && (meta.Duration > 0 || meta.MoofCount > 0 || len(meta.Tracks) > 0) {
-			meta.Ready = true
+		seg := &IndexedSegment{
+			Rel:    filepath.ToSlash(rel),
+			Start:  rec.Start,
+			common: common,
+			codecs: &codecs,
+			fmp4: fmp4SegMeta{
+				Duration:  rec.Duration,
+				MoofCount: rec.Moof,
+				codecID:   rec.CodecID,
+				Ready:     rec.Ready,
+			},
 		}
-		seg.fmp4 = meta
+		if !seg.fmp4.Ready && (seg.fmp4.Duration > 0 || seg.fmp4.MoofCount > 0 || seg.fmp4.codecID > 0) {
+			seg.fmp4.Ready = true
+		}
 		out = append(out, seg)
-		byName[name] = seg
 	}
-	_ = byName
 	return out
 }
 
@@ -67,16 +74,19 @@ func snapshotFromSegs(hash uint64, common string, segs []*IndexedSegment, codecs
 		if !seg.fmp4.Ready {
 			continue
 		}
-		rel := seg.Name
-		if common != "" {
-			rel = dvrRelPath(common, seg.Fpath)
+		rel := seg.Rel
+		if rel == "" {
+			rel = seg.Name()
+		}
+		if common != "" && filepath.IsAbs(filepath.FromSlash(rel)) {
+			rel = dvrRelPath(common, seg.Fpath())
 		}
 		s.Segs = append(s.Segs, dvrSegRec{
 			Rel:      rel,
 			Start:    seg.Start,
 			Duration: seg.fmp4.Duration,
 			Moof:     seg.fmp4.MoofCount,
-			CodecID:  codecIDFrom(codecs, seg.fmp4.Tracks),
+			CodecID:  seg.fmp4.codecID,
 			Ready:    true,
 		})
 	}
@@ -99,10 +109,11 @@ func internTracksInto(codecs *[][]*fmp4.InitTrack, tracks []*fmp4.InitTrack) []*
 	return tracks
 }
 
-func fillSegsMeta(segs []*IndexedSegment, tracks []*fmp4.InitTrack, nominal, part time.Duration) {
+func fillSegsMeta(segs []*IndexedSegment, tracks []*fmp4.InitTrack, codecs [][]*fmp4.InitTrack, nominal, part time.Duration) {
 	if nominal <= 0 {
 		nominal = time.Hour
 	}
+	id := codecIDFrom(codecs, tracks)
 	for i, seg := range segs {
 		dur := nominal
 		if i+1 < len(segs) {
@@ -113,25 +124,25 @@ func fillSegsMeta(segs []*IndexedSegment, tracks []*fmp4.InitTrack, nominal, par
 		if seg.fmp4.Duration > 0 {
 			dur = seg.fmp4.Duration
 		}
-		if !seg.fmp4.Ready || seg.fmp4.Duration == 0 || (seg.fmp4.Tracks == nil && tracks != nil) {
+		if !seg.fmp4.Ready || seg.fmp4.Duration == 0 || (seg.fmp4.codecID == 0 && id != 0) {
 			if seg.fmp4.MoofCount == 0 {
 				seg.fmp4.MoofCount = estimateMoofCount(dur, part, nominal)
 			}
 			seg.fmp4.Duration = dur
-			if seg.fmp4.Tracks == nil {
-				seg.fmp4.Tracks = tracks
+			if seg.fmp4.codecID == 0 {
+				seg.fmp4.codecID = id
 			}
 			seg.fmp4.Ready = true
 		}
 	}
 }
 
-func (pe *pathIndex) appendSegRange(start time.Time, dur time.Duration) {
+func appendRecordingRange(ranges []RecordingRange, start time.Time, dur, nominal time.Duration) []RecordingRange {
 	if start.IsZero() {
-		return
+		return ranges
 	}
 	if dur <= 0 {
-		dur = pe.segmentDuration
+		dur = nominal
 	}
 	if dur <= 0 {
 		dur = time.Second
@@ -141,24 +152,93 @@ func (pe *pathIndex) appendSegRange(start time.Time, dur time.Duration) {
 	if dsec < 1 {
 		dsec = 1
 	}
-	tol := int64((rangeMergeTolerance(pe.segmentDuration) + time.Second/2) / time.Second)
-	if len(pe.ranges) == 0 {
-		pe.ranges = []RecordingRange{{From: from, Duration: dsec}}
-		pe.rangesOK = true
-		return
+	tol := int64((rangeMergeTolerance(nominal) + time.Second/2) / time.Second)
+	if len(ranges) == 0 {
+		return []RecordingRange{{From: from, Duration: dsec}}
 	}
-	last := &pe.ranges[len(pe.ranges)-1]
+	last := &ranges[len(ranges)-1]
 	gap := from - last.closedAt()
 	if gap <= tol {
 		end := from + dsec
 		if end > last.closedAt() {
 			last.Duration = end - last.From
 		}
-		pe.rangesOK = true
+		return ranges
+	}
+	return append(ranges, RecordingRange{From: from, Duration: dsec})
+}
+
+func (pe *pathIndex) appendSegRange(start time.Time, dur time.Duration) {
+	pe.ranges = appendRecordingRange(pe.ranges, start, dur, pe.segmentDuration)
+	pe.rangesOK = true
+}
+
+func rangesCoverDays(ranges []RecordingRange, days []dvrDayInfo) bool {
+	if len(days) == 0 {
+		return true
+	}
+	if len(ranges) == 0 {
+		return false
+	}
+	first, err := time.ParseInLocation("2006-01-02", days[0].Date, time.Local)
+	if err != nil {
+		return true
+	}
+	last, err := time.ParseInLocation("2006-01-02", days[len(days)-1].Date, time.Local)
+	if err != nil {
+		return true
+	}
+	if ranges[0].From >= first.Add(24*time.Hour).Unix() {
+		return false
+	}
+	return ranges[len(ranges)-1].closedAt() >= last.Unix()
+}
+
+func (idx *Index) rangesNeedRepair(pathName string) bool {
+	idx.mutex.RLock()
+	defer idx.mutex.RUnlock()
+	pe := idx.paths[pathName]
+	if pe == nil || !pe.complete {
+		return false
+	}
+	return !rangesCoverDays(pe.ranges, pe.days)
+}
+
+func (idx *Index) rebuildRangesFromDayFiles(pathName string) {
+	idx.mutex.RLock()
+	pe := idx.paths[pathName]
+	if pe == nil || len(pe.days) == 0 {
+		idx.mutex.RUnlock()
 		return
 	}
-	pe.ranges = append(pe.ranges, RecordingRange{From: from, Duration: dsec})
-	pe.rangesOK = true
+	days := append([]dvrDayInfo(nil), pe.days...)
+	nominal := pe.segmentDuration
+	idx.mutex.RUnlock()
+
+	var ranges []RecordingRange
+	for _, d := range days {
+		snap, ok := idx.loadDaySnapshot(pathName, d.Date)
+		if !ok {
+			continue
+		}
+		for _, rec := range snap.Segs {
+			dur := rec.Duration
+			if dur <= 0 {
+				dur = nominal
+			}
+			ranges = appendRecordingRange(ranges, rec.Start, dur, nominal)
+		}
+	}
+	if len(ranges) == 0 {
+		return
+	}
+	idx.mutex.Lock()
+	if pe := idx.paths[pathName]; pe != nil {
+		pe.ranges = ranges
+		pe.rangesOK = true
+	}
+	idx.mutex.Unlock()
+	idx.writeMeta(pathName)
 }
 
 func (pe *pathIndex) setDayNSeg(day string, n int) {
@@ -388,9 +468,14 @@ func (idx *Index) loadDayToCache(pathName, day string) *loadedDay {
 		return ld
 	}
 	segs := segsFromSnapshot(pe.commonPath, snap)
-	ld := &loadedDay{segs: segs, byName: make(map[string]*IndexedSegment, len(segs))}
+	ld := &loadedDay{
+		segs:   segs,
+		byName: make(map[string]*IndexedSegment, len(segs)),
+		codecs: snap.Codecs,
+	}
 	for _, s := range segs {
-		ld.byName[s.Name] = s
+		s.codecs = &ld.codecs
+		ld.byName[s.Name()] = s
 	}
 	if idx.dayCache == nil {
 		idx.dayCache = make(map[dayCacheKey]*loadedDay)
@@ -407,11 +492,11 @@ func (idx *Index) loadDayToCache(pathName, day string) *loadedDay {
 }
 
 func (idx *Index) pinnedAsLoadedLocked(pe *pathIndex, day string) *loadedDay {
-	ld := &loadedDay{byName: make(map[string]*IndexedSegment)}
+	ld := &loadedDay{byName: make(map[string]*IndexedSegment), codecs: pe.internedTracks}
 	for _, s := range pe.segments {
 		if dvrDayDate(s.Start) == day {
 			ld.segs = append(ld.segs, s)
-			ld.byName[s.Name] = s
+			ld.byName[s.Name()] = s
 		}
 	}
 	return ld
@@ -451,9 +536,18 @@ func (idx *Index) pinDay(pathName, day string) {
 		pe.internedTracks = append([][]*fmp4.InitTrack(nil), snap.Codecs...)
 	}
 	for _, seg := range segsFromSnapshot(pe.commonPath, snap) {
-		idx.addLocked(pe, seg.Fpath, seg.Start)
-		if existing, ok := pe.byName[seg.Name]; ok {
-			existing.fmp4 = seg.fmp4
+		idx.addLocked(pe, seg.Fpath(), seg.Start)
+		if existing, ok := pe.byName[seg.Name()]; ok {
+			existing.fmp4.Duration = seg.fmp4.Duration
+			existing.fmp4.MoofCount = seg.fmp4.MoofCount
+			existing.fmp4.Ready = seg.fmp4.Ready
+			if tr := seg.tracks(); len(tr) > 0 {
+				interned := internTracks(pe, tr)
+				existing.fmp4.codecID = internCodecID(pe, interned)
+			} else {
+				existing.fmp4.codecID = seg.fmp4.codecID
+			}
+			existing.codecs = &pe.internedTracks
 		}
 	}
 	pe.pinnedDays[day] = struct{}{}
@@ -470,7 +564,7 @@ func (idx *Index) unpinDayLocked(pe *pathIndex, day string) {
 	kept := pe.segments[:0]
 	for _, s := range pe.segments {
 		if dvrDayDate(s.Start) == day {
-			delete(pe.byName, s.Name)
+			delete(pe.byName, s.Name())
 			continue
 		}
 		kept = append(kept, s)

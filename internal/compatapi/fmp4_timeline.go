@@ -16,57 +16,58 @@ import (
 const fmp4InspectWorkers = 8
 
 // inspectFMP4Segment reads playlist metadata from an fMP4 file in a single open.
-func inspectFMP4Segment(fpath string) (fmp4SegMeta, error) {
+func inspectFMP4Segment(fpath string) (fmp4SegMeta, []*fmp4.InitTrack, error) {
 	f, err := os.Open(fpath)
 	if err != nil {
-		return fmp4SegMeta{}, err
+		return fmp4SegMeta{}, nil, err
 	}
 	defer f.Close()
 
 	fi, err := f.Stat()
 	if err != nil {
-		return fmp4SegMeta{}, err
+		return fmp4SegMeta{}, nil, err
 	}
 
 	initSize, duration, err := readFMP4InitHeader(f)
 	if err != nil {
-		return fmp4SegMeta{}, err
+		return fmp4SegMeta{}, nil, err
 	}
 	fmp4InitSizeCache.Store(fpath, fmp4InitCacheEntry{size: initSize, duration: duration})
 
 	if fi.Size() <= initSize {
-		return fmp4SegMeta{}, fmt.Errorf("no media")
+		return fmp4SegMeta{}, nil, fmt.Errorf("no media")
 	}
 
 	if _, err = f.Seek(0, io.SeekStart); err != nil {
-		return fmp4SegMeta{}, err
+		return fmp4SegMeta{}, nil, err
 	}
 	initBuf := make([]byte, initSize)
 	if _, err = io.ReadFull(f, initBuf); err != nil {
-		return fmp4SegMeta{}, err
+		return fmp4SegMeta{}, nil, err
 	}
 
 	meta := fmp4SegMeta{
 		Duration: duration,
 		Ready:    true,
 	}
+	var tracks []*fmp4.InitTrack
 	var init fmp4.Init
 	if err = init.Unmarshal(bytes.NewReader(initBuf)); err == nil {
-		meta.Tracks = init.Tracks
+		tracks = init.Tracks
 	}
 
-	moofs, mediaDur, err := inspectFMP4Media(f, initSize, meta.Tracks)
+	moofs, mediaDur, err := inspectFMP4Media(f, initSize, tracks)
 	if err != nil {
-		return fmp4SegMeta{}, err
+		return fmp4SegMeta{}, nil, err
 	}
 	if moofs == 0 {
-		return fmp4SegMeta{}, fmt.Errorf("no moof")
+		return fmp4SegMeta{}, nil, fmt.Errorf("no moof")
 	}
 	meta.MoofCount = moofs
 	if mediaDur > 0 {
 		meta.Duration = mediaDur
 	}
-	return meta, nil
+	return meta, tracks, nil
 }
 
 func inspectFMP4Segments(fpaths []string) []fmp4SegMeta {
@@ -82,7 +83,7 @@ func inspectFMP4Segments(fpaths []string) []fmp4SegMeta {
 			defer wg.Done()
 			sem <- struct{}{}
 			defer func() { <-sem }()
-			meta, err := inspectFMP4Segment(fpath)
+			meta, _, err := inspectFMP4Segment(fpath)
 			if err == nil {
 				out[i] = meta
 			}

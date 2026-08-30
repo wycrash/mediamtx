@@ -250,11 +250,14 @@ playbackTrustedProxies: []
 # - GET /{path}/archive-{start}-{duration}.m3u8  (Flussonic DVR player alias of index-*.m3u8)
 # - GET /{path}/timeshift_abs-{start}.m3u8     (archive from timestamp until now)
 # - GET /{path}/{segment}.ts                  (archive segments)
-# - GET /{path}/{Y}/{m}/{d}/{h}/{M}/{s}.mp4   (1-frame preview MP4, no ffmpeg)
-# - GET /{path}/{unix}-preview.mp4            (alias of dated preview)
+# - GET|HEAD /{path}/{Y}/{m}/{d}/{h}/{M}/{s}.mp4 (1-frame preview MP4, no ffmpeg)
+# - GET|HEAD /{path}/{Y}/{m}/{d}/{h}/{M}/{s}-preview.mp4 (same)
+# - GET|HEAD /{path}/{unix}-preview.mp4       (alias of dated preview)
 # - GET /{path}/archive-{start}-{duration}.mp4 (archive mp4 if fmp4 segments)
 # - GET /{path}/preview.mp4                   (latest segment, same 1-frame MP4)
 # - GET /{path}/preview.jpeg                  (same as preview.mp4; native, no JPEG decode)
+# - GET /{path}/video.m3u8                    (Flussonic live HLS alias of index.m3u8)
+# - GET /{path}/video.fmp4.m3u8               (alias of index.m3u8)
 # - other /{path}/... requests are proxied to the HLS server (live) 
 compatAPI: true
 # Address of the TCP/HTTP listener.

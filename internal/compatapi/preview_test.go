@@ -2,6 +2,8 @@ package compatapi
 
 import (
 	"bytes"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"testing"
@@ -9,7 +11,11 @@ import (
 
 	"github.com/bluenviron/mediacommon/v2/pkg/formats/mpegts"
 	tscodecs "github.com/bluenviron/mediacommon/v2/pkg/formats/mpegts/codecs"
+	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/require"
+
+	"github.com/bluenviron/mediamtx/internal/conf"
+	"github.com/bluenviron/mediamtx/internal/test"
 )
 
 var testPreviewH264SPS = []byte{
@@ -52,11 +58,11 @@ func TestFindNearest(t *testing.T) {
 
 	seg, ok := idx.FindNearest("cam1", base.Add(12*time.Second))
 	require.True(t, ok)
-	require.Equal(t, "/b.ts", seg.Fpath)
+	require.Equal(t, "/b.ts", seg.Fpath())
 
 	seg, ok = idx.FindNearest("cam1", base.Add(-5*time.Second))
 	require.True(t, ok)
-	require.Equal(t, "/a.ts", seg.Fpath)
+	require.Equal(t, "/a.ts", seg.Fpath())
 }
 
 func TestFindLatest(t *testing.T) {
@@ -68,7 +74,7 @@ func TestFindLatest(t *testing.T) {
 
 	seg, ok := idx.FindLatest("cam1")
 	require.True(t, ok)
-	require.Equal(t, "/c.ts", seg.Fpath)
+	require.Equal(t, "/c.ts", seg.Fpath())
 }
 
 func TestPreviewCivilTime(t *testing.T) {
@@ -94,4 +100,50 @@ func TestPreviewUnixRegexp(t *testing.T) {
 
 	require.Nil(t, previewUnixRegexp.FindStringSubmatch("cam1/preview.mp4"))
 	require.Nil(t, previewUnixRegexp.FindStringSubmatch("cam1/2025/09/21/15/00/00-preview.mp4"))
+}
+
+func TestPreviewHead(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	idx := NewIndex()
+	ts := previewCivilTime(2026, 8, 27, 22, 12, 0, 0)
+	idx.Add("cam6", "/rec/cam6/a.ts", ts)
+
+	s := &Server{
+		PathConfs: map[string]*conf.Path{
+			"cam6": {Name: "cam6"},
+		},
+		AuthManager: test.NilAuthManager,
+		Parent:      test.NilLogger,
+		Index:       idx,
+	}
+	r := gin.New()
+	r.NoRoute(s.onRequest)
+
+	req := httptest.NewRequest(http.MethodHead, "/cam6/2026/08/27/22/12/00-preview.mp4?token=abc", nil)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+	require.Equal(t, http.StatusOK, w.Code)
+	require.Equal(t, "video/mp4", w.Header().Get("Content-Type"))
+	require.Empty(t, w.Body.Bytes())
+
+	s2 := &Server{
+		PathConfs: map[string]*conf.Path{
+			"cam6": {Name: "cam6"},
+		},
+		AuthManager: test.NilAuthManager,
+		Parent:      test.NilLogger,
+		Index:       NewIndex(),
+	}
+	r2 := gin.New()
+	r2.NoRoute(s2.onRequest)
+	req = httptest.NewRequest(http.MethodHead, "/cam6/2026/08/27/22/12/00-preview.mp4", nil)
+	w = httptest.NewRecorder()
+	r2.ServeHTTP(w, req)
+	require.Equal(t, http.StatusNotFound, w.Code)
+
+	req = httptest.NewRequest(http.MethodPost, "/cam6/2026/08/27/22/12/00-preview.mp4", nil)
+	w = httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+	require.Equal(t, http.StatusMethodNotAllowed, w.Code)
 }
