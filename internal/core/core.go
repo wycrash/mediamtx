@@ -24,6 +24,7 @@ import (
 	"github.com/bluenviron/mediamtx/internal/auth"
 	"github.com/bluenviron/mediamtx/internal/compatapi"
 	"github.com/bluenviron/mediamtx/internal/conf"
+	"github.com/bluenviron/mediamtx/internal/confpersist"
 	"github.com/bluenviron/mediamtx/internal/confwatcher"
 	"github.com/bluenviron/mediamtx/internal/externalcmd"
 	"github.com/bluenviron/mediamtx/internal/logger"
@@ -280,6 +281,11 @@ outer:
 	for {
 		select {
 		case <-confChanged:
+			if confpersist.Exists(confpersist.JSONPath(p.confPath)) {
+				p.Log(logger.Warn, "ignoring YAML changes in %s because runtime config %s exists",
+					p.confPath, confpersist.JSONPath(p.confPath))
+			}
+
 			p.Log(logger.Info, "reloading configuration (file changed)")
 
 			newConf, _, err := conf.Load(p.confPath, nil, p.logger)
@@ -302,6 +308,8 @@ outer:
 				p.Log(logger.Error, "%s", err)
 				break outer
 			}
+
+			p.persistConf(p.conf)
 
 		case <-interrupt:
 			p.Log(logger.Info, "shutting down gracefully")
@@ -340,7 +348,13 @@ func (p *Core) createResources(initial bool) error {
 
 		if p.confPath != "" {
 			a, _ := filepath.Abs(p.confPath)
-			p.Log(logger.Info, "configuration loaded from %s", a)
+			jp := confpersist.JSONPath(p.confPath)
+			if confpersist.Exists(jp) {
+				ja, _ := filepath.Abs(jp)
+				p.Log(logger.Info, "configuration loaded from %s, runtime config %s", a, ja)
+			} else {
+				p.Log(logger.Info, "configuration loaded from %s", a)
+			}
 		} else {
 			list := make([]string, len(defaultConfPaths))
 			for i, pa := range defaultConfPaths {
@@ -813,12 +827,14 @@ func (p *Core) createResources(initial bool) error {
 	}
 
 	if initial && p.confPath != "" {
-		cf := &confwatcher.ConfWatcher{FilePath: p.confPath}
-		err = cf.Initialize()
-		if err != nil {
-			return err
+		if _, err = os.Stat(p.confPath); err == nil {
+			cf := &confwatcher.ConfWatcher{FilePath: p.confPath}
+			err = cf.Initialize()
+			if err != nil {
+				return err
+			}
+			p.confWatcher = cf
 		}
-		p.confWatcher = cf
 	}
 
 	return nil
@@ -1252,5 +1268,25 @@ func (p *Core) APIConfigSet(conf *conf.Conf) {
 	select {
 	case p.chAPIConfigSet <- conf:
 	case <-p.ctx.Done():
+	}
+}
+
+func (p *Core) persistConf(newConf *conf.Conf) {
+	if p.confPath == "" {
+		return
+	}
+	if _, ok := os.LookupEnv("MTX_CONFKEY"); ok {
+		p.Log(logger.Warn, "skipping configuration persist because MTX_CONFKEY is set")
+		return
+	}
+	if _, ok := os.LookupEnv("RTSP_CONFKEY"); ok {
+		p.Log(logger.Warn, "skipping configuration persist because RTSP_CONFKEY is set")
+		return
+	}
+
+	jp := confpersist.JSONPath(p.confPath)
+	err := confpersist.Save(jp, newConf)
+	if err != nil {
+		p.Log(logger.Error, "failed to persist configuration to %s: %s", jp, err)
 	}
 }

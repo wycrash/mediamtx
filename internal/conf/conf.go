@@ -19,6 +19,7 @@ import (
 	"github.com/bluenviron/mediamtx/internal/conf/decrypt"
 	"github.com/bluenviron/mediamtx/internal/conf/env"
 	"github.com/bluenviron/mediamtx/internal/conf/yamlwrapper"
+	"github.com/bluenviron/mediamtx/internal/confpersist"
 	"github.com/bluenviron/mediamtx/internal/logger"
 )
 
@@ -38,12 +39,19 @@ func sortedKeys(paths map[string]*OptionalPath) []string {
 
 func firstThatExists(paths []string) string {
 	for _, pa := range paths {
-		_, err := os.Stat(pa)
-		if err == nil {
+		if confFileExists(pa) {
 			return pa
 		}
 	}
 	return ""
+}
+
+func confFileExists(path string) bool {
+	if confpersist.Exists(confpersist.JSONPath(path)) {
+		return true
+	}
+	_, err := os.Stat(path)
+	return err == nil
 }
 
 func setAllNilSlicesToEmptyRecursive(rv reflect.Value) {
@@ -605,6 +613,15 @@ func (conf *Conf) loadFromFile(fpath string, defaultConfPaths []string) (string,
 		if fpath == "" {
 			return "", nil
 		}
+	}
+
+	jsonPath := confpersist.JSONPath(fpath)
+	if confpersist.Exists(jsonPath) {
+		err := confpersist.Load(jsonPath, conf)
+		if err != nil {
+			return "", err
+		}
+		return fpath, nil
 	}
 
 	byts, err := os.ReadFile(fpath)

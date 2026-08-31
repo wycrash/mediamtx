@@ -4,7 +4,9 @@
 
 | URL | Куда |
 |---|---|
+| `/admin` | React SPA, `root /opt/sis/MediaMTX/www/` → `admin/index.html` |
 | `/v3/...` | Control API `127.0.0.1:9997` |
+| `/*/whep`, `/*/whip` | WebRTC `127.0.0.1:8889` (WHEP/WHIP signaling) |
 | всё остальное | Compat API `127.0.0.1:8877` (live HLS, DVR, preview) |
 
 HTTP `:80` редиректит на HTTPS.
@@ -38,15 +40,22 @@ apiTrustedProxies: [127.0.0.1, ::1]
 compatAPI: true
 compatAPIAddress: 127.0.0.1:8877
 compatAPITrustedProxies: [127.0.0.1, ::1]
+
+webrtcAddress: 127.0.0.1:8889
+webrtcTrustedProxies: [127.0.0.1, ::1]
 ```
 
 ## Примеры
 
 ```
+https://dvr.example.com/admin
 https://dvr.example.com/v3/paths/list
 https://dvr.example.com/cam1/video.m3u8
 https://dvr.example.com/cam1/info.json
+https://dvr.example.com/cam1/whep
 ```
+
+Сборка React: `/opt/sis/MediaMTX/www/admin/` (`index.html` + ассеты). В приложении `basename` / `homepage` — `/admin`.
 
 ## Control API
 

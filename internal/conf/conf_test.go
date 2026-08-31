@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"io"
 	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -12,6 +13,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"golang.org/x/crypto/nacl/secretbox"
 
+	"github.com/bluenviron/mediamtx/internal/confpersist"
 	"github.com/bluenviron/mediamtx/internal/logger"
 )
 
@@ -929,4 +931,88 @@ func TestClone(t *testing.T) {
 
 	conf2 := conf1.Clone()
 	require.Equal(t, conf1, conf2)
+}
+
+func TestConfJSONRuntime(t *testing.T) {
+	t.Run("json wins over yaml", func(t *testing.T) {
+		dir := t.TempDir()
+		yml := filepath.Join(dir, "mediamtx.yml")
+		err := os.WriteFile(yml, []byte("paths:\n  fromyaml:\n    source: rtsp://from-yaml\n"), 0o644)
+		require.NoError(t, err)
+		err = os.WriteFile(filepath.Join(dir, "mediamtx.json"), []byte(
+			`{"paths":{"fromjson":{"source":"rtsp://from-json"}}}`+"\n"), 0o644)
+		require.NoError(t, err)
+
+		cnf, confPath, err := Load(yml, nil, nil)
+		require.NoError(t, err)
+		require.Equal(t, yml, confPath)
+		_, ok := cnf.Paths["fromyaml"]
+		require.False(t, ok)
+		pa, ok := cnf.Paths["fromjson"]
+		require.True(t, ok)
+		require.Equal(t, "rtsp://from-json", pa.Source)
+	})
+
+	t.Run("json only without yaml", func(t *testing.T) {
+		dir := t.TempDir()
+		yml := filepath.Join(dir, "mediamtx.yml")
+		err := os.WriteFile(filepath.Join(dir, "mediamtx.json"), []byte(
+			`{"paths":{"onlyjson":{"source":"rtsp://only-json"}}}`+"\n"), 0o644)
+		require.NoError(t, err)
+
+		cnf, confPath, err := Load(yml, nil, nil)
+		require.NoError(t, err)
+		require.Equal(t, yml, confPath)
+		pa, ok := cnf.Paths["onlyjson"]
+		require.True(t, ok)
+		require.Equal(t, "rtsp://only-json", pa.Source)
+	})
+
+	t.Run("env overlays json", func(t *testing.T) {
+		dir := t.TempDir()
+		yml := filepath.Join(dir, "mediamtx.yml")
+		err := os.WriteFile(yml, []byte("paths:\n  fromjson:\n    source: rtsp://from-yaml\n"), 0o644)
+		require.NoError(t, err)
+		err = os.WriteFile(filepath.Join(dir, "mediamtx.json"), []byte(
+			`{"paths":{"fromjson":{"source":"rtsp://from-json"}}}`+"\n"), 0o644)
+		require.NoError(t, err)
+
+		t.Setenv("MTX_PATHS_FROMJSON_SOURCE", "rtsp://from-env")
+
+		cnf, _, err := Load(yml, nil, nil)
+		require.NoError(t, err)
+		require.Equal(t, "rtsp://from-env", cnf.Paths["fromjson"].Source)
+	})
+
+	t.Run("default search finds json without yaml", func(t *testing.T) {
+		dir := t.TempDir()
+		yml := filepath.Join(dir, "mediamtx.yml")
+		err := os.WriteFile(filepath.Join(dir, "mediamtx.json"), []byte(
+			`{"paths":{"searched":{"source":"rtsp://searched"}}}`+"\n"), 0o644)
+		require.NoError(t, err)
+
+		cnf, confPath, err := Load("", []string{yml}, nil)
+		require.NoError(t, err)
+		require.Equal(t, yml, confPath)
+		require.Equal(t, "rtsp://searched", cnf.Paths["searched"].Source)
+	})
+
+	t.Run("round trip optional paths", func(t *testing.T) {
+		dir := t.TempDir()
+		yml := filepath.Join(dir, "mediamtx.yml")
+		err := os.WriteFile(yml, []byte("paths:\n  cam1:\n    source: rtsp://cam\n    record: yes\n"), 0o644)
+		require.NoError(t, err)
+
+		orig, _, err := Load(yml, nil, nil)
+		require.NoError(t, err)
+
+		err = confpersist.Save(filepath.Join(dir, "mediamtx.json"), orig)
+		require.NoError(t, err)
+
+		loaded, confPath, err := Load(yml, nil, nil)
+		require.NoError(t, err)
+		require.Equal(t, yml, confPath)
+		require.Equal(t, orig.Paths["cam1"].Source, loaded.Paths["cam1"].Source)
+		require.Equal(t, orig.Paths["cam1"].Record, loaded.Paths["cam1"].Record)
+	})
 }
