@@ -39,6 +39,7 @@ import (
 	"github.com/bluenviron/mediamtx/internal/servers/rtsp"
 	"github.com/bluenviron/mediamtx/internal/servers/srt"
 	"github.com/bluenviron/mediamtx/internal/servers/webrtc"
+	"github.com/bluenviron/mediamtx/internal/sysmetrics"
 	"github.com/bluenviron/mediamtx/internal/upgrade"
 )
 
@@ -142,6 +143,7 @@ type Core struct {
 	webRTCServer    *webrtc.Server
 	srtServer       *srt.Server
 	moqServer       *moq.Server
+	sysMetrics      *sysmetrics.Collector
 	api             *api.API
 	confWatcher     *confwatcher.ConfWatcher
 
@@ -791,6 +793,22 @@ func (p *Core) createResources(initial bool) error {
 		p.moqServer = i
 	}
 
+	if p.conf.API {
+		if p.sysMetrics == nil {
+			i := &sysmetrics.Collector{
+				Interval:    time.Second,
+				RecordPaths: sysmetrics.RecordDirs(p.conf.PathDefaults.RecordPath, p.conf.Paths),
+			}
+			err = i.Initialize()
+			if err != nil {
+				return err
+			}
+			p.sysMetrics = i
+		} else {
+			p.sysMetrics.SetRecordPaths(sysmetrics.RecordDirs(p.conf.PathDefaults.RecordPath, p.conf.Paths))
+		}
+	}
+
 	if p.conf.API &&
 		p.api == nil {
 		i := &api.API{
@@ -817,6 +835,7 @@ func (p *Core) createResources(initial bool) error {
 			WebRTCServer:   p.webRTCServer,
 			SRTServer:      p.srtServer,
 			MoQServer:      p.moqServer,
+			SystemMetrics:  p.sysMetrics,
 			Parent:         p,
 		}
 		err = i.Initialize()
@@ -1139,6 +1158,8 @@ func (p *Core) closeResources(newConf *conf.Conf, calledByAPI bool) {
 		closeMoQServer ||
 		closeLogger
 
+	closeSysMetrics := newConf == nil || !newConf.API
+
 	if newConf == nil && p.confWatcher != nil {
 		p.confWatcher.Close()
 		p.confWatcher = nil
@@ -1151,6 +1172,11 @@ func (p *Core) closeResources(newConf *conf.Conf, calledByAPI bool) {
 		} else if !calledByAPI { // avoid a loop
 			p.api.ReloadConf(newConf)
 		}
+	}
+
+	if closeSysMetrics && p.sysMetrics != nil {
+		p.sysMetrics.Close()
+		p.sysMetrics = nil
 	}
 
 	if closeSRTServer && p.srtServer != nil {

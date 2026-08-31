@@ -58,6 +58,10 @@ type apiParent interface {
 	APIConfigSet(conf *conf.Conf)
 }
 
+type systemMetricsProvider interface {
+	Snapshot() defs.APISystemMetrics
+}
+
 // API is an API server.
 type API struct {
 	Version        string
@@ -83,6 +87,7 @@ type API struct {
 	WebRTCServer   defs.APIWebRTCServer
 	SRTServer      defs.APISRTServer
 	MoQServer      defs.APIMoQServer
+	SystemMetrics  systemMetricsProvider
 	Parent         apiParent
 
 	httpServer *httpp.Server
@@ -99,6 +104,7 @@ func (a *API) Initialize() error {
 	group := router.Group("/v3")
 
 	group.GET("/info", a.onInfo)
+	group.GET("/metrics/system", a.onSystemMetrics)
 
 	group.POST("/auth/jwks/refresh", a.onAuthJwksRefresh)
 
@@ -288,6 +294,30 @@ func (a *API) onInfo(ctx *gin.Context) {
 		Version: a.Version,
 		Started: a.Started,
 	})
+}
+
+func (a *API) onSystemMetrics(ctx *gin.Context) {
+	if a.SystemMetrics == nil {
+		ctx.JSON(http.StatusOK, &defs.APISystemMetrics{
+			CollectedAt: time.Now(),
+			Disks:       []defs.APISystemMetricsDisk{},
+			Network:     []defs.APISystemMetricsNIC{},
+			History:     []defs.APISystemMetricsPoint{},
+		})
+		return
+	}
+
+	snap := a.SystemMetrics.Snapshot()
+	if snap.Disks == nil {
+		snap.Disks = []defs.APISystemMetricsDisk{}
+	}
+	if snap.Network == nil {
+		snap.Network = []defs.APISystemMetricsNIC{}
+	}
+	if snap.History == nil {
+		snap.History = []defs.APISystemMetricsPoint{}
+	}
+	ctx.JSON(http.StatusOK, &snap)
 }
 
 func (a *API) onAuthJwksRefresh(ctx *gin.Context) {

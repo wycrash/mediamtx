@@ -67,6 +67,25 @@ paths:
               schema:
                 $ref: "#/components/schemas/Error"
 
+  /v3/metrics/system:
+    get:
+      operationId: systemMetrics
+      tags: [General]
+      summary: returns host CPU, memory, disk and network metrics.
+      responses:
+        "200":
+          description: the request was successful.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SystemMetrics"
+        "500":
+          description: server error.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
   /v3/auth/jwks/refresh:
     post:
       operationId: authJwksRefresh

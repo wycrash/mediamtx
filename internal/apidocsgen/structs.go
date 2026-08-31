@@ -214,6 +214,30 @@ var structs = []struct {
 		externalName: "WebRTCSessionList",
 		typ:          reflect.TypeOf(defs.APIWebRTCSessionList{}),
 	},
+	{
+		externalName: "SystemMetrics",
+		typ:          reflect.TypeOf(defs.APISystemMetrics{}),
+	},
+	{
+		externalName: "SystemMetricsCPU",
+		typ:          reflect.TypeOf(defs.APISystemMetricsCPU{}),
+	},
+	{
+		externalName: "SystemMetricsDisk",
+		typ:          reflect.TypeOf(defs.APISystemMetricsDisk{}),
+	},
+	{
+		externalName: "SystemMetricsMemory",
+		typ:          reflect.TypeOf(defs.APISystemMetricsMemory{}),
+	},
+	{
+		externalName: "SystemMetricsNIC",
+		typ:          reflect.TypeOf(defs.APISystemMetricsNIC{}),
+	},
+	{
+		externalName: "SystemMetricsPoint",
+		typ:          reflect.TypeOf(defs.APISystemMetricsPoint{}),
+	},
 }
 
 const modulePathPrefix = "github.com/bluenviron/mediamtx/"

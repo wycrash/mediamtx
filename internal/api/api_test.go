@@ -14,6 +14,7 @@ import (
 
 	"github.com/bluenviron/mediamtx/internal/auth"
 	"github.com/bluenviron/mediamtx/internal/conf"
+	"github.com/bluenviron/mediamtx/internal/defs"
 	"github.com/bluenviron/mediamtx/internal/logger"
 	"github.com/bluenviron/mediamtx/internal/test"
 )
@@ -148,6 +149,125 @@ func TestInfo(t *testing.T) {
 	require.Equal(t, map[string]any{
 		"started": time.Date(2008, 11, 7, 11, 22, 0, 0, time.Local).Format(time.RFC3339),
 		"version": "v1.2.3",
+	}, out)
+}
+
+type fakeSystemMetrics struct {
+	snap defs.APISystemMetrics
+}
+
+func (f fakeSystemMetrics) Snapshot() defs.APISystemMetrics {
+	return f.snap
+}
+
+func TestSystemMetrics(t *testing.T) {
+	collected := time.Date(2026, 8, 31, 10, 0, 0, 0, time.UTC)
+	api := API{
+		Address:      "localhost:9997",
+		ReadTimeout:  conf.Duration(10 * time.Second),
+		WriteTimeout: conf.Duration(10 * time.Second),
+		AuthManager:  test.NilAuthManager,
+		SystemMetrics: fakeSystemMetrics{
+			snap: defs.APISystemMetrics{
+				CollectedAt: collected,
+				CPU:         defs.APISystemMetricsCPU{Percent: 12.5, ProcessPercent: 4, Cores: 8},
+				Memory: defs.APISystemMetricsMemory{
+					TotalBytes:      1000,
+					UsedBytes:       400,
+					AvailableBytes:  600,
+					UsedPercent:     40,
+					ProcessRssBytes: 50,
+				},
+				Disks: []defs.APISystemMetricsDisk{{
+					Path:             "/data",
+					TotalBytes:       2000,
+					UsedBytes:        500,
+					FreeBytes:        1500,
+					UsedPercent:      25,
+					ReadBytesPerSec:  10,
+					WriteBytesPerSec: 20,
+				}},
+				Network: []defs.APISystemMetricsNIC{{
+					Name:            "eth0",
+					RecvBytesPerSec: 100,
+					SentBytesPerSec: 200,
+				}},
+				History: []defs.APISystemMetricsPoint{{
+					CollectedAt:          collected,
+					CPUPercent:           12.5,
+					ProcessPercent:       4,
+					MemUsedBytes:         400,
+					MemUsedPercent:       40,
+					ProcessRssBytes:      50,
+					DiskUsedBytes:        500,
+					DiskUsedPercent:      25,
+					DiskReadBytesPerSec:  10,
+					DiskWriteBytesPerSec: 20,
+					NetRecvBytesPerSec:   100,
+					NetSentBytesPerSec:   200,
+				}},
+			},
+		},
+		Parent: &testParent{},
+	}
+	err := api.Initialize()
+	require.NoError(t, err)
+	defer api.Close()
+
+	tr := &http.Transport{}
+	defer tr.CloseIdleConnections()
+	hc := &http.Client{Transport: tr}
+
+	var out map[string]any
+	httpRequest(t, hc, http.MethodGet, "http://localhost:9997/v3/metrics/system", nil, &out)
+	require.Equal(t, map[string]any{
+		"collectedAt": collected.Format(time.RFC3339),
+		"cpu": map[string]any{
+			"percent":        12.5,
+			"processPercent": float64(4),
+			"cores":          float64(8),
+		},
+		"memory": map[string]any{
+			"totalBytes":      float64(1000),
+			"usedBytes":       float64(400),
+			"availableBytes":  float64(600),
+			"usedPercent":     float64(40),
+			"processRssBytes": float64(50),
+		},
+		"disks": []any{
+			map[string]any{
+				"path":             "/data",
+				"totalBytes":       float64(2000),
+				"usedBytes":        float64(500),
+				"freeBytes":        float64(1500),
+				"usedPercent":      float64(25),
+				"readBytesPerSec":  float64(10),
+				"writeBytesPerSec": float64(20),
+			},
+		},
+		"network": []any{
+			map[string]any{
+				"name":            "eth0",
+				"recvBytesPerSec": float64(100),
+				"sentBytesPerSec": float64(200),
+			},
+		},
+		"history": []any{
+			map[string]any{
+				"collectedAt":          collected.Format(time.RFC3339),
+				"cpuPercent":           12.5,
+				"processPercent":       float64(4),
+				"memUsedBytes":         float64(400),
+				"memUsedPercent":       float64(40),
+				"processRssBytes":      float64(50),
+				"diskUsedBytes":        float64(500),
+				"diskUsedPercent":      float64(25),
+				"diskReadBytesPerSec":  float64(10),
+				"diskWriteBytesPerSec": float64(20),
+				"netRecvBytesPerSec":   float64(100),
+				"netSentBytesPerSec":   float64(200),
+			},
+		},
 	}, out)
 }
 

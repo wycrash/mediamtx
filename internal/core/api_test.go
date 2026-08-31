@@ -77,6 +77,23 @@ func checkError(t *testing.T, msg string, body io.Reader) {
 	require.Equal(t, map[string]any{"status": "error", "error": msg}, resErr)
 }
 
+func TestAPISystemMetrics(t *testing.T) {
+	p, ok := newInstance(t, "api: yes\n")
+	require.Equal(t, true, ok)
+	defer p.Close()
+
+	tr := &http.Transport{}
+	defer tr.CloseIdleConnections()
+	hc := &http.Client{Transport: tr}
+
+	var out defs.APISystemMetrics
+	httpRequest(t, hc, http.MethodGet, "http://localhost:9997/v3/metrics/system", nil, &out)
+	require.False(t, out.CollectedAt.IsZero())
+	require.Greater(t, out.Memory.TotalBytes, uint64(0))
+	require.NotNil(t, out.Disks)
+	require.NotNil(t, out.Network)
+}
+
 func TestAPIPathsList(t *testing.T) {
 	type pathSource struct {
 		Type string `json:"type"`

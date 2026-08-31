@@ -2121,6 +2121,135 @@ components:
           type: integer
           format: int64
 
+    SystemMetrics:
+      type: object
+      properties:
+        collectedAt:
+          type: string
+        cpu:
+          $ref: "#/components/schemas/SystemMetricsCPU"
+        disks:
+          type: array
+          items:
+            $ref: "#/components/schemas/SystemMetricsDisk"
+        history:
+          type: array
+          items:
+            $ref: "#/components/schemas/SystemMetricsPoint"
+        memory:
+          $ref: "#/components/schemas/SystemMetricsMemory"
+        network:
+          type: array
+          items:
+            $ref: "#/components/schemas/SystemMetricsNIC"
+
+    SystemMetricsCPU:
+      type: object
+      properties:
+        cores:
+          type: integer
+          format: int64
+        percent:
+          type: number
+          format: double
+        processPercent:
+          type: number
+          format: double
+
+    SystemMetricsDisk:
+      type: object
+      properties:
+        freeBytes:
+          type: integer
+          format: uint64
+        path:
+          type: string
+        readBytesPerSec:
+          type: number
+          format: double
+        totalBytes:
+          type: integer
+          format: uint64
+        usedBytes:
+          type: integer
+          format: uint64
+        usedPercent:
+          type: number
+          format: double
+        writeBytesPerSec:
+          type: number
+          format: double
+
+    SystemMetricsMemory:
+      type: object
+      properties:
+        availableBytes:
+          type: integer
+          format: uint64
+        processRssBytes:
+          type: integer
+          format: uint64
+        totalBytes:
+          type: integer
+          format: uint64
+        usedBytes:
+          type: integer
+          format: uint64
+        usedPercent:
+          type: number
+          format: double
+
+    SystemMetricsNIC:
+      type: object
+      properties:
+        name:
+          type: string
+        recvBytesPerSec:
+          type: number
+          format: double
+        sentBytesPerSec:
+          type: number
+          format: double
+
+    SystemMetricsPoint:
+      type: object
+      properties:
+        collectedAt:
+          type: string
+        cpuPercent:
+          type: number
+          format: double
+        diskReadBytesPerSec:
+          type: number
+          format: double
+        diskUsedBytes:
+          type: integer
+          format: uint64
+        diskUsedPercent:
+          type: number
+          format: double
+        diskWriteBytesPerSec:
+          type: number
+          format: double
+        memUsedBytes:
+          type: integer
+          format: uint64
+        memUsedPercent:
+          type: number
+          format: double
+        netRecvBytesPerSec:
+          type: number
+          format: double
+        netSentBytesPerSec:
+          type: number
+          format: double
+        processPercent:
+          type: number
+          format: double
+        processRssBytes:
+          type: integer
+          format: uint64
+
 paths:
   /v3/info:
     get:
@@ -2134,6 +2263,25 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/Info"
+        "500":
+          description: server error.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
+  /v3/metrics/system:
+    get:
+      operationId: systemMetrics
+      tags: [General]
+      summary: returns host CPU, memory, disk and network metrics.
+      responses:
+        "200":
+          description: the request was successful.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SystemMetrics"
         "500":
           description: server error.
           content:
