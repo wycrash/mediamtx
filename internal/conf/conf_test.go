@@ -540,6 +540,15 @@ func TestConfErrors(t *testing.T) {
 			`using a password with 'any' user is not supported`,
 		},
 		{
+			"empty token pass",
+			"authInternalUsers:\n" +
+				"- user: token\n" +
+				"  pass:\n" +
+				"  permissions:\n" +
+				"  - action: read\n",
+			`using an empty password with 'token' user is not supported`,
+		},
+		{
 			"invalid record path 1",
 			"paths:\n" +
 				"  my_path:\n" +

@@ -281,7 +281,10 @@ func (s *Server) onArchivePlaylist(
 
 	windowed := s.Index.SegmentsInWindow(pathName, start, duration)
 	segDur := time.Duration(pathConf.RecordSegmentDuration)
-	body := GenerateArchiveM3U8Indexed(pathConf.RecordFormat, windowed, segDur, s.TimeOffsetMinutes, start)
+	body := appendQueryToPlaylistURIs(
+		GenerateArchiveM3U8Indexed(pathConf.RecordFormat, windowed, segDur, s.TimeOffsetMinutes, start),
+		playlistAuthQuery(ctx),
+	)
 
 	ctx.Header("Content-Type", "application/vnd.apple.mpegurl; charset=utf-8")
 	ctx.Header("Cache-Control", "no-cache")
@@ -395,13 +398,17 @@ func (s *Server) tryServeArchiveSegment(ctx *gin.Context, pathName string, fileN
 		return false, nil
 	}
 
-	if !s.doAuth(ctx, pathName) {
-		return true, nil // auth already wrote response
+	if s.Index == nil {
+		return false, nil
 	}
 
 	fpath, ok := s.Index.FindByName(pathName, fileName)
 	if !ok {
 		return false, nil
+	}
+
+	if !s.doAuth(ctx, pathName) {
+		return true, nil // auth already wrote response
 	}
 
 	switch pathConf.RecordFormat {

@@ -62,6 +62,32 @@ func matchesPermission(perms []conf.AuthInternalUserPermission, req *Request) bo
 	return false
 }
 
+func queryToken(req *Request) string {
+	v, err := url.ParseQuery(req.Query)
+	if err != nil {
+		return ""
+	}
+
+	if len(v["token"]) == 1 {
+		return v["token"][0]
+	}
+
+	return ""
+}
+
+func tokenFromRequest(req *Request) string {
+	if req.Credentials != nil {
+		if req.Credentials.Token != "" {
+			return req.Credentials.Token
+		}
+		if req.Credentials.Pass != "" {
+			return req.Credentials.Pass
+		}
+	}
+
+	return queryToken(req)
+}
+
 func getToken(tokenInHTTPQuery bool, req *Request) string {
 	switch {
 	case req.Credentials.Token != "":
@@ -121,8 +147,11 @@ func (m *Manager) ReloadInternalUsers(u []conf.AuthInternalUser) {
 // It returns the user name.
 func (m *Manager) Authenticate(req *Request) (string, *Error) {
 	var token string
-	if m.Method == conf.AuthMethodHTTP || m.Method == conf.AuthMethodJWT {
+	switch m.Method {
+	case conf.AuthMethodHTTP, conf.AuthMethodJWT:
 		token = getToken(m.Method == conf.AuthMethodJWT && m.JWTInHTTPQuery != nil && *m.JWTInHTTPQuery, req)
+	default:
+		token = tokenFromRequest(req)
 	}
 
 	var user string
@@ -155,6 +184,9 @@ func (m *Manager) authenticateInternal(req *Request) (string, error) {
 
 	for _, u := range m.InternalUsers {
 		if ok := m.authenticateWithUser(req, &u); ok {
+			if u.User == "token" {
+				return "token", nil
+			}
 			return req.Credentials.User, nil
 		}
 	}
@@ -172,6 +204,11 @@ func (m *Manager) authenticateWithUser(
 
 	if !matchesPermission(u.Permissions, req) {
 		return false
+	}
+
+	if u.User == "token" {
+		token := tokenFromRequest(req)
+		return token != "" && u.Pass.Check(token)
 	}
 
 	if u.User != "any" {

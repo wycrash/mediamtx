@@ -341,6 +341,51 @@ func writeM3U8FMP4(
 	return b.String()
 }
 
+func mergeURIQuery(uri, extraQuery string) string {
+	if extraQuery == "" {
+		return uri
+	}
+	if strings.Contains(uri, "?") {
+		return uri + "&" + extraQuery
+	}
+	return uri + "?" + extraQuery
+}
+
+// appendQueryToPlaylistURIs copies extraQuery onto media URIs and EXT-X-MAP
+// so HLS players send the same auth token on segment requests.
+func appendQueryToPlaylistURIs(body, extraQuery string) string {
+	if extraQuery == "" {
+		return body
+	}
+
+	lines := strings.Split(body, "\n")
+	for i, line := range lines {
+		if line == "" {
+			continue
+		}
+		if strings.HasPrefix(line, "#EXT-X-MAP:") {
+			const prefix = `URI="`
+			start := strings.Index(line, prefix)
+			if start < 0 {
+				continue
+			}
+			start += len(prefix)
+			end := strings.Index(line[start:], `"`)
+			if end < 0 {
+				continue
+			}
+			uri := line[start : start+end]
+			lines[i] = line[:start] + mergeURIQuery(uri, extraQuery) + line[start+end:]
+			continue
+		}
+		if line[0] == '#' {
+			continue
+		}
+		lines[i] = mergeURIQuery(line, extraQuery)
+	}
+	return strings.Join(lines, "\n")
+}
+
 func formatProgramDateTime(t time.Time, offsetMinutes int) string {
 	offset := time.FixedZone("", offsetMinutes*60)
 	local := t.In(offset)

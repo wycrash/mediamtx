@@ -265,6 +265,203 @@ func TestAuthInternalCustomVerifyFunc(t *testing.T) {
 	}
 }
 
+func TestAuthInternalToken(t *testing.T) {
+	m := Manager{
+		Method: conf.AuthMethodInternal,
+		InternalUsers: []conf.AuthInternalUser{
+			{
+				User: "token",
+				Pass: "globalsecret",
+				Permissions: []conf.AuthInternalUserPermission{{
+					Action: conf.AuthActionRead,
+				}, {
+					Action: conf.AuthActionPlayback,
+				}},
+			},
+			{
+				User: "token",
+				Pass: "cam1secret",
+				Permissions: []conf.AuthInternalUserPermission{{
+					Action: conf.AuthActionRead,
+					Path:   "cam1",
+				}, {
+					Action: conf.AuthActionPlayback,
+					Path:   "cam1",
+				}},
+			},
+		},
+	}
+
+	for _, ca := range []struct {
+		name           string
+		req            *Request
+		ok             bool
+		askCredentials bool
+	}{
+		{
+			name: "query",
+			req: &Request{
+				Action:      conf.AuthActionRead,
+				Path:        "cam2",
+				Query:       "token=globalsecret",
+				Protocol:    ProtocolHLS,
+				Credentials: &Credentials{},
+				IP:          net.ParseIP("127.0.0.1"),
+			},
+			ok: true,
+		},
+		{
+			name: "query playback",
+			req: &Request{
+				Action:      conf.AuthActionPlayback,
+				Path:        "cam2",
+				Query:       "token=globalsecret",
+				Credentials: &Credentials{},
+				IP:          net.ParseIP("127.0.0.1"),
+			},
+			ok: true,
+		},
+		{
+			name: "bearer",
+			req: &Request{
+				Action:   conf.AuthActionRead,
+				Path:     "cam2",
+				Protocol: ProtocolHLS,
+				Credentials: &Credentials{
+					Token: "globalsecret",
+				},
+				IP: net.ParseIP("127.0.0.1"),
+			},
+			ok: true,
+		},
+		{
+			name: "pass",
+			req: &Request{
+				Action:   conf.AuthActionRead,
+				Path:     "cam2",
+				Protocol: ProtocolSRT,
+				Credentials: &Credentials{
+					User: "user",
+					Pass: "globalsecret",
+				},
+				IP: net.ParseIP("127.0.0.1"),
+			},
+			ok: true,
+		},
+		{
+			name: "per-path token",
+			req: &Request{
+				Action:      conf.AuthActionRead,
+				Path:        "cam1",
+				Query:       "token=cam1secret",
+				Protocol:    ProtocolRTSP,
+				Credentials: &Credentials{},
+				IP:          net.ParseIP("127.0.0.1"),
+			},
+			ok: true,
+		},
+		{
+			name: "global token on per-path stream",
+			req: &Request{
+				Action:      conf.AuthActionRead,
+				Path:        "cam1",
+				Query:       "token=globalsecret",
+				Protocol:    ProtocolHLS,
+				Credentials: &Credentials{},
+				IP:          net.ParseIP("127.0.0.1"),
+			},
+			ok: true,
+		},
+		{
+			name: "per-path token on other stream",
+			req: &Request{
+				Action:      conf.AuthActionRead,
+				Path:        "cam2",
+				Query:       "token=cam1secret",
+				Protocol:    ProtocolHLS,
+				Credentials: &Credentials{},
+				IP:          net.ParseIP("127.0.0.1"),
+			},
+		},
+		{
+			name: "wrong token",
+			req: &Request{
+				Action:               conf.AuthActionRead,
+				Path:                 "cam2",
+				Query:                "token=wrong",
+				Protocol:             ProtocolHLS,
+				Credentials:          &Credentials{},
+				IP:                   net.ParseIP("127.0.0.1"),
+				EnableAskCredentials: true,
+			},
+		},
+		{
+			name: "missing token",
+			req: &Request{
+				Action:               conf.AuthActionRead,
+				Path:                 "cam2",
+				Protocol:             ProtocolHLS,
+				Credentials:          &Credentials{},
+				IP:                   net.ParseIP("127.0.0.1"),
+				EnableAskCredentials: true,
+			},
+			askCredentials: true,
+		},
+		{
+			name: "wrong action",
+			req: &Request{
+				Action:      conf.AuthActionPublish,
+				Path:        "cam2",
+				Query:       "token=globalsecret",
+				Protocol:    ProtocolRTSP,
+				Credentials: &Credentials{},
+				IP:          net.ParseIP("127.0.0.1"),
+			},
+		},
+	} {
+		t.Run(ca.name, func(t *testing.T) {
+			user, err := m.Authenticate(ca.req)
+			if ca.ok {
+				require.Nil(t, err)
+				require.Equal(t, "token", user)
+				return
+			}
+			require.EqualError(t, err.Wrapped, "authentication failed")
+			require.Equal(t, ca.askCredentials, err.AskCredentials)
+		})
+	}
+}
+
+func TestAuthInternalTokenHashedAndCustomVerify(t *testing.T) {
+	m := Manager{
+		Method: conf.AuthMethodInternal,
+		InternalUsers: []conf.AuthInternalUser{
+			{
+				User: "token",
+				Pass: "sha256:E9JJ8stBJ7QM+nV4ZoUCeHk/gU3tPFh/5YieiJp6n2w=", // testpass
+				Permissions: []conf.AuthInternalUserPermission{{
+					Action: conf.AuthActionRead,
+				}},
+			},
+		},
+	}
+
+	user, err := m.Authenticate(&Request{
+		Action:      conf.AuthActionRead,
+		Path:        "mypath",
+		Query:       "token=testpass",
+		Protocol:    ProtocolHLS,
+		Credentials: &Credentials{},
+		IP:          net.ParseIP("127.0.0.1"),
+		CustomVerifyFunc: func(string, string) bool {
+			t.Fatal("CustomVerifyFunc must not be used for token users")
+			return false
+		},
+	})
+	require.Nil(t, err)
+	require.Equal(t, "token", user)
+}
+
 func TestAuthHTTP(t *testing.T) {
 	for _, outcome := range []string{"ok", "fail"} {
 		t.Run(outcome, func(t *testing.T) {

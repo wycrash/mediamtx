@@ -753,6 +753,10 @@ func (conf *Conf) Validate(l logger.Writer) error {
 			if u.User == "any" && u.Pass != "" {
 				return fmt.Errorf("using a password with 'any' user is not supported")
 			}
+
+			if u.User == "token" && u.Pass == "" {
+				return fmt.Errorf("using an empty password with 'token' user is not supported")
+			}
 		}
 
 	case AuthMethodHTTP:

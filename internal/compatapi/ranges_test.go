@@ -467,3 +467,22 @@ func TestGenerateArchiveM3U8IndexedMatchesDisk(t *testing.T) {
 	)
 	require.Equal(t, fromDisk, fromIndex)
 }
+
+func TestAppendQueryToPlaylistURIs(t *testing.T) {
+	body := strings.Join([]string{
+		"#EXTM3U",
+		`#EXT-X-MAP:URI="a.mp4?hls=init"`,
+		"#EXTINF:2.000,",
+		"a.mp4?hls=media&sn=0&td=0",
+		"b.ts",
+		"#EXT-X-ENDLIST",
+		"",
+	}, "\n")
+
+	got := appendQueryToPlaylistURIs(body, "token=secret")
+	require.Contains(t, got, `#EXT-X-MAP:URI="a.mp4?hls=init&token=secret"`)
+	require.Contains(t, got, "a.mp4?hls=media&sn=0&td=0&token=secret")
+	require.Contains(t, got, "b.ts?token=secret")
+	require.NotContains(t, got, "#EXTINF:2.000,?token=")
+	require.Equal(t, body, appendQueryToPlaylistURIs(body, ""))
+}

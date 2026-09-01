@@ -17,8 +17,10 @@ The internal authentication method is the default one. Users are stored inside t
 ```yml
 authInternalUsers:
   # Username. 'any' means any user, including anonymous ones.
+  # 'token' means the password is a shared secret passed as ?token= or Bearer token.
   - user: any
     # Password. Not used in case of 'any' user.
+    # For 'token' users, this is the secret that clients must provide.
     pass:
     # IPs or networks allowed to use this user. An empty list means any IP.
     ips: []
@@ -37,6 +39,25 @@ authInternalUsers:
 ```
 
 Only clients that provide a valid username and password will be able to perform a certain action.
+
+Username `token` is a special identifier: `pass` is a shared secret, and clients authenticate with `?token=` or `Authorization: Bearer` instead of a username. A default token (empty `path`) applies to every stream; additional `token` users can restrict a secret to a specific path. Remove or narrow the default `any` user for `read` / `playback`, otherwise anonymous access remains open:
+
+```yml
+authInternalUsers:
+  - user: token
+    pass: mysecret
+    permissions:
+      - action: read
+      - action: playback
+
+  - user: token
+    pass: cam1secret
+    permissions:
+      - action: read
+        path: cam1
+      - action: playback
+        path: cam1
+```
 
 If storing plain credentials in the configuration file is a security problem, username and passwords can be stored as hashed strings. The Argon2 and SHA256 hashing algorithms are supported. To use Argon2, the string must be hashed using Argon2id (recommended) or Argon2i:
 
@@ -310,6 +331,8 @@ Authorization: Bearer myuser:mypass
 
 ## Provide tokens / JWTs
 
+Internal `user: token` secrets and JWTs are both passed as tokens.
+
 ### RTSP
 
 Pass the token as a query parameter:
@@ -342,7 +365,13 @@ WARNING: SRT does not support Stream IDs that are longer than 512 characters, th
 
 ### HLS and WebRTC
 
-The token can be passed through the `Authorization: Bearer` header:
+The token can be passed as a query parameter (required for internal `user: token` secrets used by HLS players):
+
+```
+http://localhost:8888/mystream/index.m3u8?token=mytoken
+```
+
+The token can also be passed through the `Authorization: Bearer` header:
 
 ```
 Authorization: Bearer mytoken

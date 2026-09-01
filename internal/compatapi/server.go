@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"net/url"
 	"runtime"
 	"sync"
 	"time"
@@ -297,11 +298,30 @@ func (s *Server) middlewarePreflightRequests(ctx *gin.Context) {
 	}
 }
 
+func playlistAuthQuery(ctx *gin.Context) string {
+	q := ctx.Request.URL.Query()
+	out := url.Values{}
+	if t := q.Get("token"); t != "" {
+		out.Set("token", t)
+	}
+	if t := q.Get("jwt"); t != "" {
+		out.Set("jwt", t)
+	}
+	if len(out) == 0 {
+		creds := httpp.Credentials(ctx.Request)
+		if creds != nil && creds.Token != "" {
+			out.Set("token", creds.Token)
+		}
+	}
+	return out.Encode()
+}
+
 func (s *Server) doAuth(ctx *gin.Context, pathName string) bool {
 	req := &auth.Request{
 		Action:               conf.AuthActionPlayback,
 		Path:                 pathName,
 		Query:                ctx.Request.URL.RawQuery,
+		Protocol:             auth.ProtocolHLS,
 		Credentials:          httpp.Credentials(ctx.Request),
 		IP:                   net.ParseIP(ctx.ClientIP()),
 		EnableAskCredentials: true,
