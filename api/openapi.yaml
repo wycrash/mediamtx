@@ -453,7 +453,11 @@ components:
           items:
             type: string
         hlsVariant:
-          $ref: "#/components/schemas/HLSVariant"
+          type: string
+          allOf:
+            - $ref: "#/components/schemas/HLSVariant"
+          nullable: true
+          deprecated: true
         logDestinations:
           type: array
           items:
@@ -965,6 +969,8 @@ components:
           allOf:
             - $ref: "#/components/schemas/PathSource"
           nullable: true
+        title:
+          type: string
         tracks:
           type: array
           deprecated: true
@@ -1000,6 +1006,9 @@ components:
           description: Forward
           items:
             $ref: "#/components/schemas/PathConfForwardDest"
+        hlsVariant:
+          $ref: "#/components/schemas/HLSVariant"
+          description: HLS
         maxReaders:
           type: integer
           format: int64
@@ -1294,6 +1303,9 @@ components:
           type: string
         srtReadPassphrase:
           type: string
+        title:
+          type: string
+          description: Human-readable name of the path. Does not affect the path URL.
         useAbsoluteTimestamp:
           type: boolean
         whepBearerToken:

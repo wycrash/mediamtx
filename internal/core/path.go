@@ -682,6 +682,7 @@ func (pa *path) doAPIPathsGet(req pathAPIPathsGetReq) {
 	req.res <- pathAPIPathsGetRes{
 		data: &defs.APIPath{
 			Name:     pa.name,
+			Title:    pa.conf.Title,
 			ConfName: pa.conf.Name,
 			Ready:    pa.isAvailable(),
 			ReadyTime: func() *time.Time {

@@ -54,7 +54,9 @@ func (pa *dummyPath) Name() string {
 }
 
 func (pa *dummyPath) SafeConf() *conf.Path {
-	return &conf.Path{}
+	return &conf.Path{
+		HLSVariant: conf.HLSVariant(gohlslib.MuxerVariantMPEGTS),
+	}
 }
 
 func (pa *dummyPath) ExternalCmdEnv() externalcmd.Environment {
@@ -244,7 +246,6 @@ func TestServerNotFound(t *testing.T) {
 				ServerKey:       "",
 				ServerCert:      "",
 				AlwaysRemux:     ca == "always remux on",
-				Variant:         conf.HLSVariant(gohlslib.MuxerVariantMPEGTS),
 				SegmentCount:    7,
 				SegmentDuration: conf.Duration(1 * time.Second),
 				PartDuration:    conf.Duration(200 * time.Millisecond),
@@ -366,7 +367,6 @@ func TestServerRead(t *testing.T) {
 				s := &Server{
 					Address:         "127.0.0.1:8888",
 					AlwaysRemux:     ca == "always remux on",
-					Variant:         conf.HLSVariant(gohlslib.MuxerVariantMPEGTS),
 					SegmentCount:    7,
 					SegmentDuration: conf.Duration(1 * time.Second),
 					PartDuration:    conf.Duration(200 * time.Millisecond),
@@ -515,7 +515,6 @@ func TestServerDirectory(t *testing.T) {
 		ServerKey:       "",
 		ServerCert:      "",
 		AlwaysRemux:     true,
-		Variant:         conf.HLSVariant(gohlslib.MuxerVariantMPEGTS),
 		SegmentCount:    7,
 		SegmentDuration: conf.Duration(1 * time.Second),
 		PartDuration:    conf.Duration(200 * time.Millisecond),
@@ -590,7 +589,6 @@ func TestServerDynamicAlwaysRemux(t *testing.T) {
 		ServerKey:       "",
 		ServerCert:      "",
 		AlwaysRemux:     true,
-		Variant:         conf.HLSVariant(gohlslib.MuxerVariantMPEGTS),
 		SegmentCount:    7,
 		SegmentDuration: conf.Duration(1 * time.Second),
 		PartDuration:    conf.Duration(200 * time.Millisecond),
@@ -614,7 +612,6 @@ func TestAuthError(t *testing.T) {
 		ServerKey:       "",
 		ServerCert:      "",
 		AlwaysRemux:     true,
-		Variant:         conf.HLSVariant(gohlslib.MuxerVariantMPEGTS),
 		SegmentCount:    7,
 		SegmentDuration: conf.Duration(1 * time.Second),
 		PartDuration:    conf.Duration(200 * time.Millisecond),
@@ -663,7 +660,6 @@ func TestAuthQueryPreservedAcrossRedirect(t *testing.T) {
 		ServerKey:       "",
 		ServerCert:      "",
 		AlwaysRemux:     true,
-		Variant:         conf.HLSVariant(gohlslib.MuxerVariantMPEGTS),
 		SegmentCount:    7,
 		SegmentDuration: conf.Duration(1 * time.Second),
 		PartDuration:    conf.Duration(200 * time.Millisecond),
@@ -725,7 +721,6 @@ func TestServerNoSupportedCodecs(t *testing.T) {
 			s := &Server{
 				Address:         "127.0.0.1:8888",
 				AlwaysRemux:     (ca == "always remux on"),
-				Variant:         conf.HLSVariant(gohlslib.MuxerVariantMPEGTS),
 				SegmentCount:    7,
 				SegmentDuration: conf.Duration(1 * time.Second),
 				PartDuration:    conf.Duration(200 * time.Millisecond),

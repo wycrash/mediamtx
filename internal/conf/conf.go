@@ -12,7 +12,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/bluenviron/gohlslib/v2"
 	"github.com/bluenviron/gortsplib/v5"
 	"github.com/bluenviron/gortsplib/v5/pkg/auth"
 
@@ -367,24 +366,24 @@ type Conf struct {
 	RTMPTrustedProxies IPNetworks `json:"rtmpTrustedProxies"`
 
 	// HLS server
-	HLS                bool       `json:"hls"`
-	HLSDisable         *bool      `json:"hlsDisable,omitempty" deprecated:"true"`
-	HLSAddress         string     `json:"hlsAddress"`
-	HLSEncryption      bool       `json:"hlsEncryption"`
-	HLSServerKey       string     `json:"hlsServerKey"`
-	HLSServerCert      string     `json:"hlsServerCert"`
-	HLSAllowOrigin     *string    `json:"hlsAllowOrigin,omitempty" deprecated:"true"`
-	HLSAllowOrigins    []string   `json:"hlsAllowOrigins"`
-	HLSTrustedProxies  IPNetworks `json:"hlsTrustedProxies"`
-	HLSAlwaysRemux     bool       `json:"hlsAlwaysRemux"`
-	HLSVariant         HLSVariant `json:"hlsVariant"`
-	HLSSegmentCount    int        `json:"hlsSegmentCount"`
-	HLSSegmentDuration Duration   `json:"hlsSegmentDuration"`
-	HLSPartDuration    Duration   `json:"hlsPartDuration"`
-	HLSSegmentMaxSize  StringSize `json:"hlsSegmentMaxSize"`
-	HLSDirectory       string     `json:"hlsDirectory"`
-	HLSMuxerCloseAfter Duration   `json:"hlsMuxerCloseAfter"`
-	HLSCDNSecret       string     `json:"hlsCDNSecret"`
+	HLS                bool        `json:"hls"`
+	HLSDisable         *bool       `json:"hlsDisable,omitempty" deprecated:"true"`
+	HLSAddress         string      `json:"hlsAddress"`
+	HLSEncryption      bool        `json:"hlsEncryption"`
+	HLSServerKey       string      `json:"hlsServerKey"`
+	HLSServerCert      string      `json:"hlsServerCert"`
+	HLSAllowOrigin     *string     `json:"hlsAllowOrigin,omitempty" deprecated:"true"`
+	HLSAllowOrigins    []string    `json:"hlsAllowOrigins"`
+	HLSTrustedProxies  IPNetworks  `json:"hlsTrustedProxies"`
+	HLSAlwaysRemux     bool        `json:"hlsAlwaysRemux"`
+	HLSVariant         *HLSVariant `json:"hlsVariant,omitempty" deprecated:"true"`
+	HLSSegmentCount    int         `json:"hlsSegmentCount"`
+	HLSSegmentDuration Duration    `json:"hlsSegmentDuration"`
+	HLSPartDuration    Duration    `json:"hlsPartDuration"`
+	HLSSegmentMaxSize  StringSize  `json:"hlsSegmentMaxSize"`
+	HLSDirectory       string      `json:"hlsDirectory"`
+	HLSMuxerCloseAfter Duration    `json:"hlsMuxerCloseAfter"`
+	HLSCDNSecret       string      `json:"hlsCDNSecret"`
 
 	// WebRTC server
 	WebRTC                      bool              `json:"webrtc"`
@@ -537,7 +536,6 @@ func (conf *Conf) setDefaults() {
 	conf.HLSServerKey = "server.key"
 	conf.HLSServerCert = "server.crt"
 	conf.HLSAllowOrigins = []string{"*"}
-	conf.HLSVariant = HLSVariant(gohlslib.MuxerVariantLowLatency)
 	conf.HLSSegmentCount = 7
 	conf.HLSSegmentDuration = 1 * Duration(time.Second)
 	conf.HLSPartDuration = 200 * Duration(time.Millisecond)
@@ -999,6 +997,12 @@ func (conf *Conf) Validate(l logger.Writer) error {
 	if conf.HLSAllowOrigin != nil {
 		l.Log(logger.Warn, "parameter 'hlsAllowOrigin' is deprecated and has been replaced with 'hlsAllowOrigins'")
 		conf.HLSAllowOrigins = []string{*conf.HLSAllowOrigin}
+	}
+
+	if conf.HLSVariant != nil {
+		l.Log(logger.Warn, "parameter 'hlsVariant' is deprecated "+
+			"and has been replaced with 'pathDefaults.hlsVariant'")
+		conf.PathDefaults.HLSVariant = *conf.HLSVariant
 	}
 
 	// HLS

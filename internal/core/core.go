@@ -660,7 +660,6 @@ func (p *Core) createResources(initial bool) error {
 			AllowOrigins:    p.conf.HLSAllowOrigins,
 			TrustedProxies:  p.conf.HLSTrustedProxies,
 			AlwaysRemux:     p.conf.HLSAlwaysRemux,
-			Variant:         p.conf.HLSVariant,
 			SegmentCount:    p.conf.HLSSegmentCount,
 			SegmentDuration: p.conf.HLSSegmentDuration,
 			PartDuration:    p.conf.HLSPartDuration,
@@ -1044,7 +1043,6 @@ func (p *Core) closeResources(newConf *conf.Conf, calledByAPI bool) {
 		!slices.Equal(newConf.HLSAllowOrigins, p.conf.HLSAllowOrigins) ||
 		!reflect.DeepEqual(newConf.HLSTrustedProxies, p.conf.HLSTrustedProxies) ||
 		newConf.HLSAlwaysRemux != p.conf.HLSAlwaysRemux ||
-		newConf.HLSVariant != p.conf.HLSVariant ||
 		newConf.HLSSegmentCount != p.conf.HLSSegmentCount ||
 		newConf.HLSSegmentDuration != p.conf.HLSSegmentDuration ||
 		newConf.HLSPartDuration != p.conf.HLSPartDuration ||

@@ -113,7 +113,6 @@ type Server struct {
 	AllowOrigins    []string
 	TrustedProxies  conf.IPNetworks
 	AlwaysRemux     bool
-	Variant         conf.HLSVariant
 	SegmentCount    int
 	SegmentDuration conf.Duration
 	PartDuration    conf.Duration
@@ -355,7 +354,6 @@ func (s *Server) createMuxer(pathName string, remoteAddr string, query string) *
 	r := &muxer{
 		parentCtx:       s.ctx,
 		remoteAddr:      remoteAddr,
-		variant:         s.Variant,
 		segmentCount:    s.SegmentCount,
 		segmentDuration: s.SegmentDuration,
 		partDuration:    s.PartDuration,

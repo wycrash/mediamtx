@@ -37,7 +37,6 @@ type muxerCloseInstanceReq struct {
 type muxer struct {
 	parentCtx       context.Context
 	remoteAddr      string
-	variant         conf.HLSVariant
 	segmentCount    int
 	segmentDuration conf.Duration
 	partDuration    conf.Duration
@@ -271,7 +270,7 @@ func (m *muxer) runInner() error {
 
 func (m *muxer) createInstance(strm *stream.Stream) (*muxerInstance, error) {
 	mi := &muxerInstance{
-		variant:         m.variant,
+		variant:         m.path.SafeConf().HLSVariant,
 		segmentCount:    m.segmentCount,
 		segmentDuration: m.segmentDuration,
 		partDuration:    m.partDuration,

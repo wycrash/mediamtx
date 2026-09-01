@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/bluenviron/gohlslib/v2"
 	"github.com/bluenviron/gortsplib/v5/pkg/base"
 	"github.com/bluenviron/mediacommon/v2/pkg/formats/mp4/codecs"
 	"github.com/bluenviron/mediacommon/v2/pkg/formats/pmp4"
@@ -221,6 +222,7 @@ type Path struct {
 	SRTReadPassphrase          string   `json:"srtReadPassphrase"`
 	Fallback                   *string  `json:"fallback,omitempty" deprecated:"true"`
 	UseAbsoluteTimestamp       bool     `json:"useAbsoluteTimestamp"`
+	Title                      string   `json:"title"` // Human-readable name of the path. Does not affect the path URL.
 
 	// Always available
 	AlwaysAvailable       bool                   `json:"alwaysAvailable"`
@@ -239,6 +241,9 @@ type Path struct {
 	RecordMaxPartSize     StringSize   `json:"recordMaxPartSize"`
 	RecordSegmentDuration Duration     `json:"recordSegmentDuration"`
 	RecordDeleteAfter     Duration     `json:"recordDeleteAfter"`
+
+	// HLS
+	HLSVariant HLSVariant `json:"hlsVariant"`
 
 	// Authentication (deprecated)
 	PublishUser *Credential `json:"publishUser,omitempty" deprecated:"true"`
@@ -374,6 +379,9 @@ func (pconf *Path) setDefaults() {
 	pconf.RecordMaxPartSize = 50 * 1024 * 1024
 	pconf.RecordSegmentDuration = 3600 * Duration(time.Second)
 	pconf.RecordDeleteAfter = 24 * 3600 * Duration(time.Second)
+
+	// HLS
+	pconf.HLSVariant = HLSVariant(gohlslib.MuxerVariantLowLatency)
 
 	// Publisher source
 	pconf.OverridePublisher = true

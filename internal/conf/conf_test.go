@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/bluenviron/gohlslib/v2"
 	"github.com/bluenviron/gortsplib/v5"
 	"github.com/stretchr/testify/require"
 	"golang.org/x/crypto/nacl/secretbox"
@@ -57,6 +58,7 @@ func TestConfFromFile(t *testing.T) {
 			RecordMaxPartSize:          50 * 1024 * 1024,
 			RecordSegmentDuration:      3600000000000,
 			RecordDeleteAfter:          86400000000000,
+			HLSVariant:                 HLSVariant(gohlslib.MuxerVariantLowLatency),
 			RTSPUDPSourcePortRange:     []uint{32768, 60999},
 			WHEPSTUNGatherTimeout:      5 * Duration(time.Second),
 			WHEPHandshakeTimeout:       10 * Duration(time.Second),
@@ -871,6 +873,49 @@ func TestConfErrors(t *testing.T) {
 			require.EqualError(t, err, ca.err)
 		})
 	}
+}
+
+func TestPathTitle(t *testing.T) {
+	tmpf := createTempFile(t, []byte(
+		"paths:\n"+
+			"  cam1:\n"+
+			"    title: Front door\n"+
+			"  cam2:\n"))
+
+	conf, _, err := Load(tmpf, nil, nil)
+	require.NoError(t, err)
+	require.Equal(t, "Front door", conf.Paths["cam1"].Title)
+	require.Equal(t, "", conf.Paths["cam2"].Title)
+}
+
+func TestHLSVariant(t *testing.T) {
+	t.Run("path defaults and per-path override", func(t *testing.T) {
+		tmpf := createTempFile(t, []byte(
+			"pathDefaults:\n"+
+				"  hlsVariant: fmp4\n"+
+				"paths:\n"+
+				"  cam1:\n"+
+				"  cam2:\n"+
+				"    hlsVariant: mpegts\n"))
+
+		conf, _, err := Load(tmpf, nil, nil)
+		require.NoError(t, err)
+		require.Equal(t, HLSVariant(gohlslib.MuxerVariantFMP4), conf.PathDefaults.HLSVariant)
+		require.Equal(t, HLSVariant(gohlslib.MuxerVariantFMP4), conf.Paths["cam1"].HLSVariant)
+		require.Equal(t, HLSVariant(gohlslib.MuxerVariantMPEGTS), conf.Paths["cam2"].HLSVariant)
+	})
+
+	t.Run("deprecated global hlsVariant", func(t *testing.T) {
+		tmpf := createTempFile(t, []byte(
+			"hlsVariant: mpegts\n"+
+				"paths:\n"+
+				"  cam1:\n"))
+
+		conf, _, err := Load(tmpf, nil, nil)
+		require.NoError(t, err)
+		require.Equal(t, HLSVariant(gohlslib.MuxerVariantMPEGTS), conf.PathDefaults.HLSVariant)
+		require.Equal(t, HLSVariant(gohlslib.MuxerVariantMPEGTS), conf.Paths["cam1"].HLSVariant)
+	})
 }
 
 func TestDeprecatedAvailabilityHooks(t *testing.T) {

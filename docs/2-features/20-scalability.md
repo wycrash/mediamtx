@@ -280,7 +280,8 @@ In order to allow MediaMTX to recognize CDN requests and serve cacheable files, 
 
    ```yml
    hlsCDNSecret: XXXXXXXXXX
-   hlsVariant: fmp4
+   pathDefaults:
+     hlsVariant: fmp4
    paths:
      all:
    ```
@@ -316,7 +317,8 @@ In order to allow MediaMTX to recognize CDN requests and serve cacheable files, 
 
    ```yml
    hlsCDNSecret: XXXXXXXXXX
-   hlsVariant: fmp4
+   pathDefaults:
+     hlsVariant: fmp4
    paths:
      all:
    ```
