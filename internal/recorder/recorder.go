@@ -19,6 +19,10 @@ type OnSegmentCreateFunc = func(path string)
 // OnSegmentCompleteFunc is the prototype of the function passed as OnSegmentComplete
 type OnSegmentCompleteFunc = func(path string, duration time.Duration)
 
+// PickRootFunc selects a storage disk for a new segment.
+// skip lists roots already tried in this attempt (ENOSPC).
+type PickRootFunc = func(skip []string) (string, error)
+
 // Recorder writes recordings to disk.
 type Recorder struct {
 	PathFormat        string
@@ -30,6 +34,7 @@ type Recorder struct {
 	Stream            *stream.Stream
 	OnSegmentCreate   OnSegmentCreateFunc
 	OnSegmentComplete OnSegmentCompleteFunc
+	PickRoot          PickRootFunc
 	Parent            logger.Writer
 
 	restartPause time.Duration
@@ -67,6 +72,7 @@ func (r *Recorder) Initialize() {
 		stream:            r.Stream,
 		onSegmentCreate:   r.OnSegmentCreate,
 		onSegmentComplete: r.OnSegmentComplete,
+		pickRoot:          r.PickRoot,
 		parent:            r,
 	}
 	r.currentInstance.initialize()
@@ -114,6 +120,7 @@ func (r *Recorder) run() {
 			stream:            r.Stream,
 			onSegmentCreate:   r.OnSegmentCreate,
 			onSegmentComplete: r.OnSegmentComplete,
+			pickRoot:          r.PickRoot,
 			parent:            r,
 		}
 		r.currentInstance.initialize()

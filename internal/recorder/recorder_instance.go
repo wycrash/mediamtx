@@ -1,6 +1,8 @@
 package recorder
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -22,6 +24,7 @@ type recorderInstance struct {
 	stream            *stream.Stream
 	onSegmentCreate   OnSegmentCreateFunc
 	onSegmentComplete OnSegmentCompleteFunc
+	pickRoot          PickRootFunc
 	parent            logger.Writer
 
 	streamID    uuid.UUID
@@ -41,9 +44,12 @@ func (ri *recorderInstance) Log(level logger.Level, format string, args ...any) 
 
 func (ri *recorderInstance) initialize() {
 	ri.streamID = uuid.New()
-	ri.pathFormat2 = ri.pathFormat
+	format := ri.pathFormat
+	if ri.pickRoot != nil {
+		format = conf.RecordPathRel(ri.pathFormat)
+	}
 	ri.pathFormat2 = recordstore.PathAddExtension(
-		strings.ReplaceAll(ri.pathFormat2, "%path", ri.pathName),
+		strings.ReplaceAll(format, "%path", ri.pathName),
 		ri.format,
 	)
 	ri.reader = &stream.Reader{
@@ -99,4 +105,35 @@ func (ri *recorderInstance) run() {
 	}
 
 	ri.format2.close()
+}
+
+func (ri *recorderInstance) createSegmentFile(start time.Time) (*os.File, string, error) {
+	var skip []string
+	for {
+		format := ri.pathFormat2
+		if ri.pickRoot != nil {
+			root, err := ri.pickRoot(skip)
+			if err != nil {
+				return nil, "", err
+			}
+			format = filepath.Join(root, ri.pathFormat2)
+			skip = append(skip, root)
+		}
+		path := recordstore.Path{Start: start}.Encode(format)
+		err := os.MkdirAll(filepath.Dir(path), 0o755)
+		if err != nil {
+			if ri.pickRoot != nil && isNoSpace(err) {
+				continue
+			}
+			return nil, "", err
+		}
+		fi, err := os.Create(path)
+		if err != nil {
+			if ri.pickRoot != nil && isNoSpace(err) {
+				continue
+			}
+			return nil, "", err
+		}
+		return fi, path, nil
+	}
 }

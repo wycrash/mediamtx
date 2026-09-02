@@ -132,3 +132,35 @@ func TestFindSegments(t *testing.T) {
 		})
 	}
 }
+
+func TestFindSegmentsStorageDisks(t *testing.T) {
+	d1 := t.TempDir()
+	d2 := t.TempDir()
+	require.NoError(t, os.Mkdir(filepath.Join(d1, "cam1"), 0o755))
+	require.NoError(t, os.Mkdir(filepath.Join(d2, "cam1"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(d1, "cam1", "2015-05-19_22-15-25-000427.mp4"), []byte{1}, 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(d2, "cam1", "2016-05-19_22-15-25-000427.mp4"), []byte{1}, 0o644))
+
+	segments, err := FindSegments(
+		&conf.Path{
+			Name:         "cam1",
+			RecordPath:   "%path/%Y-%m-%d_%H-%M-%S-%f",
+			RecordFormat: conf.RecordFormatFMP4,
+			StorageDisks: []string{d1, d2},
+		},
+		"cam1",
+		nil,
+		nil,
+	)
+	require.NoError(t, err)
+	require.Equal(t, []*Segment{
+		{
+			Fpath: filepath.Join(d1, "cam1", "2015-05-19_22-15-25-000427.mp4"),
+			Start: time.Date(2015, 5, 19, 22, 15, 25, 427000, time.Local),
+		},
+		{
+			Fpath: filepath.Join(d2, "cam1", "2016-05-19_22-15-25-000427.mp4"),
+			Start: time.Date(2016, 5, 19, 22, 15, 25, 427000, time.Local),
+		},
+	}, segments)
+}

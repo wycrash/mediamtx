@@ -9,7 +9,7 @@ import (
 	"github.com/bluenviron/mediamtx/internal/recordstore"
 )
 
-// RecordDirs returns unique recording roots from the default record path and path configs.
+// RecordDirs returns unique recording roots from path configs and storage pools.
 func RecordDirs(defaultRecordPath string, pathConfs map[string]*conf.Path) []string {
 	seen := make(map[string]struct{})
 	add := func(recordPath string) {
@@ -25,9 +25,16 @@ func RecordDirs(defaultRecordPath string, pathConfs map[string]*conf.Path) []str
 
 	add(defaultRecordPath)
 	for _, pc := range pathConfs {
-		if pc != nil {
-			add(pc.RecordPath)
+		if pc == nil {
+			continue
 		}
+		if len(pc.StorageDisks) > 0 {
+			for _, disk := range pc.StorageDisks {
+				add(disk)
+			}
+			continue
+		}
+		add(pc.RecordPath)
 	}
 
 	out := make([]string, 0, len(seen))

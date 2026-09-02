@@ -39,6 +39,7 @@ import (
 	"github.com/bluenviron/mediamtx/internal/servers/rtsp"
 	"github.com/bluenviron/mediamtx/internal/servers/srt"
 	"github.com/bluenviron/mediamtx/internal/servers/webrtc"
+	"github.com/bluenviron/mediamtx/internal/storage"
 	"github.com/bluenviron/mediamtx/internal/sysmetrics"
 	"github.com/bluenviron/mediamtx/internal/upgrade"
 )
@@ -134,6 +135,7 @@ type Core struct {
 	recordCleaner   *recordcleaner.Cleaner
 	playbackServer  *playback.Server
 	pathManager     *pathManager
+	storageReg      *storage.Registry
 	rtspServer      *rtsp.Server
 	rtspsServer     *rtsp.Server
 	rtmpServer      *rtmp.Server
@@ -483,6 +485,12 @@ func (p *Core) createResources(initial bool) error {
 	if p.pathManager == nil {
 		rtpMaxPayloadSize := getRTPMaxPayloadSize(p.conf.UDPMaxPayloadSize, p.conf.RTSPEncryption)
 
+		if p.storageReg == nil {
+			p.storageReg = storage.NewRegistry(p.conf.Storages)
+		} else {
+			p.storageReg.Reload(p.conf.Storages)
+		}
+
 		p.pathManager = &pathManager{
 			logLevel:          p.conf.LogLevel,
 			dumpPackets:       p.conf.DumpPackets,
@@ -498,6 +506,7 @@ func (p *Core) createResources(initial bool) error {
 			authManager:       p.authManager,
 			externalCmdPool:   p.externalCmdPool,
 			metrics:           p.metrics,
+			storage:           p.storageReg,
 			parent:            p,
 		}
 		p.pathManager.initialize()
@@ -948,6 +957,14 @@ func (p *Core) closeResources(newConf *conf.Conf, calledByAPI bool) {
 		closeMetrics ||
 		closeAuthManager ||
 		closeLogger
+	if !closePathManager && p.pathManager != nil {
+		if p.storageReg != nil {
+			p.storageReg.Reload(newConf.Storages)
+		} else {
+			p.storageReg = storage.NewRegistry(newConf.Storages)
+			p.pathManager.storage = p.storageReg
+		}
+	}
 	if !closePathManager && !reflect.DeepEqual(newConf.Paths, p.conf.Paths) {
 		p.pathManager.ReloadPathConfs(newConf.Paths)
 	}

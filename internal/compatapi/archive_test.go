@@ -131,6 +131,38 @@ func TestArchiveMP4(t *testing.T) {
 	require.NotEmpty(t, p.Tracks)
 }
 
+func TestArchiveMP4GluesNonConsecutiveSegments(t *testing.T) {
+	dir := t.TempDir()
+	segStart := time.Date(2008, 11, 7, 11, 22, 0, 0, time.Local)
+	pathConf := &conf.Path{
+		Name:         "mypath",
+		RecordPath:   filepath.Join(dir, "%path/%Y-%m-%d_%H-%M-%S-%f"),
+		RecordFormat: conf.RecordFormatFMP4,
+	}
+	recPath := recordstore.PathAddExtension(
+		strings.ReplaceAll(pathConf.RecordPath, "%path", "mypath"),
+		pathConf.RecordFormat,
+	)
+	writeArchiveTestSegment(t, recordstore.Path{Path: "mypath", Start: segStart}.Encode(recPath))
+	writeArchiveTestSegment(t, recordstore.Path{Path: "mypath", Start: segStart.Add(10 * time.Second)}.Encode(recPath))
+
+	ts := newArchiveTestServer(t, dir)
+	defer ts.Close()
+
+	u := fmt.Sprintf("%s/mypath/archive-%d-30.mp4", ts.URL, segStart.Unix())
+	res, err := http.Get(u)
+	require.NoError(t, err)
+	defer res.Body.Close()
+	require.Equal(t, http.StatusOK, res.StatusCode)
+
+	buf, err := io.ReadAll(res.Body)
+	require.NoError(t, err)
+	var p pmp4.Presentation
+	require.NoError(t, p.Unmarshal(bytes.NewReader(buf)))
+	require.NotEmpty(t, p.Tracks)
+	require.Equal(t, 6, len(p.Tracks[0].Samples), "both archive files must be concatenated")
+}
+
 func ptrTime(t time.Time) *time.Time {
 	return &t
 }

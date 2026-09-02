@@ -99,6 +99,10 @@ var structs = []struct {
 		typ:          reflect.TypeOf(conf.ForwardDest{}),
 	},
 	{
+		externalName: "Storage",
+		typ:          reflect.TypeOf(conf.Storage{}),
+	},
+	{
 		externalName: "PathList",
 		typ:          reflect.TypeOf(defs.APIPathList{}),
 	},
@@ -328,6 +332,16 @@ func goTypeToOpenAPI(rt reflect.Type) (openAPIProperty, error) {
 
 		return openAPIProperty{Type: "array", Items: &items}, nil
 
+	case rt.Kind() == reflect.Map:
+		if rt.Key().Kind() != reflect.String {
+			return openAPIProperty{}, fmt.Errorf("unhandled type: %s", rt.String())
+		}
+		val, err := goTypeToOpenAPI(rt.Elem())
+		if err != nil {
+			return openAPIProperty{}, err
+		}
+		return openAPIProperty{Type: "object", AdditionalProperties: &val}, nil
+
 	default:
 		return openAPIProperty{}, fmt.Errorf("unhandled type: %s", rt.String())
 	}
@@ -382,6 +396,9 @@ func isStructEnum(rt reflect.Type) bool {
 		return true
 
 	case reflect.TypeOf(conf.RecordFormat("")):
+		return true
+
+	case reflect.TypeOf(conf.StorageStrategy("")):
 		return true
 
 	case reflect.TypeOf(conf.RTSPAuthMethod(0)):

@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"slices"
 	"sort"
 	"strconv"
 	"sync"
@@ -22,6 +23,7 @@ import (
 	"github.com/bluenviron/mediamtx/internal/logger"
 	"github.com/bluenviron/mediamtx/internal/recorder"
 	"github.com/bluenviron/mediamtx/internal/staticsources"
+	"github.com/bluenviron/mediamtx/internal/storage"
 	"github.com/bluenviron/mediamtx/internal/stream"
 )
 
@@ -109,6 +111,7 @@ type path struct {
 	matches           []string
 	wg                *sync.WaitGroup
 	externalCmdPool   *externalcmd.Pool
+	storage           *storage.Registry
 	parent            pathParent
 
 	// accessed by pathManager only
@@ -447,6 +450,8 @@ func (pa *path) doReloadConf(newConf *conf.Path) {
 	if pa.recorder != nil &&
 		(newConf.Record != oldConf.Record ||
 			newConf.RecordPath != oldConf.RecordPath ||
+			newConf.Storage != oldConf.Storage ||
+			!slices.Equal(newConf.StorageDisks, oldConf.StorageDisks) ||
 			newConf.RecordFormat != oldConf.RecordFormat ||
 			newConf.RecordPartDuration != oldConf.RecordPartDuration ||
 			newConf.RecordMaxPartSize != oldConf.RecordMaxPartSize ||
@@ -993,6 +998,13 @@ func (pa *path) setNotAvailable() {
 }
 
 func (pa *path) startRecording() {
+	var pickRoot recorder.PickRootFunc
+	if pa.conf.Storage != "" && pa.storage != nil {
+		name := pa.conf.Storage
+		pickRoot = func(skip []string) (string, error) {
+			return pa.storage.Pick(name, skip)
+		}
+	}
 	pa.recorder = &recorder.Recorder{
 		PathFormat:      pa.conf.RecordPath,
 		Format:          pa.conf.RecordFormat,
@@ -1001,6 +1013,7 @@ func (pa *path) startRecording() {
 		SegmentDuration: time.Duration(pa.conf.RecordSegmentDuration),
 		PathName:        pa.name,
 		Stream:          pa.stream,
+		PickRoot:        pickRoot,
 		OnSegmentCreate: func(segmentPath string) {
 			pa.parent.onRecordSegmentCreate(pa.name, segmentPath)
 

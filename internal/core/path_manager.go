@@ -18,6 +18,7 @@ import (
 	"github.com/bluenviron/mediamtx/internal/logger"
 	"github.com/bluenviron/mediamtx/internal/metrics"
 	"github.com/bluenviron/mediamtx/internal/servers/hls"
+	"github.com/bluenviron/mediamtx/internal/storage"
 )
 
 func pathConfCanBeUpdated(oldPathConf *conf.Path, newPathConf *conf.Path) bool {
@@ -29,6 +30,8 @@ func pathConfCanBeUpdated(oldPathConf *conf.Path, newPathConf *conf.Path) bool {
 
 	clone.Record = newPathConf.Record
 	clone.RecordPath = newPathConf.RecordPath
+	clone.Storage = newPathConf.Storage
+	clone.StorageDisks = newPathConf.StorageDisks
 	clone.RecordFormat = newPathConf.RecordFormat
 	clone.RecordPartDuration = newPathConf.RecordPartDuration
 	clone.RecordMaxPartSize = newPathConf.RecordMaxPartSize
@@ -95,6 +98,7 @@ type pathManager struct {
 	authManager       pathManagerAuthManager
 	externalCmdPool   *externalcmd.Pool
 	metrics           *metrics.Metrics
+	storage           *storage.Registry
 	parent            pathManagerParent
 
 	ctx       context.Context
@@ -521,6 +525,7 @@ func (pm *pathManager) createPath(
 		matches:           matches,
 		wg:                &pm.wg,
 		externalCmdPool:   pm.externalCmdPool,
+		storage:           pm.storage,
 		parent:            pm,
 	}
 	pa.initialize()

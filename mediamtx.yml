@@ -494,6 +494,21 @@ moqAllowOrigins: ["*"]
 moqTrustedProxies: []
 
 ###############################################
+# Global settings -> Storages
+
+# Named pools of recording disks. A path references a pool with "storage: name".
+# When unset, recordings use recordPath as a single directory (legacy).
+# storages:
+#   dvr:
+#     # How to pick a disk for a new segment: roundRobin, fillFirst.
+#     strategy: roundRobin
+#     # Skip a disk when used space is >= this percent. 0 = only ENOSPC.
+#     maxUsedPercent: 90
+#     disks:
+#       - /mnt/storage1/recordings
+#       - /mnt/storage2/recordings
+
+###############################################
 # Default path settings
 
 # Settings in "pathDefaults" are applied anywhere,
@@ -592,7 +607,11 @@ pathDefaults:
   # Extension is added automatically.
   # Available variables are %path (path name), %Y %m %d (year, month, day),
   # %H %M %S (hours, minutes, seconds), %f (microseconds), %z (time zone), %s (unix epoch).
+  # When "storage" is set, this is a filename template: a static directory prefix is ignored
+  # and each pool disk is used as the root.
   recordPath: ./recordings/%path/%Y-%m-%d_%H-%M-%S-%f
+  # Named storage pool (see top-level storages). Empty = recordPath is a full path.
+  # storage: dvr
   # Format of recorded segments.
   # Available formats are "fmp4" (fragmented MP4) and "mpegts" (MPEG-TS).
   recordFormat: fmp4

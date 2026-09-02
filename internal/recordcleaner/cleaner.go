@@ -138,18 +138,20 @@ func (c *Cleaner) deleteExpiredSegments(now time.Time, pathName string, pathConf
 }
 
 func (c *Cleaner) deleteEmptyDirs(pathConf *conf.Path) {
-	recordPath := strings.ReplaceAll(pathConf.RecordPath, "%path", pathConf.Name)
-	commonPath := recordstore.CommonPath(recordPath)
+	for _, raw := range pathConf.RecordPathFormats() {
+		recordPath := strings.ReplaceAll(raw, "%path", pathConf.Name)
+		commonPath := recordstore.CommonPath(recordPath)
 
-	filepath.WalkDir(commonPath, func(fpath string, info fs.DirEntry, err error) error { //nolint:errcheck
-		if err != nil {
-			return err
-		}
+		filepath.WalkDir(commonPath, func(fpath string, info fs.DirEntry, err error) error { //nolint:errcheck
+			if err != nil {
+				return err
+			}
 
-		if info.IsDir() {
-			os.Remove(fpath)
-		}
+			if info.IsDir() {
+				os.Remove(fpath)
+			}
 
-		return nil
-	})
+			return nil
+		})
+	}
 }

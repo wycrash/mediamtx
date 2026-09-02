@@ -2,15 +2,13 @@ package recorder
 
 import (
 	"os"
-	"path/filepath"
 	"time"
 
 	"github.com/bluenviron/mediamtx/internal/logger"
-	"github.com/bluenviron/mediamtx/internal/recordstore"
 )
 
 type formatMPEGTSSegment struct {
-	pathFormat2       string
+	ri                *recorderInstance
 	flush             func() error
 	onSegmentCreate   OnSegmentCreateFunc
 	onSegmentComplete OnSegmentCompleteFunc
@@ -50,21 +48,13 @@ func (s *formatMPEGTSSegment) close() error {
 
 func (s *formatMPEGTSSegment) Write(p []byte) (int, error) {
 	if s.fi == nil {
-		s.path = recordstore.Path{Start: s.startNTP}.Encode(s.pathFormat2)
+		fi, path, err := s.ri.createSegmentFile(s.startNTP)
+		if err != nil {
+			return 0, err
+		}
+		s.path = path
 		s.log.Log(logger.Debug, "creating segment %s", s.path)
-
-		err := os.MkdirAll(filepath.Dir(s.path), 0o755)
-		if err != nil {
-			return 0, err
-		}
-
-		fi, err := os.Create(s.path)
-		if err != nil {
-			return 0, err
-		}
-
 		s.onSegmentCreate(s.path)
-
 		s.fi = fi
 	}
 

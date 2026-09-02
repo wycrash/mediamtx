@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -76,6 +77,18 @@ func dvrIndexHash(pathConf *conf.Path, pathName string) uint64 {
 	_, _ = h.Write([]byte(pathConf.RecordFormat))
 	_, _ = h.Write([]byte{0})
 	_, _ = h.Write([]byte(pathName))
+	// ranges-v2: do not treat next-file delta up to 3× segmentDuration as
+	// contiguous (that hid archive holes on round-robin storage disks).
+	_, _ = h.Write([]byte{0})
+	_, _ = h.Write([]byte("ranges-v2"))
+	if pathConf.Storage != "" {
+		_, _ = h.Write([]byte{0})
+		_, _ = h.Write([]byte(pathConf.Storage))
+		for _, d := range pathConf.StorageDisks {
+			_, _ = h.Write([]byte{0})
+			_, _ = h.Write([]byte(d))
+		}
+	}
 	return h.Sum64()
 }
 
@@ -137,22 +150,106 @@ func isDayDirName(name string) bool {
 	return err == nil
 }
 
-func makeDvrLayout(pathConf *conf.Path, pathName string) dvrPathLayout {
+func makeDvrLayoutFrom(recordPathTpl string, pathConf *conf.Path, pathName string) dvrPathLayout {
 	recordPath := recordstore.PathAddExtension(
-		strings.ReplaceAll(pathConf.RecordPath, "%path", pathName),
+		strings.ReplaceAll(recordPathTpl, "%path", pathName),
 		pathConf.RecordFormat,
 	)
 	recordPath, _ = filepath.Abs(recordPath)
 	common := recordstore.CommonPath(recordPath)
 	l := dvrPathLayout{
 		common:  common,
-		dateDir: recordPathHasDateDir(pathConf.RecordPath),
+		dateDir: recordPathHasDateDir(recordPathTpl),
 	}
 	if filepath.Base(common) != pathName && filepath.Base(common) != filepath.Base(pathName) {
 		l.fileTag = "." + sanitizeIndexName(pathName)
 	}
 	l.meta = filepath.Join(common, dvrMetaName+l.fileTag)
 	return l
+}
+
+func (l dvrPathLayout) walkRoot(pathName string) string {
+	if l.common == "" {
+		return ""
+	}
+	if pathName == "" || strings.Contains(pathName, "..") {
+		return l.common
+	}
+	sub := filepath.Join(l.common, filepath.FromSlash(pathName))
+	if info, err := os.Stat(sub); err == nil && info.IsDir() {
+		return sub
+	}
+	return l.common
+}
+
+func makeDvrLayout(pathConf *conf.Path, pathName string) dvrPathLayout {
+	layouts := makeDvrLayouts(pathConf, pathName)
+	if len(layouts) == 0 {
+		return dvrPathLayout{}
+	}
+	return layouts[0]
+}
+
+func makeDvrLayouts(pathConf *conf.Path, pathName string) []dvrPathLayout {
+	if pathConf == nil {
+		return nil
+	}
+	formats := pathConf.RecordPathFormats()
+	out := make([]dvrPathLayout, 0, len(formats))
+	for _, raw := range formats {
+		out = append(out, makeDvrLayoutFrom(raw, pathConf, pathName))
+	}
+	return out
+}
+
+func layoutForFpath(layouts []dvrPathLayout, fpath string) dvrPathLayout {
+	if len(layouts) == 0 {
+		return dvrPathLayout{}
+	}
+	if fpath == "" {
+		return layouts[0]
+	}
+	abs, err := filepath.Abs(fpath)
+	if err != nil {
+		abs = fpath
+	}
+	for _, l := range layouts {
+		if l.common == "" {
+			continue
+		}
+		commonAbs, err := filepath.Abs(l.common)
+		if err != nil {
+			commonAbs = l.common
+		}
+		rel, err := filepath.Rel(commonAbs, abs)
+		if err != nil {
+			continue
+		}
+		if rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+			continue
+		}
+		return l
+	}
+	return layouts[0]
+}
+
+func mergeDayInfosSum(dst, src []dvrDayInfo) []dvrDayInfo {
+	by := make(map[string]uint32, len(dst)+len(src))
+	for _, d := range dst {
+		by[d.Date] += d.NSeg
+	}
+	for _, d := range src {
+		by[d.Date] += d.NSeg
+	}
+	if len(by) == 0 {
+		return nil
+	}
+	out := make([]dvrDayInfo, 0, len(by))
+	for date, n := range by {
+		out = append(out, dvrDayInfo{Date: date, NSeg: n})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Date < out[j].Date })
+	return out
 }
 
 func (l dvrPathLayout) daySnap(day string) string {

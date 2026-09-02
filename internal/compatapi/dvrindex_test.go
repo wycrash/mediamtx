@@ -541,3 +541,174 @@ func TestIndexRangesSurviveLiveAddAndRepairFromDays(t *testing.T) {
 	require.LessOrEqual(t, repaired[0].From, hist.Unix(), "truncated meta ranges must be rebuilt from day shards")
 	idx.ClosePersist()
 }
+
+func TestIndexLoadFromDiskTwoDisks(t *testing.T) {
+	d1 := t.TempDir()
+	d2 := t.TempDir()
+	cam1 := filepath.Join(d1, "cam1")
+	cam2 := filepath.Join(d2, "cam1")
+	a := filepath.Join(cam1, "2020-01-01_00-00-00-000000.mp4")
+	b := filepath.Join(cam2, "2020-01-01_00-00-05-000000.mp4")
+	writeNamedFMP4(t, a, 2)
+	writeNamedFMP4(t, b, 3)
+
+	pathConf := &conf.Path{
+		Name:                  "cam1",
+		RecordPath:            "%path/%Y-%m-%d_%H-%M-%S-%f",
+		RecordFormat:          conf.RecordFormatFMP4,
+		RecordSegmentDuration: conf.Duration(5 * time.Second),
+		Storage:               "dvr",
+		StorageDisks:          []string{d1, d2},
+	}
+	confs := map[string]*conf.Path{"cam1": pathConf}
+
+	idx1 := NewIndex()
+	require.Equal(t, 0, idx1.LoadFromDisk(confs).DiskPaths)
+	st1 := idx1.ReconcileAll(nil, false)
+	require.Equal(t, 2, st1.Segments)
+	idx1.ClosePersist()
+
+	layouts := makeDvrLayouts(pathConf, "cam1")
+	require.Len(t, layouts, 2)
+	require.FileExists(t, layouts[0].meta)
+	require.FileExists(t, layouts[1].meta)
+	require.FileExists(t, layouts[0].daySnap("2020-01-01"))
+	require.FileExists(t, layouts[1].daySnap("2020-01-01"))
+
+	idx2 := NewIndex()
+	st2 := idx2.LoadFromDisk(confs)
+	require.Equal(t, 2, st2.Segments)
+	require.Equal(t, 1, st2.DiskPaths)
+
+	out := idx2.SegmentsInWindow("cam1", time.Date(2020, 1, 1, 0, 0, 0, 0, time.Local), time.Minute)
+	require.Len(t, out, 2)
+	require.Equal(t, a, out[0].Fpath())
+	require.Equal(t, b, out[1].Fpath())
+	idx2.ClosePersist()
+}
+
+func TestIndexRebuildsWhenOneStorageDiskIndexDeleted(t *testing.T) {
+	d1 := t.TempDir()
+	d2 := t.TempDir()
+	a := filepath.Join(d1, "cam1", "2020-01-01_00-00-00-000000.mp4")
+	b := filepath.Join(d2, "cam1", "2020-01-01_00-00-05-000000.mp4")
+	writeNamedFMP4(t, a, 2)
+	writeNamedFMP4(t, b, 3)
+
+	pathConf := &conf.Path{
+		Name:                  "cam1",
+		RecordPath:            "%path/%Y-%m-%d_%H-%M-%S-%f",
+		RecordFormat:          conf.RecordFormatFMP4,
+		RecordSegmentDuration: conf.Duration(5 * time.Second),
+		Storage:               "dvr",
+		StorageDisks:          []string{d1, d2},
+	}
+	confs := map[string]*conf.Path{"cam1": pathConf}
+
+	idx := NewIndex()
+	require.Equal(t, 0, idx.LoadFromDisk(confs).DiskPaths)
+	require.Equal(t, 2, idx.ReconcileAll(nil, false).Segments)
+	idx.ClosePersist()
+
+	layouts := makeDvrLayouts(pathConf, "cam1")
+	require.NoError(t, os.Remove(layouts[0].meta))
+	require.NoError(t, os.Remove(layouts[0].daySnap("2020-01-01")))
+	_ = os.Remove(layouts[0].dayJournal("2020-01-01"))
+
+	idx = NewIndex()
+	st := idx.LoadFromDisk(confs)
+	require.Equal(t, 0, st.DiskPaths, "one broken disk must not count the path as fully loaded")
+	require.True(t, idx.pathNeedsRebuild("cam1"))
+
+	st = idx.ReconcileAll(nil, true)
+	require.Equal(t, 1, st.Built)
+	require.Equal(t, 2, st.Segments)
+	require.FileExists(t, layouts[0].meta)
+	require.FileExists(t, layouts[0].daySnap("2020-01-01"))
+	out := idx.SegmentsInWindow("cam1", time.Date(2020, 1, 1, 0, 0, 0, 0, time.Local), time.Minute)
+	require.Len(t, out, 2)
+	idx.ClosePersist()
+}
+
+func TestIndexRebuildsWhenOneStorageDiskSnapshotsDeleted(t *testing.T) {
+	d1 := t.TempDir()
+	d2 := t.TempDir()
+	a := filepath.Join(d1, "cam1", "2020-01-01_00-00-00-000000.mp4")
+	b := filepath.Join(d2, "cam1", "2020-01-01_00-00-05-000000.mp4")
+	writeNamedFMP4(t, a, 2)
+	writeNamedFMP4(t, b, 3)
+
+	pathConf := &conf.Path{
+		Name:                  "cam1",
+		RecordPath:            "%path/%Y-%m-%d_%H-%M-%S-%f",
+		RecordFormat:          conf.RecordFormatFMP4,
+		RecordSegmentDuration: conf.Duration(5 * time.Second),
+		Storage:               "dvr",
+		StorageDisks:          []string{d1, d2},
+	}
+	confs := map[string]*conf.Path{"cam1": pathConf}
+
+	idx := NewIndex()
+	require.Equal(t, 0, idx.LoadFromDisk(confs).DiskPaths)
+	require.Equal(t, 2, idx.ReconcileAll(nil, false).Segments)
+	idx.ClosePersist()
+
+	layouts := makeDvrLayouts(pathConf, "cam1")
+	require.NoError(t, os.Remove(layouts[0].daySnap("2020-01-01")))
+	_ = os.Remove(layouts[0].dayJournal("2020-01-01"))
+	require.FileExists(t, layouts[0].meta)
+
+	idx = NewIndex()
+	st := idx.LoadFromDisk(confs)
+	require.Equal(t, 0, st.DiskPaths)
+	require.True(t, idx.pathNeedsRebuild("cam1"))
+	st = idx.ReconcileAll(nil, true)
+	require.Equal(t, 1, st.Built)
+	require.FileExists(t, layouts[0].daySnap("2020-01-01"))
+	out := idx.SegmentsInWindow("cam1", time.Date(2020, 1, 1, 0, 0, 0, 0, time.Local), time.Minute)
+	require.Len(t, out, 2)
+	idx.ClosePersist()
+}
+
+func TestIndexRecordingStatusMergesRoundRobinDisks(t *testing.T) {
+	d1 := t.TempDir()
+	d2 := t.TempDir()
+	a := filepath.Join(d1, "cam1", "2020-01-01_00-00-00-000000.mp4")
+	b := filepath.Join(d2, "cam1", "2020-01-01_00-00-05-000000.mp4")
+	c := filepath.Join(d1, "cam1", "2020-01-01_00-00-10-000000.mp4")
+	writeNamedFMP4(t, a, 5)
+	writeNamedFMP4(t, b, 5)
+	writeNamedFMP4(t, c, 5)
+
+	pathConf := &conf.Path{
+		Name:                  "cam1",
+		RecordPath:            "%path/%Y-%m-%d_%H-%M-%S-%f",
+		RecordFormat:          conf.RecordFormatFMP4,
+		RecordSegmentDuration: conf.Duration(5 * time.Second),
+		Storage:               "dvr",
+		StorageDisks:          []string{d1, d2},
+	}
+	confs := map[string]*conf.Path{"cam1": pathConf}
+
+	idx := NewIndex()
+	require.Equal(t, 0, idx.LoadFromDisk(confs).DiskPaths)
+	require.Equal(t, 3, idx.ReconcileAll(nil, false).Segments)
+	ranges := idx.Ranges("cam1")
+	require.Len(t, ranges, 1, "round-robin files on two disks must look continuous in recording_status")
+	require.Equal(t, time.Date(2020, 1, 1, 0, 0, 0, 0, time.Local).Unix(), ranges[0].From)
+	require.Equal(t, int64(15), ranges[0].Duration)
+
+	layouts := makeDvrLayouts(pathConf, "cam1")
+	require.NoError(t, os.Remove(layouts[1].meta))
+	require.NoError(t, os.Remove(layouts[1].daySnap("2020-01-01")))
+	_ = os.Remove(layouts[1].dayJournal("2020-01-01"))
+	idx.ClosePersist()
+
+	idx = NewIndex()
+	require.Equal(t, 0, idx.LoadFromDisk(confs).DiskPaths)
+	require.Equal(t, 3, idx.ReconcileAll(nil, false).Segments)
+	ranges = idx.Ranges("cam1")
+	require.Len(t, ranges, 1)
+	require.Equal(t, int64(15), ranges[0].Duration)
+	idx.ClosePersist()
+}

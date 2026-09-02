@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"os"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -23,73 +24,62 @@ type Segment struct {
 	Start time.Time
 }
 
-func fixedPathHasSegments(pathConf *conf.Path) bool {
-	recordPath := PathAddExtension(
-		strings.ReplaceAll(pathConf.RecordPath, "%path", pathConf.Name),
-		pathConf.RecordFormat,
-	)
-
-	// we have to convert to absolute paths
-	// otherwise, recordPath and fpath inside Walk() won't have common elements
-	recordPath, _ = filepath.Abs(recordPath)
-
-	commonPath := CommonPath(recordPath)
-
-	err := filepath.WalkDir(commonPath, func(fpath string, info fs.DirEntry, err error) error {
-		if err != nil {
-			return err
+func recordFormatsAbs(pathConf *conf.Path, pathName string) []string {
+	var out []string
+	for _, raw := range pathConf.RecordPathFormats() {
+		if pathName != "" {
+			raw = strings.ReplaceAll(raw, "%path", pathName)
 		}
-
-		if !info.IsDir() {
-			var pa Path
-			ok := pa.Decode(recordPath, fpath)
-			if ok {
-				return errFound
-			}
-		}
-
-		return nil
-	})
-	if err != nil && !errors.Is(err, errFound) {
-		return false
+		recordPath := PathAddExtension(raw, pathConf.RecordFormat)
+		recordPath, _ = filepath.Abs(recordPath)
+		out = append(out, recordPath)
 	}
+	return out
+}
 
-	return errors.Is(err, errFound)
+func fixedPathHasSegments(pathConf *conf.Path) bool {
+	for _, recordPath := range recordFormatsAbs(pathConf, pathConf.Name) {
+		commonPath := CommonPath(recordPath)
+		err := filepath.WalkDir(commonPath, func(fpath string, info fs.DirEntry, err error) error {
+			if err != nil {
+				return err
+			}
+			if !info.IsDir() {
+				var pa Path
+				if pa.Decode(recordPath, fpath) {
+					return errFound
+				}
+			}
+			return nil
+		})
+		if errors.Is(err, errFound) {
+			return true
+		}
+	}
+	return false
 }
 
 func regexpPathFindPathsWithSegments(pathConf *conf.Path) map[string]struct{} {
-	recordPath := PathAddExtension(
-		pathConf.RecordPath,
-		pathConf.RecordFormat,
-	)
-
-	// we have to convert to absolute paths
-	// otherwise, recordPath and fpath inside Walk() won't have common elements
-	recordPath, _ = filepath.Abs(recordPath)
-
-	commonPath := CommonPath(recordPath)
-
 	ret := make(map[string]struct{})
-
-	filepath.WalkDir(commonPath, func(fpath string, info fs.DirEntry, err error) error { //nolint:errcheck
-		if err != nil {
-			return err
-		}
-
-		if !info.IsDir() {
-			var pa Path
-			if ok := pa.Decode(recordPath, fpath); ok {
-				if err = conf.IsValidPathName(pa.Path); err == nil {
-					if pathConf.Regexp.FindStringSubmatch(pa.Path) != nil {
-						ret[pa.Path] = struct{}{}
+	for _, recordPath := range recordFormatsAbs(pathConf, "") {
+		commonPath := CommonPath(recordPath)
+		filepath.WalkDir(commonPath, func(fpath string, info fs.DirEntry, err error) error { //nolint:errcheck
+			if err != nil {
+				return err
+			}
+			if !info.IsDir() {
+				var pa Path
+				if ok := pa.Decode(recordPath, fpath); ok {
+					if err = conf.IsValidPathName(pa.Path); err == nil {
+						if pathConf.Regexp.FindStringSubmatch(pa.Path) != nil {
+							ret[pa.Path] = struct{}{}
+						}
 					}
 				}
 			}
-		}
-
-		return nil
-	})
-
+			return nil
+		})
+	}
 	return ret
 }
 
@@ -133,40 +123,37 @@ func FindSegments(
 		return nil, fmt.Errorf("invalid path name: %w (%s)", err, pathName)
 	}
 
-	recordPath := PathAddExtension(
-		strings.ReplaceAll(pathConf.RecordPath, "%path", pathName),
-		pathConf.RecordFormat,
-	)
-
-	// we have to convert to absolute paths
-	// otherwise, recordPath and fpath inside Walk() won't have common elements
-	recordPath, _ = filepath.Abs(recordPath)
-
-	commonPath := CommonPath(recordPath)
 	var segments []*Segment
-
-	err := filepath.WalkDir(commonPath, func(fpath string, info fs.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
-
-		if !info.IsDir() {
-			var pa Path
-			ok := pa.Decode(recordPath, fpath)
-
-			// gather all segments that start before the end of the playback
-			if ok && (end == nil || !end.Before(pa.Start)) {
-				segments = append(segments, &Segment{
-					Fpath: fpath,
-					Start: pa.Start,
-				})
+	var walkErr error
+	for _, recordPath := range recordFormatsAbs(pathConf, pathName) {
+		commonPath := CommonPath(recordPath)
+		err := filepath.WalkDir(commonPath, func(fpath string, info fs.DirEntry, err error) error {
+			if err != nil {
+				return err
 			}
-		}
 
-		return nil
-	})
-	if err != nil {
-		return nil, err
+			if !info.IsDir() {
+				var pa Path
+				ok := pa.Decode(recordPath, fpath)
+
+				// gather all segments that start before the end of the playback
+				if ok && (end == nil || !end.Before(pa.Start)) {
+					segments = append(segments, &Segment{
+						Fpath: fpath,
+						Start: pa.Start,
+					})
+				}
+			}
+
+			return nil
+		})
+		if err != nil && !os.IsNotExist(err) {
+			walkErr = err
+			break
+		}
+	}
+	if walkErr != nil {
+		return nil, walkErr
 	}
 
 	if segments == nil {
@@ -202,4 +189,14 @@ func FindSegments(
 	}
 
 	return segments, nil
+}
+
+// PossibleSegmentFiles returns candidate file paths for a segment start time.
+func PossibleSegmentFiles(pathConf *conf.Path, pathName string, start time.Time) []string {
+	formats := recordFormatsAbs(pathConf, pathName)
+	out := make([]string, 0, len(formats))
+	for _, recordPath := range formats {
+		out = append(out, Path{Start: start}.Encode(recordPath))
+	}
+	return out
 }

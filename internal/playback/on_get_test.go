@@ -1080,3 +1080,58 @@ func TestOnGetBetweenSegments(t *testing.T) {
 		})
 	}
 }
+
+func writeGlueTestSegment(t *testing.T, fpath string, number uint64, nSamples int) {
+	t.Helper()
+	init := fmp4.Init{
+		Tracks: []*fmp4.InitTrack{{
+			ID:        1,
+			TimeScale: 90000,
+			Codec: &mcodecs.H264{
+				SPS: test.FormatH264.SPS,
+				PPS: test.FormatH264.PPS,
+			},
+		}},
+		UserData: []amp4.IBox{&recordstore.Mtxi{
+			StreamID:      uuid.MustParse("31564107-9e7e-4923-bf2f-631371a35397"),
+			SegmentNumber: number,
+		}},
+	}
+	var buf1 seekablebuffer.Buffer
+	require.NoError(t, init.Marshal(&buf1))
+	samples := make([]*fmp4.Sample, nSamples)
+	for i := 0; i < nSamples; i++ {
+		samples[i] = &fmp4.Sample{Duration: 90000, Payload: []byte{byte(i + 1), byte(number)}}
+	}
+	var buf2 seekablebuffer.Buffer
+	require.NoError(t, fmp4.Parts{{
+		Tracks: []*fmp4.PartTrack{{ID: 1, Samples: samples}},
+	}}.Marshal(&buf2))
+	require.NoError(t, os.MkdirAll(filepath.Dir(fpath), 0o755))
+	require.NoError(t, os.WriteFile(fpath, append(buf1.Bytes(), buf2.Bytes()...), 0o644))
+}
+
+func TestMuxAvailableSegmentsGluesBrokenFirst(t *testing.T) {
+	dir := t.TempDir()
+	base := time.Date(2020, 1, 1, 12, 0, 0, 0, time.UTC)
+	a := filepath.Join(dir, "a.mp4")
+	b := filepath.Join(dir, "b.mp4")
+	writeGlueTestSegment(t, a, 1, 5)
+	writeGlueTestSegment(t, b, 3, 5) // gap in SegmentNumber after reconnect / truncated take
+	segs := []*recordstore.Segment{
+		{Fpath: a, Start: base},
+		{Fpath: b, Start: base.Add(10 * time.Second)},
+	}
+
+	var strict bytes.Buffer
+	require.NoError(t, MuxSegments(conf.RecordFormatFMP4, segs, base, time.Minute, "mp4", &strict))
+	var p1 pmp4.Presentation
+	require.NoError(t, p1.Unmarshal(bytes.NewReader(strict.Bytes())))
+	require.Equal(t, 5, len(p1.Tracks[0].Samples), "strict muxer stops at the first concatenation break")
+
+	var glued bytes.Buffer
+	require.NoError(t, MuxAvailableSegments(conf.RecordFormatFMP4, segs, base, time.Minute, "mp4", &glued))
+	var p2 pmp4.Presentation
+	require.NoError(t, p2.Unmarshal(bytes.NewReader(glued.Bytes())))
+	require.Equal(t, 10, len(p2.Tracks[0].Samples), "archive download must include every readable segment in the window")
+}

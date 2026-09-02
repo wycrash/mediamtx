@@ -433,6 +433,9 @@ type Conf struct {
 	RecordSegmentDuration *Duration     `json:"recordSegmentDuration,omitempty" deprecated:"true"`
 	RecordDeleteAfter     *Duration     `json:"recordDeleteAfter,omitempty" deprecated:"true"`
 
+	// Named pools of recording disks. A path references a pool with storage.
+	Storages map[string]*Storage `json:"storages"`
+
 	// Path defaults
 	PathDefaults Path `json:"pathDefaults"`
 
@@ -1150,6 +1153,18 @@ func (conf *Conf) Validate(l logger.Writer) error {
 		l.Log(logger.Warn, "parameter 'recordDeleteAfter' is deprecated "+
 			"and has been replaced with 'pathDefaults.recordDeleteAfter'")
 		conf.PathDefaults.RecordDeleteAfter = *conf.RecordDeleteAfter
+	}
+
+	// Storages
+
+	for name, s := range conf.Storages {
+		if s == nil {
+			return fmt.Errorf("storage '%s' is empty", name)
+		}
+		err := s.validate(name)
+		if err != nil {
+			return err
+		}
 	}
 
 	// paths

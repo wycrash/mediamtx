@@ -214,6 +214,12 @@ components:
         - fmp4
         - mpegts
 
+    StorageStrategy:
+      type: string
+      enum:
+        - roundRobin
+        - fillFirst
+
     SRTConnState:
       type: string
       enum:
@@ -703,6 +709,14 @@ components:
           type: string
         srtpAddress:
           type: string
+        storages:
+          type: object
+          description: Named pools of recording disks. A path references a pool with storage.
+          additionalProperties:
+            type: object
+            allOf:
+              - $ref: "#/components/schemas/Storage"
+            nullable: true
         sysLogPrefix:
           type: string
         udpMaxPayloadSize:
@@ -1303,6 +1317,9 @@ components:
           type: string
         srtReadPassphrase:
           type: string
+        storage:
+          type: string
+          description: Named storage pool. Empty keeps recordPath as a single directory.
         title:
           type: string
           description: Human-readable name of the path. Does not affect the path URL.
@@ -1337,6 +1354,23 @@ components:
       properties:
         dest:
           type: string
+
+    Storage:
+      type: object
+      properties:
+        disks:
+          type: array
+          description: Recording roots. Order is used by roundRobin / fillFirst.
+          items:
+            type: string
+        maxUsedPercent:
+          type: number
+          format: double
+          description: Skip a disk when used space is >= this percent. 0 disables the check (ENOSPC only).
+          nullable: true
+        strategy:
+          $ref: "#/components/schemas/StorageStrategy"
+          description: How to pick a disk for a new recording segment (roundRobin, fillFirst).
 
     PathList:
       type: object

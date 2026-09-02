@@ -122,32 +122,27 @@ func (a *API) onRecordingDeleteSegment(ctx *gin.Context) {
 		return
 	}
 
-	commonPath := recordstore.CommonPath(pathConf.RecordPath)
-
-	pathFormat := recordstore.PathAddExtension(
-		strings.ReplaceAll(pathConf.RecordPath, "%path", pathName),
-		pathConf.RecordFormat,
-	)
-
-	pathFormat, err = absolutePathInside(commonPath, pathFormat)
-	if err != nil {
-		a.writeError(ctx, http.StatusBadRequest, err)
-		return
+	var lastErr error
+	removed := false
+	for _, candidate := range recordstore.PossibleSegmentFiles(pathConf, pathName, start) {
+		commonPath := recordstore.CommonPath(candidate)
+		segmentPath, err := absolutePathInside(commonPath, candidate)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		err = os.Remove(segmentPath)
+		if err == nil {
+			removed = true
+			break
+		}
+		lastErr = err
 	}
-
-	segmentPath := recordstore.Path{
-		Start: start,
-	}.Encode(pathFormat)
-
-	segmentPath, err = absolutePathInside(commonPath, segmentPath)
-	if err != nil {
-		a.writeError(ctx, http.StatusBadRequest, err)
-		return
-	}
-
-	err = os.Remove(segmentPath)
-	if err != nil {
-		a.writeError(ctx, http.StatusBadRequest, err)
+	if !removed {
+		if lastErr == nil {
+			lastErr = os.ErrNotExist
+		}
+		a.writeError(ctx, http.StatusBadRequest, lastErr)
 		return
 	}
 

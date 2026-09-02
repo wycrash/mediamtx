@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -1070,4 +1071,30 @@ func TestRecorderTimeDriftDetector(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestCreateSegmentFilePickRoot(t *testing.T) {
+	d1 := t.TempDir()
+	d2 := t.TempDir()
+	n := 0
+	ri := &recorderInstance{
+		pathFormat2: "cam/%Y-%m-%d_%H-%M-%S-%f.mp4",
+		pickRoot: func(skip []string) (string, error) {
+			n++
+			if n%2 == 1 {
+				return d1, nil
+			}
+			return d2, nil
+		},
+	}
+
+	f1, p1, err := ri.createSegmentFile(time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC))
+	require.NoError(t, err)
+	require.NoError(t, f1.Close())
+	require.True(t, strings.HasPrefix(p1, d1))
+
+	f2, p2, err := ri.createSegmentFile(time.Date(2020, 1, 1, 0, 0, 1, 0, time.UTC))
+	require.NoError(t, err)
+	require.NoError(t, f2.Close())
+	require.True(t, strings.HasPrefix(p2, d2))
 }

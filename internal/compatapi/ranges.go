@@ -210,6 +210,31 @@ func rangeMergeTolerance(nominal time.Duration) time.Duration {
 	return t
 }
 
+func segDurationCap(nominal time.Duration) time.Duration {
+	if nominal <= 0 {
+		nominal = time.Hour
+	}
+	return nominal + rangeMergeTolerance(nominal)
+}
+
+// trustedSegDuration is the duration used for recording_status / index ranges.
+// A known file duration wins when it is at most a segment plus merge tolerance.
+// Otherwise a following file within that window is chained. Larger gaps stay holes
+// (round-robin files on one disk are typically ~2× segment apart).
+func trustedSegDuration(stored, nextDelta, nominal time.Duration) time.Duration {
+	if nominal <= 0 {
+		nominal = time.Hour
+	}
+	cap := segDurationCap(nominal)
+	if stored > 0 && stored <= cap {
+		return stored
+	}
+	if nextDelta > 0 && nextDelta <= cap {
+		return nextDelta
+	}
+	return nominal
+}
+
 // BuildRanges merges segments into contiguous ranges.
 // segmentDuration is the fallback duration when a segment's real length is unknown.
 func BuildRanges(segments []*recordstore.Segment, segmentDuration time.Duration) []RecordingRange {

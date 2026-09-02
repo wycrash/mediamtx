@@ -45,6 +45,25 @@ pathDefaults:
   recordDeleteAfter: 1d
 ```
 
+To spread recordings across several disks, define a named pool and point the path at it. `recordPath` stays a filename template; the pool owns disks, fill limit, and pick strategy.
+
+```yml
+storages:
+  dvr:
+    strategy: roundRobin
+    maxUsedPercent: 90
+    disks:
+      - /mnt/storage1/recordings
+      - /mnt/storage2/recordings
+
+pathDefaults:
+  record: yes
+  recordPath: '%path/%Y-%m-%d_%H-%M-%S-%f'
+  storage: dvr
+```
+
+New segments are written with round-robin among disks that are under `maxUsedPercent` (0 means only skip a disk after ENOSPC). Playback, the recording API, and the DVR index read the union of all disks in the pool. Without `storage`, behavior is unchanged: `recordPath` is a single directory.
+
 All available recording parameters are listed in the [configuration file](../5-references/1-configuration-file.md).
 
 ## Remote upload

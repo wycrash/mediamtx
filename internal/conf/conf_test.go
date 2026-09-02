@@ -573,6 +573,28 @@ func TestConfErrors(t *testing.T) {
 			`'recordPath' must contain %f`,
 		},
 		{
+			"storage missing",
+			"paths:\n" +
+				"  my_path:\n" +
+				"    storage: dvr\n",
+			`'storage' 'dvr' is not defined`,
+		},
+		{
+			"storage empty disks",
+			"storages:\n" +
+				"  dvr:\n" +
+				"    disks: []\n",
+			`storage 'dvr' must contain at least one disk`,
+		},
+		{
+			"invalid storage strategy",
+			"storages:\n" +
+				"  dvr:\n" +
+				"    strategy: raid\n" +
+				"    disks: [/tmp]\n",
+			`invalid storage strategy 'raid'`,
+		},
+		{
 			"invalid record delete after",
 			"paths:\n" +
 				"  my_path:\n" +

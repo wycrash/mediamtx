@@ -70,7 +70,7 @@ func (s *Server) onArchiveMP4(ctx *gin.Context, pathName string, start time.Time
 		filename: fmt.Sprintf("archive-%d-%d.mp4", start.Unix(), int64(duration/time.Second)),
 	}
 
-	err = playback.MuxSegments(pathConf.RecordFormat, segments, start, duration, "mp4", ww)
+	err = playback.MuxAvailableSegments(pathConf.RecordFormat, segments, start, duration, "mp4", ww)
 	if err != nil {
 		if _, ok := errors.AsType[*net.OpError](err); ok {
 			return

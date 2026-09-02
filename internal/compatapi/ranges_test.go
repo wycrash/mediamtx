@@ -52,6 +52,49 @@ func TestBuildRangesDoesNotFillRealGaps(t *testing.T) {
 	}, ranges)
 }
 
+func TestFillSegsMetaDoesNotBridgeArchiveGaps(t *testing.T) {
+	nominal := time.Hour
+	base := time.Date(2020, 1, 1, 10, 0, 0, 0, time.UTC)
+	segs := []*IndexedSegment{
+		{Start: base},
+		{Start: base.Add(2 * time.Hour)}, // same disk after round-robin / a real hole
+	}
+	fillSegsMeta(segs, nil, nil, nominal, time.Second)
+	require.Equal(t, nominal, segs[0].fmp4.Duration)
+
+	var ranges []RecordingRange
+	for _, s := range segs {
+		ranges = appendRecordingRange(ranges, s.Start, s.fmp4.Duration, nominal)
+	}
+	require.Len(t, ranges, 2, "a hole larger than segmentDuration must stay a hole in recording_status")
+	require.Equal(t, base.Unix(), ranges[0].From)
+	require.Equal(t, int64(nominal.Seconds()), ranges[0].Duration)
+}
+
+func TestAppendRecordingRangeFillsHoleFromSecondDisk(t *testing.T) {
+	nominal := 5 * time.Second
+	base := time.Unix(1_000_000, 0).UTC()
+	ranges := appendRecordingRange(nil, base, nominal, nominal)
+	ranges = appendRecordingRange(ranges, base.Add(10*time.Second), nominal, nominal)
+	require.Len(t, ranges, 2)
+
+	ranges = appendRecordingRange(ranges, base.Add(5*time.Second), nominal, nominal)
+	require.Len(t, ranges, 1, "a later disk's segment must fill the hole, not be dropped")
+	require.Equal(t, base.Unix(), ranges[0].From)
+	require.Equal(t, int64(15), ranges[0].Duration)
+}
+
+func TestFillSegsMetaRewritesInflatedSnapshotDuration(t *testing.T) {
+	nominal := time.Hour
+	base := time.Date(2020, 1, 1, 10, 0, 0, 0, time.UTC)
+	segs := []*IndexedSegment{
+		{Start: base, fmp4: fmp4SegMeta{Duration: 2 * time.Hour, Ready: true}},
+		{Start: base.Add(2 * time.Hour), fmp4: fmp4SegMeta{Duration: time.Hour, Ready: true}},
+	}
+	fillSegsMeta(segs, nil, nil, nominal, time.Second)
+	require.Equal(t, nominal, segs[0].fmp4.Duration)
+}
+
 func TestBuildRangesClampsFutureTail(t *testing.T) {
 	now := time.Unix(2000, 0).UTC()
 	segs := []timedSeg{
@@ -485,4 +528,16 @@ func TestAppendQueryToPlaylistURIs(t *testing.T) {
 	require.Contains(t, got, "b.ts?token=secret")
 	require.NotContains(t, got, "#EXTINF:2.000,?token=")
 	require.Equal(t, body, appendQueryToPlaylistURIs(body, ""))
+}
+
+func TestRangesNeedRepairOnlyWhenEmpty(t *testing.T) {
+	idx := NewIndex()
+	idx.paths["cam1"] = &pathIndex{
+		complete: true,
+		days:     []dvrDayInfo{{Date: "2020-01-01"}, {Date: "2020-01-02"}},
+		ranges:   []RecordingRange{{From: 1, Duration: 10}},
+	}
+	require.False(t, idx.rangesNeedRepair("cam1"), "holes in the archive must not reload every day snapshot")
+	idx.paths["cam1"].ranges = nil
+	require.True(t, idx.rangesNeedRepair("cam1"))
 }

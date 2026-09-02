@@ -233,9 +233,12 @@ type Path struct {
 	Forward Forward `json:"forward"`
 
 	// Record
-	Record                bool         `json:"record"`
-	Playback              *bool        `json:"playback,omitempty" deprecated:"true"`
-	RecordPath            string       `json:"recordPath"`
+	Record     bool   `json:"record"`
+	Playback   *bool  `json:"playback,omitempty" deprecated:"true"`
+	RecordPath string `json:"recordPath"`
+	// Named storage pool. Empty keeps recordPath as a single directory.
+	Storage               string       `json:"storage"`
+	StorageDisks          []string     `json:"-"` // filled by Validate()
 	RecordFormat          RecordFormat `json:"recordFormat"`
 	RecordPartDuration    Duration     `json:"recordPartDuration"`
 	RecordMaxPartSize     StringSize   `json:"recordMaxPartSize"`
@@ -847,6 +850,15 @@ func (pconf *Path) validate(
 
 	if pconf.Playback != nil {
 		l.Log(logger.Warn, "parameter 'playback' is deprecated and has no effect")
+	}
+
+	pconf.StorageDisks = nil
+	if pconf.Storage != "" {
+		s, ok := conf.Storages[pconf.Storage]
+		if !ok || s == nil {
+			return fmt.Errorf("'storage' '%s' is not defined", pconf.Storage)
+		}
+		pconf.StorageDisks = append([]string(nil), s.Disks...)
 	}
 
 	if !strings.Contains(pconf.RecordPath, "%path") {

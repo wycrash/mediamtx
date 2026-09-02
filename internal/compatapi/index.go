@@ -99,7 +99,7 @@ func bindSeg(pe *pathIndex, fpath string, start time.Time) *IndexedSegment {
 	common := ""
 	var codecs *[][]*fmp4.InitTrack
 	if pe != nil {
-		common = pe.commonPath
+		common = pe.commonFor(fpath)
 		codecs = &pe.internedTracks
 	}
 	return &IndexedSegment{
@@ -120,7 +120,10 @@ type pathIndex struct {
 	persist         *dvrPersist
 	commonPath      string
 	layout          dvrPathLayout
+	layouts         []dvrPathLayout
 	days            []dvrDayInfo
+	diskDays        map[string]map[string]int // common → day → nseg
+	diskRanges      map[string][]RecordingRange
 	openDay         string
 	pinnedDays      map[string]struct{}
 	// complete is true after a trusted meta load or a finished directory
@@ -128,6 +131,104 @@ type pathIndex struct {
 	// path that is still missing its on-disk index looks non-empty and only
 	// the new edge is indexed while other cameras are still rebuilding.
 	complete bool
+}
+
+func (pe *pathIndex) setLayouts(layouts []dvrPathLayout) {
+	if pe == nil {
+		return
+	}
+	pe.layouts = layouts
+	if len(layouts) > 0 {
+		pe.layout = layouts[0]
+		pe.commonPath = layouts[0].common
+	}
+}
+
+func (pe *pathIndex) allLayouts() []dvrPathLayout {
+	if pe == nil {
+		return nil
+	}
+	if len(pe.layouts) > 0 {
+		return pe.layouts
+	}
+	if pe.layout.common != "" || pe.layout.meta != "" {
+		return []dvrPathLayout{pe.layout}
+	}
+	return nil
+}
+
+func (pe *pathIndex) commonFor(fpath string) string {
+	if pe == nil {
+		return ""
+	}
+	if l := layoutForFpath(pe.allLayouts(), fpath); l.common != "" {
+		return l.common
+	}
+	return pe.commonPath
+}
+
+func (pe *pathIndex) selectLayoutForFpath(fpath string) {
+	if pe == nil {
+		return
+	}
+	if l := layoutForFpath(pe.allLayouts(), fpath); l.common != "" {
+		pe.layout = l
+	}
+}
+
+func (pe *pathIndex) setDiskDayNSeg(common, day string, n int) {
+	if pe == nil || common == "" || day == "" {
+		return
+	}
+	if n < 0 {
+		n = 0
+	}
+	if pe.diskDays == nil {
+		pe.diskDays = make(map[string]map[string]int)
+	}
+	if pe.diskDays[common] == nil {
+		pe.diskDays[common] = make(map[string]int)
+	}
+	pe.diskDays[common][day] = n
+}
+
+func (pe *pathIndex) loadDiskDays(common string, days []dvrDayInfo) {
+	for _, d := range days {
+		pe.setDiskDayNSeg(common, d.Date, int(d.NSeg))
+	}
+}
+
+func (pe *pathIndex) storeDiskRanges(common string, ranges []RecordingRange) {
+	if pe == nil || common == "" {
+		return
+	}
+	if pe.diskRanges == nil {
+		pe.diskRanges = make(map[string][]RecordingRange)
+	}
+	pe.diskRanges[common] = append([]RecordingRange(nil), ranges...)
+}
+
+func (pe *pathIndex) appendDiskRange(common string, start time.Time, dur time.Duration) {
+	if pe == nil || common == "" {
+		pe.appendSegRange(start, dur)
+		return
+	}
+	if pe.diskRanges == nil {
+		pe.diskRanges = make(map[string][]RecordingRange)
+	}
+	pe.diskRanges[common] = appendRecordingRange(pe.diskRanges[common], start, dur, pe.segmentDuration)
+	pe.appendSegRange(start, dur)
+}
+
+func (idx *Index) fillLayoutsLocked(pe *pathIndex, pathName string) {
+	if pe == nil || len(pe.layouts) > 0 || idx.pathConfs == nil {
+		return
+	}
+	pathConf, _, err := conf.FindPathConf(idx.pathConfs, pathName)
+	if err != nil || pathConf == nil {
+		return
+	}
+	pe.setLayouts(makeDvrLayouts(pathConf, pathName))
 }
 
 // IndexLoadStats is returned by Index.LoadFromDisk.
@@ -175,6 +276,10 @@ func (idx *Index) ReloadPathConfs(pathConfs map[string]*conf.Path) IndexLoadStat
 			if pe.segmentDuration != dur {
 				pe.segmentDuration = dur
 				pe.rangesOK = false
+			}
+			pe.setLayouts(makeDvrLayouts(pathConf, name))
+			if pe.persist != nil {
+				pe.persist.hash = dvrIndexHash(pathConf, name)
 			}
 		}
 	}
@@ -252,31 +357,33 @@ func recordingPathNames(pathConfs map[string]*conf.Path) []string {
 
 func regexpPathNamesFromDirs(pathConf *conf.Path) map[string]struct{} {
 	ret := make(map[string]struct{})
-	recordPath := recordstore.PathAddExtension(pathConf.RecordPath, pathConf.RecordFormat)
-	recordPath, _ = filepath.Abs(recordPath)
-	common := recordstore.CommonPath(recordPath)
-	if common == "" {
-		return ret
-	}
-	entries, err := os.ReadDir(common)
-	if err != nil {
-		return ret
-	}
 	hasPathVar := strings.Contains(pathConf.RecordPath, "%path")
-	for _, e := range entries {
-		name := e.Name()
-		if strings.HasPrefix(name, dvrSnapName) || strings.HasPrefix(name, dvrMetaName) {
+	for _, raw := range pathConf.RecordPathFormats() {
+		recordPath := recordstore.PathAddExtension(raw, pathConf.RecordFormat)
+		recordPath, _ = filepath.Abs(recordPath)
+		common := recordstore.CommonPath(recordPath)
+		if common == "" {
 			continue
 		}
-		if isDayDirName(name) {
+		entries, err := os.ReadDir(common)
+		if err != nil {
 			continue
 		}
-		if hasPathVar && e.IsDir() {
-			if err := conf.IsValidPathName(name); err != nil {
+		for _, e := range entries {
+			name := e.Name()
+			if strings.HasPrefix(name, dvrSnapName) || strings.HasPrefix(name, dvrMetaName) {
 				continue
 			}
-			if pathConf.Regexp != nil && pathConf.Regexp.MatchString(name) {
-				ret[name] = struct{}{}
+			if isDayDirName(name) {
+				continue
+			}
+			if hasPathVar && e.IsDir() {
+				if err := conf.IsValidPathName(name); err != nil {
+					continue
+				}
+				if pathConf.Regexp != nil && pathConf.Regexp.MatchString(name) {
+					ret[name] = struct{}{}
+				}
 			}
 		}
 	}
@@ -289,61 +396,92 @@ type pathLoadStats struct {
 
 func (idx *Index) loadPath(pathConf *conf.Path, pathName string) pathLoadStats {
 	var st pathLoadStats
-	layout := makeDvrLayout(pathConf, pathName)
-	layout.removeLegacyMonolith()
+	layouts := makeDvrLayouts(pathConf, pathName)
+	for _, l := range layouts {
+		l.removeLegacyMonolith()
+	}
 
 	p := newDvrPersist(pathConf, pathName)
-	meta, metaErr := readMetaFile(layout.meta)
-	if metaErr != nil || meta.Hash != p.hash {
+	nominal := time.Duration(pathConf.RecordSegmentDuration)
+
+	var mergedRanges []RecordingRange
+	var mergedDays []dvrDayInfo
+	trusted := 0
+	type diskJournal struct {
+		common string
+		ops    []dvrJournalOp
+	}
+	today := dvrDayDate(time.Now())
+	var journals []diskJournal
+
+	for _, l := range layouts {
+		meta, ok := diskIndexHealthy(l, p.hash)
+		if !ok {
+			continue
+		}
+		trusted++
+		mergedRanges = mergeRecordingRanges(mergedRanges, meta.Ranges, nominal)
+		mergedDays = mergeDayInfosSum(mergedDays, meta.Days)
 		idx.mutex.Lock()
 		pe := idx.ensurePathLocked(pathName)
-		pe.layout = layout
-		pe.commonPath = layout.common
-		pe.persist = p
+		pe.loadDiskDays(l.common, meta.Days)
+		pe.storeDiskRanges(l.common, meta.Ranges)
 		idx.mutex.Unlock()
-		return st
+		if today != "" {
+			ops, _ := readJournalFile(l.dayJournal(today), p.hash)
+			if len(ops) > 0 {
+				journals = append(journals, diskJournal{common: l.common, ops: ops})
+			}
+		}
 	}
 
 	idx.mutex.Lock()
 	pe := idx.ensurePathLocked(pathName)
-	pe.layout = layout
-	pe.commonPath = layout.common
+	pe.setLayouts(layouts)
 	pe.persist = p
-	pe.ranges = append([]RecordingRange(nil), meta.Ranges...)
+	idx.mutex.Unlock()
+
+	if trusted == 0 {
+		return st
+	}
+
+	idx.mutex.Lock()
+	pe = idx.ensurePathLocked(pathName)
+	pe.setLayouts(layouts)
+	pe.persist = p
+	pe.ranges = mergedRanges
 	pe.rangesOK = true
-	pe.days = append([]dvrDayInfo(nil), meta.Days...)
-	pe.complete = true
+	pe.days = mergedDays
+	pe.complete = trusted == len(layouts) && trusted > 0
 	pe.pinnedDays = make(map[string]struct{})
 	last := pe.lastDay()
 	idx.mutex.Unlock()
 
-	today := dvrDayDate(time.Now())
 	hotStart := time.Now().Add(-reconcileEdgeWindow)
-	for _, d := range meta.Days {
+	for _, d := range mergedDays {
 		if d.Date == today || d.Date == last || dayOverlapsWindow(d.Date, hotStart, time.Now().Add(time.Second)) {
 			idx.pinDay(pathName, d.Date)
 		}
 	}
-	if today != "" {
-		hasToday := false
-		for _, d := range meta.Days {
-			if d.Date == today {
-				hasToday = true
-				break
-			}
+	hasToday := false
+	for _, d := range mergedDays {
+		if d.Date == today {
+			hasToday = true
+			break
 		}
-		if hasToday {
-			idx.bindPersist(pathName, today)
-			ops, _ := readJournalFile(layout.dayJournal(today), p.hash)
-			if len(ops) > 0 {
-				idx.applyJournal(pathName, layout.common, ops)
-				idx.mutex.Lock()
-				if pe := idx.paths[pathName]; pe != nil && pe.persist != nil {
-					pe.persist.journalOps = len(ops)
-				}
-				idx.mutex.Unlock()
-			}
+	}
+	if hasToday {
+		idx.bindPersist(pathName, today)
+		journalOps := 0
+		for _, j := range journals {
+			idx.applyJournal(pathName, j.common, j.ops)
+			journalOps += len(j.ops)
 		}
+		idx.mutex.Lock()
+		if pe := idx.paths[pathName]; pe != nil && pe.persist != nil {
+			pe.persist.journalOps = journalOps
+		}
+		idx.mutex.Unlock()
 	}
 	idx.mutex.Lock()
 	if pe := idx.paths[pathName]; pe != nil {
@@ -356,10 +494,11 @@ func (idx *Index) loadPath(pathConf *conf.Path, pathName string) pathLoadStats {
 		}
 	}
 	idx.mutex.Unlock()
-	if !rangesCoverDays(meta.Ranges, meta.Days) {
+	if !rangesCoverDays(mergedRanges, mergedDays) {
 		idx.rebuildRangesFromDayFiles(pathName)
 	}
-	st.fromDisk = true
+	// Only a fully trusted index (every storage disk) skips the startup rebuild.
+	st.fromDisk = trusted == len(layouts) && trusted > 0
 	return st
 }
 
@@ -391,12 +530,14 @@ func (idx *Index) ReconcileAll(stop <-chan struct{}, slow bool) IndexLoadStats {
 		}
 		var ins, add, del int
 		if idx.pathNeedsRebuild(pathName) {
-			ins, add, del = idx.buildPathFromDir(pathName, pathConf, stop, false)
+			ins, add, del = idx.buildPathFromDir(pathName, pathConf, stop, slow)
 			if add > 0 {
 				st.Built++
 			}
 		} else {
-			if idx.rangesNeedRepair(pathName) {
+			// Periodic ticks must not reload every day snapshot. Holes in
+			// recording_status used to look like a truncated range cache.
+			if !slow && idx.rangesNeedRepair(pathName) {
 				idx.rebuildRangesFromDayFiles(pathName)
 			}
 			ins, add, del = idx.reconcilePathEdges(pathName, pathConf, stop, slow)
@@ -469,16 +610,11 @@ func (idx *Index) buildPathFromDir(
 	stop <-chan struct{},
 	slow bool,
 ) (inspected, added, removed int) {
-	layout := makeDvrLayout(pathConf, pathName)
-	if layout.common == "" {
+	layouts := makeDvrLayouts(pathConf, pathName)
+	if len(layouts) == 0 {
 		return 0, 0, 0
 	}
-	layout.removeLegacyMonolith()
-	recordPath := recordstore.PathAddExtension(
-		strings.ReplaceAll(pathConf.RecordPath, "%path", pathName),
-		pathConf.RecordFormat,
-	)
-	recordPath, _ = filepath.Abs(recordPath)
+	formats := pathConf.RecordPathFormats()
 	nominal := time.Duration(pathConf.RecordSegmentDuration)
 	part := time.Duration(pathConf.RecordPartDuration)
 
@@ -487,12 +623,22 @@ func (idx *Index) buildPathFromDir(
 	if pe.persist == nil {
 		pe.persist = newDvrPersist(pathConf, pathName)
 	}
-	pe.layout = layout
-	pe.commonPath = layout.common
+	pe.setLayouts(layouts)
 	pe.days = nil
+	pe.diskDays = nil
+	pe.diskRanges = nil
 	pe.ranges = nil
 	pe.rangesOK = false
 	pe.complete = false
+	pe.segments = nil
+	pe.byName = make(map[string]*IndexedSegment)
+	pe.pinnedDays = make(map[string]struct{})
+	pe.internedTracks = nil
+	for k := range idx.dayCache {
+		if k.path == pathName {
+			delete(idx.dayCache, k)
+		}
+	}
 	hash := pe.persist.hash
 	idx.mutex.Unlock()
 
@@ -500,97 +646,127 @@ func (idx *Index) buildPathFromDir(
 		fpath string
 		start time.Time
 	}
-	var curDay string
-	var cur []recFile
+
+	finished := true
 	nWalk := 0
 
-	flush := func(day string, files []recFile) int {
-		if day == "" || len(files) == 0 {
-			return 0
+	for i, layout := range layouts {
+		if layout.common == "" {
+			continue
 		}
-		sort.Slice(files, func(i, j int) bool { return files[i].start.Before(files[j].start) })
-		segs := make([]*IndexedSegment, 0, len(files))
-		var codecs [][]*fmp4.InitTrack
-		newest := files[len(files)-1].fpath
-		var tracks []*fmp4.InitTrack
-		var inspectedMeta fmp4SegMeta
-		if pathConf.RecordFormat == conf.RecordFormatFMP4 && newest != "" {
-			if meta, tr, err := inspectFMP4Segment(newest); err == nil && meta.Ready {
-				tracks = internTracksInto(&codecs, tr)
-				inspectedMeta = meta
-				inspected++
-			}
+		walkRoot := layout.walkRoot(pathName)
+		if walkRoot == "" {
+			continue
 		}
-		for _, f := range files {
-			seg := &IndexedSegment{
-				Rel:    segmentRelFast(layout.common, f.fpath),
-				Start:  f.start,
-				common: layout.common,
-			}
-			segs = append(segs, seg)
+		layout.removeLegacyMonolith()
+		raw := pathConf.RecordPath
+		if i < len(formats) {
+			raw = formats[i]
 		}
-		if inspectedMeta.Ready {
-			last := segs[len(segs)-1]
-			last.fmp4 = inspectedMeta
-			last.fmp4.codecID = codecIDFrom(codecs, tracks)
-		}
-		fillSegsMeta(segs, tracks, codecs, nominal, part)
-		snap := snapshotFromSegs(hash, layout.common, segs, codecs)
-		_ = writeSnapshotFile(layout.daySnap(day), snap)
-		idx.mutex.Lock()
-		pe := idx.paths[pathName]
-		if pe != nil {
-			pe.setDayNSeg(day, len(snap.Segs))
-			for _, seg := range segs {
-				dur := seg.fmp4.Duration
-				if dur <= 0 {
-					dur = nominal
-				}
-				pe.appendSegRange(seg.Start, dur)
-			}
-		}
-		idx.mutex.Unlock()
-		return len(files)
-	}
+		recordPath := recordstore.PathAddExtension(
+			strings.ReplaceAll(raw, "%path", pathName),
+			pathConf.RecordFormat,
+		)
+		recordPath, _ = filepath.Abs(recordPath)
 
-	walkErr := filepath.WalkDir(layout.common, func(fpath string, info fs.DirEntry, err error) error {
-		if err != nil {
-			if os.IsNotExist(err) {
-				return nil
+		var curDay string
+		var cur []recFile
+
+		flush := func(day string, files []recFile) int {
+			if day == "" || len(files) == 0 {
+				return 0
 			}
-			return err
+			sort.Slice(files, func(i, j int) bool { return files[i].start.Before(files[j].start) })
+			segs := make([]*IndexedSegment, 0, len(files))
+			var codecs [][]*fmp4.InitTrack
+			newest := files[len(files)-1].fpath
+			var tracks []*fmp4.InitTrack
+			var inspectedMeta fmp4SegMeta
+			if pathConf.RecordFormat == conf.RecordFormatFMP4 && newest != "" {
+				if meta, tr, err := inspectFMP4Segment(newest); err == nil && meta.Ready {
+					tracks = internTracksInto(&codecs, tr)
+					inspectedMeta = meta
+					inspected++
+				}
+			}
+			for _, f := range files {
+				seg := &IndexedSegment{
+					Rel:    segmentRelFast(layout.common, f.fpath),
+					Start:  f.start,
+					common: layout.common,
+				}
+				segs = append(segs, seg)
+			}
+			if inspectedMeta.Ready {
+				last := segs[len(segs)-1]
+				last.fmp4 = inspectedMeta
+				last.fmp4.codecID = codecIDFrom(codecs, tracks)
+			}
+			fillSegsMeta(segs, tracks, codecs, nominal, part)
+			snap := snapshotFromSegs(hash, layout.common, segs, codecs)
+			_ = writeSnapshotFile(layout.daySnap(day), snap)
+			idx.mutex.Lock()
+			pe := idx.paths[pathName]
+			if pe != nil {
+				curN := 0
+				for _, d := range pe.days {
+					if d.Date == day {
+						curN = int(d.NSeg)
+						break
+					}
+				}
+				pe.setDayNSeg(day, curN+len(snap.Segs))
+				pe.setDiskDayNSeg(layout.common, day, len(snap.Segs))
+				for _, seg := range segs {
+					pe.appendDiskRange(layout.common, seg.Start, trustedSegDuration(seg.fmp4.Duration, 0, nominal))
+				}
+			}
+			idx.mutex.Unlock()
+			return len(files)
 		}
-		if stopped(stop) {
-			return errReconcileStop
-		}
-		nWalk++
-		if slow && nWalk%reconcileWalkBatch == 0 {
-			if !sleepOrStop(stop, reconcileWalkPause) {
+
+		walkErr := filepath.WalkDir(walkRoot, func(fpath string, info fs.DirEntry, err error) error {
+			if err != nil {
+				if os.IsNotExist(err) {
+					return nil
+				}
+				return err
+			}
+			if stopped(stop) {
 				return errReconcileStop
 			}
-		}
-		if info.IsDir() || isDvrIndexFile(info.Name()) {
+			nWalk++
+			if slow && nWalk%reconcileWalkBatch == 0 {
+				if !sleepOrStop(stop, reconcileWalkPause) {
+					return errReconcileStop
+				}
+			}
+			if info.IsDir() || isDvrIndexFile(info.Name()) {
+				return nil
+			}
+			var pa recordstore.Path
+			if !pa.Decode(recordPath, fpath) {
+				return nil
+			}
+			day := dvrDayDate(pa.Start)
+			if curDay != "" && day != curDay {
+				added += flush(curDay, cur)
+				cur = cur[:0]
+			}
+			curDay = day
+			cur = append(cur, recFile{fpath: fpath, start: pa.Start})
 			return nil
+		})
+		if errors.Is(walkErr, errReconcileStop) {
+			finished = false
+			break
 		}
-		var pa recordstore.Path
-		if !pa.Decode(recordPath, fpath) {
-			return nil
+		if walkErr != nil && !os.IsNotExist(walkErr) {
+			return inspected, added, 0
 		}
-		day := dvrDayDate(pa.Start)
-		if curDay != "" && day != curDay {
+		if curDay != "" {
 			added += flush(curDay, cur)
-			cur = cur[:0]
 		}
-		curDay = day
-		cur = append(cur, recFile{fpath: fpath, start: pa.Start})
-		return nil
-	})
-	finished := walkErr == nil || os.IsNotExist(walkErr)
-	if walkErr != nil && !errors.Is(walkErr, errReconcileStop) && !os.IsNotExist(walkErr) {
-		return inspected, added, 0
-	}
-	if curDay != "" {
-		added += flush(curDay, cur)
 	}
 	if added == 0 {
 		return inspected, 0, 0
@@ -633,7 +809,7 @@ func (idx *Index) buildPathFromDir(
 			idx.bindPersist(pathName, today)
 		}
 	}
-	idx.writeMeta(pathName)
+	idx.rebuildRangesFromDayFiles(pathName)
 	if finished {
 		idx.mutex.Lock()
 		if pe := idx.paths[pathName]; pe != nil {
@@ -665,6 +841,9 @@ func (idx *Index) reconcilePathEdges(
 	nominal := pe.segmentDuration
 	if nominal <= 0 {
 		nominal = time.Duration(pathConf.RecordSegmentDuration)
+	}
+	if nominal <= 0 {
+		nominal = time.Hour
 	}
 	part := time.Duration(pathConf.RecordPartDuration)
 	deleteAfter := time.Duration(pathConf.RecordDeleteAfter)
@@ -714,7 +893,7 @@ func (idx *Index) pruneExpired(pathName string, deleteAfter time.Duration) int {
 	}
 	pe.ranges = trimRangesBefore(pe.ranges, cutoff)
 	pe.rangesOK = true
-	layout := pe.layout
+	layouts := append([]dvrPathLayout(nil), pe.allLayouts()...)
 	for len(pe.segments) > 0 {
 		seg := pe.segments[0]
 		if !seg.Start.Before(cutoff) {
@@ -726,10 +905,12 @@ func (idx *Index) pruneExpired(pathName string, deleteAfter time.Duration) int {
 	}
 	idx.mutex.Unlock()
 	for _, day := range dropDays {
-		_ = os.Remove(layout.daySnap(day))
-		_ = os.Remove(layout.dayJournal(day))
-		if layout.dateDir {
-			_ = os.Remove(filepath.Join(layout.common, day))
+		for _, layout := range layouts {
+			_ = os.Remove(layout.daySnap(day))
+			_ = os.Remove(layout.dayJournal(day))
+			if layout.dateDir {
+				_ = os.Remove(filepath.Join(layout.common, day))
+			}
 		}
 		idx.mutex.Lock()
 		if pe := idx.paths[pathName]; pe != nil {
@@ -858,6 +1039,9 @@ func (idx *Index) adoptNewEdge(
 			continue
 		}
 		for t := from; !t.After(to); t = t.Add(nominal) {
+			if nominal <= 0 {
+				break
+			}
 			if stopped(stop) {
 				return added, inspected, removed
 			}
@@ -931,17 +1115,14 @@ func (idx *Index) fillMetaFromGaps(pathName string, nominal, part time.Duration)
 	if nominal <= 0 {
 		nominal = pe.segmentDuration
 	}
+	cap := segDurationCap(nominal)
 	for i, seg := range pe.segments {
-		dur := nominal
+		var nextDelta time.Duration
 		if i+1 < len(pe.segments) {
-			if d := pe.segments[i+1].Start.Sub(seg.Start); d > 0 && d <= nominal*3 {
-				dur = d
-			}
+			nextDelta = pe.segments[i+1].Start.Sub(seg.Start)
 		}
-		if seg.fmp4.Duration > 0 {
-			dur = seg.fmp4.Duration
-		}
-		if !seg.fmp4.Ready || seg.fmp4.Duration == 0 || (seg.fmp4.codecID == 0 && tracks != nil) {
+		dur := trustedSegDuration(seg.fmp4.Duration, nextDelta, nominal)
+		if !seg.fmp4.Ready || seg.fmp4.Duration == 0 || seg.fmp4.Duration > cap || (seg.fmp4.codecID == 0 && tracks != nil) {
 			if seg.fmp4.MoofCount == 0 {
 				seg.fmp4.MoofCount = estimateMoofCount(dur, part, nominal)
 			}
@@ -992,15 +1173,16 @@ func encodeRecordFile(pathConf *conf.Path, pathName string, start time.Time) str
 	if pathConf == nil || start.IsZero() {
 		return ""
 	}
-	recordPath := recordstore.PathAddExtension(
-		strings.ReplaceAll(pathConf.RecordPath, "%path", pathName),
-		pathConf.RecordFormat,
-	)
-	recordPath, _ = filepath.Abs(recordPath)
-	var pa recordstore.Path
-	pa.Path = pathName
-	pa.Start = start
-	return pa.Encode(recordPath)
+	cands := recordstore.PossibleSegmentFiles(pathConf, pathName, start)
+	for _, p := range cands {
+		if _, err := os.Stat(p); err == nil {
+			return p
+		}
+	}
+	if len(cands) > 0 {
+		return cands[0]
+	}
+	return ""
 }
 
 func fileExists(fpath string) error {
@@ -1019,14 +1201,6 @@ func minTime(a, b time.Time) time.Time {
 }
 
 func (idx *Index) compactPathIfDirty(pathName string, dirty bool) {
-	if !dirty {
-		idx.mutex.Lock()
-		pe := idx.paths[pathName]
-		if pe != nil && pe.persist != nil && pe.persist.journalOps > 0 {
-			dirty = true
-		}
-		idx.mutex.Unlock()
-	}
 	if dirty {
 		idx.compactPath(pathName)
 	}
@@ -1104,8 +1278,9 @@ func (idx *Index) SetFMP4Meta(pathName, fpath string, meta fmp4SegMeta, tracks .
 	if interned := internTracks(pe, metaTracks(meta, tr)); len(interned) > 0 {
 		meta.codecID = internCodecID(pe, interned)
 	}
-	seg.Rel = segmentRelFast(pe.commonPath, fpath)
-	seg.common = pe.commonPath
+	common := pe.commonFor(fpath)
+	seg.Rel = segmentRelFast(common, fpath)
+	seg.common = common
 	seg.codecs = &pe.internedTracks
 	seg.fmp4 = meta
 	pe.rangesOK = false
@@ -1158,9 +1333,10 @@ func (idx *Index) addLocked(pe *pathIndex, fpath string, start time.Time) {
 		return
 	}
 	name := filepath.Base(fpath)
+	common := pe.commonFor(fpath)
 	if existing, ok := pe.byName[name]; ok {
-		existing.Rel = segmentRelFast(pe.commonPath, fpath)
-		existing.common = pe.commonPath
+		existing.Rel = segmentRelFast(common, fpath)
+		existing.common = common
 		existing.codecs = &pe.internedTracks
 		if !existing.Start.Equal(start) {
 			existing.Start = start
@@ -1263,7 +1439,7 @@ func (idx *Index) PersistUpsert(pathName, fpath string) {
 			return
 		}
 	}
-	idx.bindPersistLocked(pathName, pe, day)
+	idx.bindPersistLocked(pathName, pe, day, fpath)
 	if pe.persist == nil || !pe.persist.ready {
 		return
 	}
@@ -1277,15 +1453,22 @@ func (idx *Index) PersistUpsert(pathName, fpath string) {
 		Ready:    true,
 	}
 	_ = pe.persist.writeOp(dvrJournalOp{Op: dvrOpUpsert, Seg: rec})
-	pe.appendSegRange(seg.Start, seg.fmp4.Duration)
+	pe.appendDiskRange(pe.commonFor(fpath), seg.Start, trustedSegDuration(seg.fmp4.Duration, 0, pe.segmentDuration))
 	n := 0
 	day = dvrDayDate(seg.Start)
+	common := pe.commonFor(fpath)
+	nDisk := 0
 	for _, s := range pe.segments {
-		if dvrDayDate(s.Start) == day {
-			n++
+		if dvrDayDate(s.Start) != day {
+			continue
+		}
+		n++
+		if s.common == common || (s.common == "" && pe.commonPath == common) {
+			nDisk++
 		}
 	}
 	pe.setDayNSeg(day, n)
+	pe.setDiskDayNSeg(common, day, nDisk)
 	if pe.persist.journalOps >= dvrCompactEvery {
 		idx.mutex.Unlock()
 		idx.compactPath(pathName)
@@ -1294,10 +1477,23 @@ func (idx *Index) PersistUpsert(pathName, fpath string) {
 }
 
 func (idx *Index) persistDeleteLocked(pe *pathIndex, fpath string) {
-	if pe == nil || pe.persist == nil || !pe.persist.ready {
+	if pe == nil || pe.persist == nil {
 		return
 	}
-	rel := dvrRelPath(pe.commonPath, fpath)
+	pe.selectLayoutForFpath(fpath)
+	common := pe.commonFor(fpath)
+	day := pe.openDay
+	if day == "" {
+		day = dvrDayDate(time.Now())
+	}
+	if pe.layout.common != "" {
+		pe.persist.bindDay(pe.layout, day)
+		_ = pe.persist.openJournalAppend()
+	}
+	if !pe.persist.ready {
+		return
+	}
+	rel := dvrRelPath(common, fpath)
 	_ = pe.persist.writeOp(dvrJournalOp{Op: dvrOpDelete, Seg: dvrSegRec{Rel: rel}})
 }
 
@@ -1306,7 +1502,7 @@ func (idx *Index) ensurePersistLocked(pathName string, pe *pathIndex) {
 	if day == "" {
 		day = dvrDayDate(time.Now())
 	}
-	idx.bindPersistLocked(pathName, pe, day)
+	idx.bindPersistLocked(pathName, pe, day, "")
 }
 
 // ClosePersist flushes snapshots and closes journal files.
@@ -1372,7 +1568,7 @@ func (idx *Index) CompleteSegment(pathName, fpath string, duration time.Duration
 		idx.writeMeta(pathName)
 	}
 	idx.Add(pathName, fpath, start)
-	idx.bindPersist(pathName, day)
+	idx.bindPersistFile(pathName, day, fpath)
 
 	idx.mutex.RLock()
 	pathConfs := idx.pathConfs
@@ -1507,16 +1703,16 @@ func (idx *Index) Ranges(pathName string) []RecordingRange {
 func (pe *pathIndex) timedSegsLocked(now time.Time) []timedSeg {
 	out := make([]timedSeg, len(pe.segments))
 	for i, s := range pe.segments {
-		dur := pe.segmentDuration
-		switch {
-		case s.fmp4.Ready && s.fmp4.Duration > 0:
-			dur = s.fmp4.Duration
-		case i+1 < len(pe.segments):
-			delta := pe.segments[i+1].Start.Sub(s.Start)
-			if delta > 0 && delta <= pe.segmentDuration+rangeMergeTolerance(pe.segmentDuration) {
-				dur = delta
-			}
-		default:
+		var nextDelta time.Duration
+		if i+1 < len(pe.segments) {
+			nextDelta = pe.segments[i+1].Start.Sub(s.Start)
+		}
+		stored := time.Duration(0)
+		if s.fmp4.Ready {
+			stored = s.fmp4.Duration
+		}
+		dur := trustedSegDuration(stored, nextDelta, pe.segmentDuration)
+		if i+1 >= len(pe.segments) && stored <= 0 {
 			if age := now.Sub(s.Start); age > 0 && age < pe.segmentDuration {
 				dur = age
 			}
@@ -1748,6 +1944,7 @@ func (idx *Index) FindByName(pathName, fileName string) (string, bool) {
 func (idx *Index) ensurePathLocked(pathName string) *pathIndex {
 	pe := idx.paths[pathName]
 	if pe != nil {
+		idx.fillLayoutsLocked(pe, pathName)
 		return pe
 	}
 	dur := time.Hour
@@ -1762,6 +1959,7 @@ func (idx *Index) ensurePathLocked(pathName string) *pathIndex {
 		segmentDuration: dur,
 	}
 	idx.paths[pathName] = pe
+	idx.fillLayoutsLocked(pe, pathName)
 	return pe
 }
 
@@ -1778,16 +1976,17 @@ func (idx *Index) decodeStart(pathName, fpath string) (time.Time, bool) {
 		return time.Time{}, false
 	}
 
-	recordPath := recordstore.PathAddExtension(
-		strings.ReplaceAll(pathConf.RecordPath, "%path", pathName),
-		pathConf.RecordFormat,
-	)
-	recordPath, _ = filepath.Abs(recordPath)
 	fpathAbs, _ := filepath.Abs(fpath)
-
-	var pa recordstore.Path
-	if !pa.Decode(recordPath, fpathAbs) {
-		return time.Time{}, false
+	for _, raw := range pathConf.RecordPathFormats() {
+		recordPath := recordstore.PathAddExtension(
+			strings.ReplaceAll(raw, "%path", pathName),
+			pathConf.RecordFormat,
+		)
+		recordPath, _ = filepath.Abs(recordPath)
+		var pa recordstore.Path
+		if pa.Decode(recordPath, fpathAbs) {
+			return pa.Start, true
+		}
 	}
-	return pa.Start, true
+	return time.Time{}, false
 }

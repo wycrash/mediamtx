@@ -25,15 +25,16 @@ type openAPISchema struct {
 }
 
 type openAPIProperty struct {
-	Ref         string            `yaml:"$ref,omitempty"`
-	Type        string            `yaml:"type,omitempty"`
-	Format      string            `yaml:"format,omitempty"`
-	Description string            `yaml:"description,omitempty"`
-	AllOf       []openAPIProperty `yaml:"allOf,omitempty"`
-	Nullable    bool              `yaml:"nullable,omitempty"`
-	Deprecated  bool              `yaml:"deprecated,omitempty"`
-	Enum        []string          `yaml:"enum,omitempty"`
-	Items       *openAPIProperty  `yaml:"items,omitempty"`
+	Ref                  string            `yaml:"$ref,omitempty"`
+	Type                 string            `yaml:"type,omitempty"`
+	Format               string            `yaml:"format,omitempty"`
+	Description          string            `yaml:"description,omitempty"`
+	AllOf                []openAPIProperty `yaml:"allOf,omitempty"`
+	Nullable             bool              `yaml:"nullable,omitempty"`
+	Deprecated           bool              `yaml:"deprecated,omitempty"`
+	Enum                 []string          `yaml:"enum,omitempty"`
+	Items                *openAPIProperty  `yaml:"items,omitempty"`
+	AdditionalProperties *openAPIProperty  `yaml:"additionalProperties,omitempty"`
 }
 
 func indentBlockSequences(node ast.Node) {

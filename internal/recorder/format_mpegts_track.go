@@ -50,7 +50,7 @@ func (t *formatMPEGTSTrack) write(
 	switch {
 	case t.f.currentSegment == nil:
 		t.f.currentSegment = &formatMPEGTSSegment{
-			pathFormat2:       t.f.ri.pathFormat2,
+			ri:                t.f.ri,
 			flush:             t.f.bw.Flush,
 			onSegmentCreate:   t.f.ri.onSegmentCreate,
 			onSegmentComplete: t.f.ri.onSegmentComplete,
@@ -71,7 +71,7 @@ func (t *formatMPEGTSTrack) write(
 		}
 
 		t.f.currentSegment = &formatMPEGTSSegment{
-			pathFormat2:       t.f.ri.pathFormat2,
+			ri:                t.f.ri,
 			flush:             t.f.bw.Flush,
 			onSegmentCreate:   t.f.ri.onSegmentCreate,
 			onSegmentComplete: t.f.ri.onSegmentComplete,
