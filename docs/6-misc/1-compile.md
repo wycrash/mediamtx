@@ -15,6 +15,25 @@
 
    This will produce the `mediamtx` binary.
 
+`go generate` copies the DVR player and builds `mediamtx-admin` into `internal/webui/`. Resolution order for each:
+
+1. `DVRPLAYER_PATH` / `ADMIN_PATH`
+2. sibling checkout `../mediamtx-dvrplayer` / `../mediamtx-admin`
+3. in-tree checkout `./mediamtx-dvrplayer` / `./mediamtx-admin` (CI)
+4. `git clone` of `DVRPLAYER_REPO` / `ADMIN_REPO`
+5. keep a previous copy if the marker file is already there
+
+Admin is a Vite app: generate runs `npm ci` / `npm install` and `npm run build` (Node.js ≥ 20). `ADMIN_PATH` may point at the source repo or at an already-built `admin/` dist.
+
+```
+StudioProjects/
+  mediamtx/
+  mediamtx-dvrplayer/
+  mediamtx-admin/
+```
+
+Override with `DVRPLAYER_PATH`, `DVRPLAYER_REPO`, `DVRPLAYER_REF`, `ADMIN_PATH`, `ADMIN_REPO`, `ADMIN_REF`. For a private clone, set `DVRPLAYER_TOKEN` / `ADMIN_TOKEN` / `GH_TOKEN` / `GITHUB_TOKEN`. GitHub Actions can checkout both repos using secret `DVRPLAYER_TOKEN`.
+
 ## Custom libcamera
 
 If you need to use a custom or external libcamera to interact with some Raspberry Pi Camera models that require it, additional steps are required:

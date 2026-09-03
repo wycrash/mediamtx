@@ -2,8 +2,10 @@ package compatapi
 
 import (
 	"bytes"
+	"encoding/base64"
 	"fmt"
 	"io"
+	"io/fs"
 	"net/http"
 	"os"
 	"path"
@@ -20,6 +22,7 @@ import (
 	"github.com/bluenviron/mediamtx/internal/defs"
 	"github.com/bluenviron/mediamtx/internal/logger"
 	"github.com/bluenviron/mediamtx/internal/protocols/httpp"
+	"github.com/bluenviron/mediamtx/internal/webui"
 )
 
 var (
@@ -49,6 +52,10 @@ func requestPathName(rawPath string) string {
 		return strings.TrimSuffix(pa, "/preview.jpeg")
 	case strings.HasSuffix(pa, "/preview.jpg"):
 		return strings.TrimSuffix(pa, "/preview.jpg")
+	case strings.HasSuffix(pa, "/embed.html"):
+		return strings.TrimSuffix(pa, "/embed.html")
+	case strings.HasSuffix(pa, "/authmirror"):
+		return strings.TrimSuffix(pa, "/authmirror")
 	}
 	if m := archivePlaylistRegexp.FindStringSubmatch(pa); m != nil {
 		return m[1]
@@ -89,6 +96,15 @@ func (s *Server) onRequest(ctx *gin.Context) {
 	}
 
 	switch {
+	case pa == "lib/dvrplayer" || strings.HasPrefix(pa, "lib/dvrplayer/"):
+		s.onDvrPlayerAsset(ctx, strings.TrimPrefix(pa, "lib/dvrplayer/"))
+
+	case strings.HasSuffix(pa, "/embed.html"):
+		s.onEmbedHTML(ctx, strings.TrimSuffix(pa, "/embed.html"))
+
+	case strings.HasSuffix(pa, "/authmirror"):
+		s.onAuthMirror(ctx)
+
 	case strings.HasSuffix(pa, "/info.json"):
 		pathName := strings.TrimSuffix(pa, "/info.json")
 		s.onInfoJSON(ctx, pathName)
@@ -178,6 +194,68 @@ func unixFromURL(v int64) int64 {
 		return v / 1000
 	}
 	return v
+}
+
+func (s *Server) dvrPlayerFS() fs.FS {
+	if s.DvrPlayer != nil {
+		return s.DvrPlayer
+	}
+	return webui.DvrPlayer()
+}
+
+func (s *Server) onDvrPlayerAsset(ctx *gin.Context, name string) {
+	webui.ServeFile(ctx, s.dvrPlayerFS(), name, "max-age=3600")
+}
+
+func (s *Server) onEmbedHTML(ctx *gin.Context, pathName string) {
+	if err := conf.IsValidPathName(pathName); err != nil {
+		s.writeError(ctx, http.StatusBadRequest, err)
+		return
+	}
+	if _, err := s.safeFindPathConf(pathName); err != nil {
+		s.writeError(ctx, http.StatusBadRequest, err)
+		return
+	}
+
+	body, err := webui.ReadFile(s.dvrPlayerFS(), "embed.html")
+	if err != nil {
+		s.writeError(ctx, http.StatusNotFound, fmt.Errorf("dvr player is not embedded; run go generate"))
+		return
+	}
+
+	ctx.Header("Cache-Control", "no-cache")
+	ctx.Header("Content-Type", "text/html; charset=utf-8")
+	if requestIsHead(ctx) {
+		ctx.Status(http.StatusOK)
+		return
+	}
+	ctx.Data(http.StatusOK, "text/html; charset=utf-8", body)
+}
+
+// onAuthMirror echoes HTTP Basic / Bearer from the request, like the MoQ
+// read page. The DVR player is cross-origin from :8892, so it fetches this
+// same-origin endpoint instead and passes the result into MediaMTXMoQReader.
+func (s *Server) onAuthMirror(ctx *gin.Context) {
+	authz := ctx.Request.Header.Get("Authorization")
+	if strings.HasPrefix(authz, "Basic ") {
+		creds, err := base64.StdEncoding.DecodeString(authz[len("Basic "):])
+		if err != nil {
+			s.writeErrorNoLog(ctx, http.StatusBadRequest, fmt.Errorf("invalid basic auth header: %w", err))
+			return
+		}
+		parts := strings.SplitN(string(creds), ":", 2)
+		if len(parts) != 2 {
+			s.writeErrorNoLog(ctx, http.StatusBadRequest, fmt.Errorf("invalid basic auth header: missing colon"))
+			return
+		}
+		ctx.JSON(http.StatusOK, gin.H{"user": parts[0], "pass": parts[1]})
+		return
+	}
+	if strings.HasPrefix(authz, "Bearer ") {
+		ctx.JSON(http.StatusOK, gin.H{"token": strings.TrimPrefix(authz, "Bearer ")})
+		return
+	}
+	ctx.Status(http.StatusNoContent)
 }
 
 func (s *Server) onInfoJSON(ctx *gin.Context, pathName string) {

@@ -29,6 +29,8 @@ func TestRequestPathName(t *testing.T) {
 	require.Equal(t, "cam1", requestPathName("/cam1/preview.mp4"))
 	require.Equal(t, "cam1", requestPathName("/cam1/preview.jpeg"))
 	require.Equal(t, "cam1", requestPathName("/cam1/preview.jpg"))
+	require.Equal(t, "cam1", requestPathName("/cam1/embed.html"))
+	require.Equal(t, "group/cam1", requestPathName("/group/cam1/embed.html"))
 	require.Equal(t, "cam1", requestPathName("/cam1/index-1000-60.m3u8"))
 	require.Equal(t, "cam1", requestPathName("/cam1/archive-1000-60.m3u8"))
 	require.Equal(t, "cam1", requestPathName("/cam1/archive-1000-60.fmp4.m3u8"))

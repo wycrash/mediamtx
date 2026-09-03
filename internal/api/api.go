@@ -3,10 +3,12 @@ package api //nolint:revive
 
 import (
 	"fmt"
+	"io/fs"
 	"net"
 	"net/http"
 	"reflect"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -17,6 +19,7 @@ import (
 	"github.com/bluenviron/mediamtx/internal/defs"
 	"github.com/bluenviron/mediamtx/internal/logger"
 	"github.com/bluenviron/mediamtx/internal/protocols/httpp"
+	"github.com/bluenviron/mediamtx/internal/webui"
 )
 
 const (
@@ -89,6 +92,7 @@ type API struct {
 	MoQServer      defs.APIMoQServer
 	SystemMetrics  systemMetricsProvider
 	Parent         apiParent
+	Admin          fs.FS
 
 	httpServer *httpp.Server
 	mutex      sync.RWMutex
@@ -190,6 +194,8 @@ func (a *API) Initialize() error {
 	group.GET("/recordings/get/*name", a.onRecordingsGet)
 	group.DELETE("/recordings/deletesegment", a.onRecordingDeleteSegment)
 
+	router.NoRoute(a.onUI)
+
 	a.httpServer = &httpp.Server{
 		Address:           a.Address,
 		AllowOrigins:      a.AllowOrigins,
@@ -262,7 +268,15 @@ func (a *API) middlewarePreflightRequests(ctx *gin.Context) {
 	}
 }
 
+func skipAPIAuth(p string) bool {
+	return p == "/" || p == "/admin" || strings.HasPrefix(p, "/admin/")
+}
+
 func (a *API) middlewareAuth(ctx *gin.Context) {
+	if skipAPIAuth(ctx.Request.URL.Path) {
+		return
+	}
+
 	req := &auth.Request{
 		Action:               conf.AuthActionAPI,
 		Query:                ctx.Request.URL.RawQuery,
@@ -286,6 +300,32 @@ func (a *API) middlewareAuth(ctx *gin.Context) {
 
 		a.writeErrorNoLog(ctx, http.StatusUnauthorized, fmt.Errorf("authentication error"))
 		return
+	}
+}
+
+func (a *API) adminFS() fs.FS {
+	if a.Admin != nil {
+		return a.Admin
+	}
+	return webui.Admin()
+}
+
+func (a *API) onUI(ctx *gin.Context) {
+	if ctx.Request.Method != http.MethodGet && ctx.Request.Method != http.MethodHead {
+		ctx.AbortWithStatus(http.StatusNotFound)
+		return
+	}
+
+	pa := ctx.Request.URL.Path
+	switch {
+	case pa == "/":
+		ctx.Redirect(http.StatusFound, "/admin/")
+	case pa == "/admin":
+		ctx.Redirect(http.StatusFound, "/admin/")
+	case strings.HasPrefix(pa, "/admin/"):
+		webui.ServeSPA(ctx, a.adminFS(), strings.TrimPrefix(pa, "/admin/"))
+	default:
+		ctx.AbortWithStatus(http.StatusNotFound)
 	}
 }
 

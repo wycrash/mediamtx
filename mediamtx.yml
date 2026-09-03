@@ -151,6 +151,7 @@ authJWTAudience:
 # Global settings -> Control API
 
 # Enable the control API server, which allows to control the server.
+# The admin UI is served at /admin/ (redirect from /).
 api: false
 # Address of the TCP/HTTP listener.
 apiAddress: :9997
@@ -262,6 +263,8 @@ playbackTrustedProxies: []
 # - GET /{path}/preview.jpeg                  (same as preview.mp4; native, no JPEG decode)
 # - GET /{path}/video.m3u8                    (Flussonic live HLS alias of index.m3u8)
 # - GET /{path}/video.fmp4.m3u8               (alias of index.m3u8)
+# - GET /{path}/embed.html                    (DVR player; query: dvr, autoplay, token, proto)
+# - GET /lib/dvrplayer/*                      (player JS/CSS; copied at go generate)
 # - other /{path}/... requests are proxied to the HLS server (live) 
 compatAPI: true
 # Address of the TCP/HTTP listener.

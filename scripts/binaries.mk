@@ -2,7 +2,7 @@ BINARY_NAME = mediamtx
 
 define DOCKERFILE_BINARIES
 FROM $(BASE_IMAGE) AS build-base
-RUN apk add --no-cache zip make git tar
+RUN apk add --no-cache zip make git tar nodejs npm
 WORKDIR /s
 COPY go.mod go.sum ./
 RUN go mod download

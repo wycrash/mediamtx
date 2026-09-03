@@ -18,6 +18,16 @@ jobs:
         with:
           fetch-depth: 0
 
+      - uses: ./.github/actions/webui-sources
+        with:
+          token: ${{ secrets.DVRPLAYER_TOKEN || github.token }}
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: mediamtx-admin/package-lock.json
+
       - uses: actions/setup-go@v7
         with:
           go-version: "1.26"

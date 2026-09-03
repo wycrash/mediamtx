@@ -20,6 +20,10 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
+      - uses: ./.github/actions/webui-sources
+        with:
+          token: ${{ secrets.DVRPLAYER_TOKEN || github.token }}
+
       - run: make binaries
 
       - run: cd binaries && sha256sum -b * > checksums.sha256

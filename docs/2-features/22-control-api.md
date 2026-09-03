@@ -14,4 +14,6 @@ curl http://127.0.0.1:9997/v3/paths/list
 
 The control API is documented in the [Control API Reference page](../5-references/2-control-api.md) and in the [OpenAPI / Swagger file](https://github.com/bluenviron/mediamtx/blob/{version_tag}/api/openapi.yaml).
 
+When the API is enabled, the admin UI is served at `http://127.0.0.1:9997/admin/` (`/` redirects there). `/v3` stays authenticated as before; the UI page itself does not send `WWW-Authenticate`, so the in-app login form can be used.
+
 Be aware that by default the Control API is accessible by localhost only; to increase visibility or enforce authentication, check [Authentication](06-authentication.md).

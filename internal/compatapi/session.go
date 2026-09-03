@@ -6,6 +6,7 @@ import (
 	"net"
 	"net/http"
 	"sort"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -74,8 +75,16 @@ func (w *sessionWriter) Write(p []byte) (int, error) {
 	return n, err
 }
 
+func skipCompatSession(rawPath string) bool {
+	pa := strings.TrimPrefix(rawPath, "/")
+	if pa == "lib/dvrplayer" || strings.HasPrefix(pa, "lib/dvrplayer/") {
+		return true
+	}
+	return strings.HasSuffix(pa, "/embed.html")
+}
+
 func (s *Server) middlewareSession(ctx *gin.Context) {
-	if ctx.Request.Method != http.MethodGet || ctx.IsAborted() {
+	if ctx.Request.Method != http.MethodGet || ctx.IsAborted() || skipCompatSession(ctx.Request.URL.Path) {
 		return
 	}
 

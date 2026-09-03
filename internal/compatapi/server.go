@@ -3,6 +3,7 @@ package compatapi
 
 import (
 	"fmt"
+	"io/fs"
 	"net"
 	"net/http"
 	"net/url"
@@ -44,6 +45,7 @@ type Server struct {
 	PathManager       pathAPIGetter
 	AuthManager       serverAuthManager
 	HLSHandler        http.Handler
+	DvrPlayer         fs.FS
 	Parent            logger.Writer
 
 	Index         *Index

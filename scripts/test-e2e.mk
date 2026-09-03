@@ -4,7 +4,7 @@ test-e2e-nodocker:
 
 define DOCKERFILE_E2E_TEST
 FROM $(BASE_IMAGE)
-RUN apk add --no-cache make docker-cli gcc musl-dev
+RUN apk add --no-cache make docker-cli gcc musl-dev nodejs npm
 WORKDIR /s
 COPY go.mod go.sum ./
 RUN go mod download

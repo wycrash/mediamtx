@@ -149,6 +149,26 @@ The iframe method is fit for most use cases, but it has some limitations:
 - it doesn't allow to pass credentials (username, password or token) from the website to _MediaMTX_; credentials are asked directly to users.
 - it doesn't allow to directly access the video tag, to extract data from it, or to perform dynamic actions.
 
+### DVR player in iframe
+
+When the Compat API is enabled, a DVR player is served next to the Flussonic-style endpoints. Stream name is taken from the URL path; `token` is forwarded to HLS and archive requests:
+
+```html
+<iframe
+  src="http://mediamtx-ip:8877/mystream/embed.html?dvr=true&autoplay=false"
+  scrolling="no"
+></iframe>
+```
+
+Replace `mystream` with the path name. Useful query parameters:
+
+- `dvr` (boolean): show the archive timeline. Default is true.
+- `autoplay` (boolean): start playback automatically. Default is true.
+- `token`: playback token, passed through to media requests.
+- `proto`: `hls` (default) or `webrtc`. WebRTC also needs `streamer_webrtc` (WebRTC HTTP address).
+
+Player static files are at `http://mediamtx-ip:8877/lib/dvrplayer/`.
+
 ### HLS with JavaScript
 
 In order to overcome the limitations of the iframe-based method, it is possible to load the stream directly inside a `<video>` tag in the web page, through the _hls.js_ library.

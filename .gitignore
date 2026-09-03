@@ -4,6 +4,12 @@
 /api/*.html
 /internal/core/VERSION
 /internal/servers/hls/hls.min.js
+/internal/webui/dvrplayer/**
+!/internal/webui/dvrplayer/.keep
+/internal/webui/admin/**
+!/internal/webui/admin/.keep
+/mediamtx-dvrplayer/
+/mediamtx-admin/
 /internal/staticsources/rpicamera/mtxrpicam_*/
 /auto.crt
 /auto.key

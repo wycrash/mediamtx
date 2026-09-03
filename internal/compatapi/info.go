@@ -12,7 +12,7 @@ import (
 	"github.com/bluenviron/mediamtx/internal/formatlabel"
 )
 
-// InfoTrack is a Flussonic-compatible media track.
+// InfoTrack is a compatible media track.
 // Only fields MediaMTX can populate are included.
 type InfoTrack struct {
 	Profile    string `json:"profile,omitempty"`
@@ -26,14 +26,14 @@ type InfoTrack struct {
 	SampleRate int    `json:"sample_rate,omitempty"`
 }
 
-// InfoMediaInfo is Flussonic media_info.
+// InfoMediaInfo media_info.
 type InfoMediaInfo struct {
 	Tracks   []InfoTrack `json:"tracks"`
 	FlowType string      `json:"flow_type"`
 	StreamID int         `json:"stream_id"`
 }
 
-// InfoDVR is Flussonic dvr_info built from recording ranges.
+// InfoDVR dvr_info built from recording ranges.
 type InfoDVR struct {
 	Depth    int64            `json:"depth"`
 	Duration int64            `json:"duration"`

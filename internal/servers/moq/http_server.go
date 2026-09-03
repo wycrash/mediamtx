@@ -174,6 +174,7 @@ func (s *httpServer) middlewarePreflightRequests(ctx *gin.Context) {
 	if ctx.Request.Method == http.MethodOptions &&
 		ctx.Request.Header.Get("Access-Control-Request-Method") != "" {
 		ctx.Header("Access-Control-Allow-Methods", "OPTIONS, GET, POST")
+		ctx.Header("Access-Control-Allow-Headers", "Authorization")
 		ctx.AbortWithStatus(http.StatusNoContent)
 		return
 	}

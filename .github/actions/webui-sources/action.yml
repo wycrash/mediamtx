@@ -1,0 +1,21 @@
+name: webui-sources
+description: Check out private mediamtx-dvrplayer and mediamtx-admin next to the repo
+
+inputs:
+  token:
+    description: GitHub token with read access to the private UI repos
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - uses: actions/checkout@v7
+      with:
+        repository: wycrash/mediamtx-dvrplayer
+        path: mediamtx-dvrplayer
+        token: ${{ inputs.token }}
+    - uses: actions/checkout@v7
+      with:
+        repository: wycrash/mediamtx-admin
+        path: mediamtx-admin
+        token: ${{ inputs.token }}
