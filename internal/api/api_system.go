@@ -24,8 +24,11 @@ func (a *API) onSystemRestart(ctx *gin.Context) {
 func (a *API) writeUpgradeError(ctx *gin.Context, err error) {
 	status := http.StatusInternalServerError
 	var unofficial *upgrade.ErrUnofficial
-	if errors.As(err, &unofficial) {
+	switch {
+	case errors.As(err, &unofficial):
 		status = http.StatusBadRequest
+	case errors.Is(err, upgrade.ErrNoVersions):
+		status = http.StatusNotFound
 	}
 	a.writeError(ctx, status, err)
 }

@@ -105,6 +105,17 @@ func TestUpgradeFetchError(t *testing.T) {
 	require.EqualError(t, err, "network down")
 }
 
+func TestCheckVersionNoVersions(t *testing.T) {
+	orig := lookupLatest
+	t.Cleanup(func() { lookupLatest = orig })
+	lookupLatest = func() (*semver.Version, error) {
+		return nil, ErrNoVersions
+	}
+
+	_, err := CheckVersion("v1.8.0")
+	require.ErrorIs(t, err, ErrNoVersions)
+}
+
 func TestErrUnofficialAs(t *testing.T) {
 	err := error(&ErrUnofficial{Version: "dev"})
 	var unofficial *ErrUnofficial

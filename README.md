@@ -47,6 +47,7 @@ _MediaMTX_ is a ready-to-use and zero-dependency live media server and media pro
 - ...and many [others](https://mediamtx.org/docs/kickoff/introduction).
 
 git tag v1.20.0
+git tag -f v1.20.0
 go generate ./...
 CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build .
 

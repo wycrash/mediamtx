@@ -77,6 +77,35 @@ func TestSystemUpgradeGet(t *testing.T) {
 	}, out)
 }
 
+func TestSystemUpgradeGetNoVersions(t *testing.T) {
+	api := API{
+		Address:      "localhost:9997",
+		ReadTimeout:  conf.Duration(10 * time.Second),
+		WriteTimeout: conf.Duration(10 * time.Second),
+		AuthManager:  test.NilAuthManager,
+		Parent: &testParent{
+			onUpgradeCheck: func() (*defs.APIUpgrade, error) {
+				return nil, upgrade.ErrNoVersions
+			},
+		},
+	}
+	err := api.Initialize()
+	require.NoError(t, err)
+	defer api.Close()
+
+	tr := &http.Transport{}
+	defer tr.CloseIdleConnections()
+	hc := &http.Client{Transport: tr}
+
+	req, err := http.NewRequest(http.MethodGet, "http://localhost:9997/v3/system/upgrade", nil)
+	require.NoError(t, err)
+	res, err := hc.Do(req)
+	require.NoError(t, err)
+	defer res.Body.Close()
+	require.Equal(t, http.StatusNotFound, res.StatusCode)
+	checkError(t, res.Body, "no official releases found")
+}
+
 func TestSystemUpgradeGetUnofficial(t *testing.T) {
 	api := API{
 		Address:      "localhost:9997",

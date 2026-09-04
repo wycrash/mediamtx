@@ -3,6 +3,7 @@ package upgrade
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"net/http"
 	"regexp"
@@ -30,6 +31,9 @@ var (
 	fetchBinary  = defaultFetchBinary
 	applyBinary  = defaultApplyBinary
 )
+
+// ErrNoVersions is returned when the remote repository has no official release tags.
+var ErrNoVersions = errors.New("no official releases found")
 
 // ErrUnofficial is returned when the running binary is not an official release.
 type ErrUnofficial struct {
@@ -68,7 +72,7 @@ func latestRemoteVersion() (*semver.Version, error) {
 	}
 
 	if len(versions) == 0 {
-		return nil, fmt.Errorf("no versions found")
+		return nil, ErrNoVersions
 	}
 
 	sort.Sort(sort.Reverse(semver.Collection(versions)))

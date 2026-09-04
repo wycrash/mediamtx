@@ -2385,6 +2385,12 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/Error"
+        "404":
+          description: no official releases were found.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
         "500":
           description: server error.
           content:
@@ -2405,6 +2411,12 @@ paths:
                 $ref: "#/components/schemas/Upgrade"
         "400":
           description: the running binary is not an official release.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "404":
+          description: no official releases were found.
           content:
             application/json:
               schema:
