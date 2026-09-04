@@ -2296,6 +2296,18 @@ components:
           type: integer
           format: uint64
 
+    Upgrade:
+      type: object
+      properties:
+        available:
+          type: boolean
+        current:
+          type: string
+        latest:
+          type: string
+        upgraded:
+          type: boolean
+
 paths:
   /v3/info:
     get:
@@ -2328,6 +2340,75 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/SystemMetrics"
+        "500":
+          description: server error.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
+  /v3/system/restart:
+    post:
+      operationId: systemRestart
+      tags: [General]
+      summary: Gracefully stops the process and starts it again.
+      description: The HTTP response is sent before the process is replaced. In-memory state is lost; the DVR index is flushed to disk.
+      responses:
+        "200":
+          description: the request was successful.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OK"
+        "500":
+          description: server error.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
+  /v3/system/upgrade:
+    get:
+      operationId: systemUpgradeGet
+      tags: [General]
+      summary: Checks whether a newer official release is available.
+      responses:
+        "200":
+          description: the request was successful.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Upgrade"
+        "400":
+          description: the running binary is not an official release.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "500":
+          description: server error.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+    post:
+      operationId: systemUpgrade
+      tags: [General]
+      summary: Downloads the latest official release, replaces the executable, then restarts.
+      description: If the process is already up to date, no restart is performed. Development builds cannot be upgraded.
+      responses:
+        "200":
+          description: the request was successful.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Upgrade"
+        "400":
+          description: the running binary is not an official release.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
         "500":
           description: server error.
           content:

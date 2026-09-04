@@ -301,6 +301,42 @@ func TestIndexPersistUpsertReplayedFromJournal(t *testing.T) {
 	idx2.ClosePersist()
 }
 
+func TestClosePersistFlushesJournalIntoSnapshot(t *testing.T) {
+	dir := t.TempDir()
+	cam := filepath.Join(dir, "cam1")
+	a := filepath.Join(cam, "2020-01-01_00-00-00-000000.mp4")
+	b := filepath.Join(cam, "2020-01-01_00-00-05-000000.mp4")
+	writeNamedFMP4(t, a, 2)
+
+	pathConf := &conf.Path{
+		Name:                  "cam1",
+		RecordPath:            filepath.Join(dir, "%path/%Y-%m-%d_%H-%M-%S-%f"),
+		RecordFormat:          conf.RecordFormatFMP4,
+		RecordSegmentDuration: conf.Duration(5 * time.Second),
+	}
+	confs := map[string]*conf.Path{"cam1": pathConf}
+
+	idx := NewIndex()
+	require.Equal(t, 0, idx.LoadFromDisk(confs).Segments)
+	require.Equal(t, 1, idx.ReconcileAll(nil, false).Segments)
+	writeNamedFMP4(t, b, 3)
+	start := time.Date(2020, 1, 1, 0, 0, 5, 0, time.Local)
+	idx.Add("cam1", b, start)
+	meta, tracks, err := inspectFMP4Segment(b)
+	require.NoError(t, err)
+	idx.SetFMP4Meta("cam1", b, meta, tracks)
+	idx.PersistUpsert("cam1", b)
+	require.Equal(t, 1, idx.ClosePersist())
+
+	idx2 := NewIndex()
+	st := idx2.LoadFromDisk(confs)
+	require.Equal(t, 2, st.Segments)
+	out := idx2.SegmentsInWindow("cam1", time.Date(2020, 1, 1, 0, 0, 0, 0, time.Local), time.Minute)
+	require.Len(t, out, 2)
+	require.Equal(t, uint32(3), out[1].fmp4.MoofCount)
+	idx2.ClosePersist()
+}
+
 func TestIndexReloadPathConfsLoadsSnapshot(t *testing.T) {
 	dir := t.TempDir()
 	cam := filepath.Join(dir, "cam1")

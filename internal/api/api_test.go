@@ -20,7 +20,10 @@ import (
 )
 
 type testParent struct {
-	log func(_ logger.Level, _ string, _ ...any)
+	log            func(_ logger.Level, _ string, _ ...any)
+	onRestart      func()
+	onUpgradeCheck func() (*defs.APIUpgrade, error)
+	onUpgrade      func() (*defs.APIUpgrade, error)
 }
 
 func (p testParent) Log(l logger.Level, s string, a ...any) {
@@ -30,6 +33,26 @@ func (p testParent) Log(l logger.Level, s string, a ...any) {
 }
 
 func (testParent) APIConfigSet(_ *conf.Conf) {}
+
+func (p testParent) APIRestart() {
+	if p.onRestart != nil {
+		p.onRestart()
+	}
+}
+
+func (p testParent) APIUpgradeCheck() (*defs.APIUpgrade, error) {
+	if p.onUpgradeCheck != nil {
+		return p.onUpgradeCheck()
+	}
+	return &defs.APIUpgrade{}, nil
+}
+
+func (p testParent) APIUpgrade() (*defs.APIUpgrade, error) {
+	if p.onUpgrade != nil {
+		return p.onUpgrade()
+	}
+	return &defs.APIUpgrade{}, nil
+}
 
 func tempConf(t *testing.T, cnt string) *conf.Conf {
 	fi := test.CreateTempFile(t, []byte(cnt))

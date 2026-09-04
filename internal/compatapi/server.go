@@ -137,7 +137,9 @@ func (s *Server) Close() {
 	s.stopBackgroundReconcile()
 	s.sessionsKickAll()
 	if s.Index != nil {
-		s.Index.ClosePersist()
+		t0 := time.Now()
+		n := s.Index.ClosePersist()
+		s.Log(logger.Info, "dvr index flushed to disk (%d paths) in %s", n, time.Since(t0))
 	}
 	s.httpServer.Close()
 }

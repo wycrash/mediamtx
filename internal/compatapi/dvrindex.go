@@ -487,19 +487,35 @@ func readSnapshotFile(path string) (dvrSnapshot, error) {
 	return decodeSnapshot(data)
 }
 
+func writeFileAtomic(path string, data []byte) error {
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return err
+	}
+	tmp := path + ".tmp"
+	f, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o644)
+	if err != nil {
+		return err
+	}
+	_, err = f.Write(data)
+	if err == nil {
+		err = f.Sync()
+	}
+	if cerr := f.Close(); err == nil {
+		err = cerr
+	}
+	if err != nil {
+		_ = os.Remove(tmp)
+		return err
+	}
+	return os.Rename(tmp, path)
+}
+
 func writeSnapshotFile(path string, s dvrSnapshot) error {
 	data, err := encodeSnapshot(s)
 	if err != nil {
 		return err
 	}
-	if err = os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return err
-	}
-	tmp := path + ".tmp"
-	if err = os.WriteFile(tmp, data, 0o644); err != nil {
-		return err
-	}
-	return os.Rename(tmp, path)
+	return writeFileAtomic(path, data)
 }
 
 func encodeMeta(m dvrMeta) []byte {
@@ -588,15 +604,7 @@ func readMetaFile(path string) (dvrMeta, error) {
 }
 
 func writeMetaFile(path string, m dvrMeta) error {
-	data := encodeMeta(m)
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return err
-	}
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, data, 0o644); err != nil {
-		return err
-	}
-	return os.Rename(tmp, path)
+	return writeFileAtomic(path, encodeMeta(m))
 }
 
 func encodeJournalOp(op dvrJournalOp) ([]byte, error) {
@@ -746,6 +754,7 @@ func readJournalFile(path string, wantHash uint64) ([]dvrJournalOp, error) {
 
 func (p *dvrPersist) closeJournal() {
 	if p != nil && p.journal != nil {
+		_ = p.journal.Sync()
 		_ = p.journal.Close()
 		p.journal = nil
 	}
@@ -792,6 +801,10 @@ func (p *dvrPersist) truncateJournal() error {
 		return err
 	}
 	if _, err = f.Write(journalHeader(p.hash)); err != nil {
+		f.Close()
+		return err
+	}
+	if err = f.Sync(); err != nil {
 		f.Close()
 		return err
 	}

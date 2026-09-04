@@ -435,7 +435,7 @@ func (s *session) onSubscribeCatalog(wstream io.ReadWriteCloser, m *controlmessa
 		return err
 	}
 
-	cat, setupTracks, err := moq.FromStream(addRes.Stream.OrigDesc)
+	cat, setupTracks, err := moq.FromStream(addRes.Stream.OrigDesc, addRes.Stream.OutDescCopy())
 	if err != nil {
 		addRes.Path.RemoveReader(defs.PathRemoveReaderReq{Author: s})
 		return err

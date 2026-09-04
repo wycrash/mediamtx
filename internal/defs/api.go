@@ -39,6 +39,14 @@ type APIInfo struct {
 	Started time.Time `json:"started"`
 }
 
+// APIUpgrade is the response of GET/POST /v3/system/upgrade.
+type APIUpgrade struct {
+	Current   string `json:"current"`
+	Latest    string `json:"latest"`
+	Available bool   `json:"available"`
+	Upgraded  bool   `json:"upgraded"`
+}
+
 // APIPathConfList is a list of path configurations.
 type APIPathConfList struct {
 	ItemCount int         `json:"itemCount"`

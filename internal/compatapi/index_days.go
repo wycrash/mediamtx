@@ -510,16 +510,7 @@ func (idx *Index) compactOpenDay(pathName string) {
 }
 
 func writeEmptyJournal(path string, hash uint64) error {
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return err
-	}
-	f, err := os.Create(path)
-	if err != nil {
-		return err
-	}
-	_, err = f.Write(journalHeader(hash))
-	_ = f.Close()
-	return err
+	return writeFileAtomic(path, journalHeader(hash))
 }
 
 func applyJournalOps(snap dvrSnapshot, ops []dvrJournalOp) dvrSnapshot {

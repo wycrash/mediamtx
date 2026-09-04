@@ -242,6 +242,10 @@ var structs = []struct {
 		externalName: "SystemMetricsPoint",
 		typ:          reflect.TypeOf(defs.APISystemMetricsPoint{}),
 	},
+	{
+		externalName: "Upgrade",
+		typ:          reflect.TypeOf(defs.APIUpgrade{}),
+	},
 }
 
 const modulePathPrefix = "github.com/bluenviron/mediamtx/"

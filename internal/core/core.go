@@ -14,6 +14,7 @@ import (
 	"runtime/debug"
 	"slices"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -26,6 +27,7 @@ import (
 	"github.com/bluenviron/mediamtx/internal/conf"
 	"github.com/bluenviron/mediamtx/internal/confpersist"
 	"github.com/bluenviron/mediamtx/internal/confwatcher"
+	"github.com/bluenviron/mediamtx/internal/defs"
 	"github.com/bluenviron/mediamtx/internal/externalcmd"
 	"github.com/bluenviron/mediamtx/internal/logger"
 	"github.com/bluenviron/mediamtx/internal/metrics"
@@ -151,6 +153,8 @@ type Core struct {
 
 	// in
 	chAPIConfigSet chan *conf.Conf
+	chAPIRestart   chan struct{}
+	upgradeMu      sync.Mutex
 
 	// out
 	done chan struct{}
@@ -183,24 +187,32 @@ func New(args []string) (*Core, bool) {
 	}
 
 	if cli.CheckVersion {
-		var newVersionAvailable bool
-		newVersionAvailable, err = upgrade.CheckVersion(string(version), getArch())
+		var info *upgrade.Info
+		info, err = upgrade.CheckVersion(string(version))
 		if err != nil {
 			fmt.Printf("ERR: %v\n", err)
 			os.Exit(1)
 		}
-		if newVersionAvailable {
+		if info.Available {
+			fmt.Printf("a new version is available: %v (current: %v)\n", info.Latest, info.Current)
 			os.Exit(2)
 		}
+		fmt.Printf("current version (%v) is up to date\n", info.Current)
 		os.Exit(0)
 	}
 
 	if cli.Upgrade {
-		err = upgrade.Upgrade(string(version), getArch())
+		var info *upgrade.Info
+		info, err = upgrade.Upgrade(string(version), getArch())
 		if err != nil {
 			fmt.Printf("ERR: %v\n", err)
 			os.Exit(1)
 		}
+		if !info.Available {
+			fmt.Printf("current version (%v) is up to date\n", info.Current)
+			os.Exit(0)
+		}
+		fmt.Printf("MediaMTX upgraded successfully from %v to %v.\n", info.Current, info.Latest)
 		os.Exit(0)
 	}
 
@@ -210,6 +222,7 @@ func New(args []string) (*Core, bool) {
 		ctx:            ctx,
 		ctxCancel:      ctxCancel,
 		chAPIConfigSet: make(chan *conf.Conf),
+		chAPIRestart:   make(chan struct{}, 1),
 		done:           make(chan struct{}),
 	}
 
@@ -277,13 +290,23 @@ func (p *Core) run() {
 
 	interrupt := make(chan os.Signal, 1)
 	signal.Notify(interrupt, os.Interrupt)
-	if runtime.GOOS == "linux" {
+	if runtime.GOOS != "windows" {
+		// pm2 restart sends SIGTERM; without this the process dies before ClosePersist.
 		signal.Notify(interrupt, syscall.SIGTERM)
 	}
+
+	restart := false
 
 outer:
 	for {
 		select {
+		case <-p.chAPIRestart:
+			p.Log(logger.Info, "restarting (API request)")
+			// let the HTTP response leave the socket before listeners are closed
+			time.Sleep(300 * time.Millisecond)
+			restart = true
+			break outer
+
 		case <-confChanged:
 			if confpersist.Exists(confpersist.JSONPath(p.confPath)) {
 				p.Log(logger.Warn, "ignoring YAML changes in %s because runtime config %s exists",
@@ -327,6 +350,15 @@ outer:
 	p.ctxCancel()
 
 	p.closeResources(nil, false)
+
+	if restart {
+		err := reexec()
+		if err != nil {
+			fmt.Printf("ERR: restart failed: %v\n", err)
+			os.Exit(1)
+		}
+		os.Exit(0)
+	}
 }
 
 func (p *Core) createResources(initial bool) error {
@@ -1209,7 +1241,7 @@ func (p *Core) closeResources(newConf *conf.Conf, calledByAPI bool) {
 		p.webRTCServer = nil
 	}
 
-	if closeCompatServer && p.compatServer != nil {
+	if closeCompatServer && p.compatServer != nil && newConf != nil {
 		if p.pathManager != nil {
 			p.pathManager.SetRecordSegmentListener(nil)
 		}
@@ -1245,6 +1277,14 @@ func (p *Core) closeResources(newConf *conf.Conf, calledByAPI bool) {
 	if closePathManager && p.pathManager != nil {
 		p.pathManager.close()
 		p.pathManager = nil
+	}
+
+	// Full stop: flush the DVR index after recorders have closed current
+	// segments (OnSegmentComplete). Doing this earlier drops the last files
+	// and races pm2 kill_timeout.
+	if newConf == nil && p.compatServer != nil {
+		p.compatServer.Close()
+		p.compatServer = nil
 	}
 
 	if closePlaybackServer && p.playbackServer != nil {
@@ -1310,6 +1350,46 @@ func (p *Core) APIConfigSet(conf *conf.Conf) {
 	case p.chAPIConfigSet <- conf:
 	case <-p.ctx.Done():
 	}
+}
+
+// APIRestart implements apiParent.
+func (p *Core) APIRestart() {
+	select {
+	case p.chAPIRestart <- struct{}{}:
+	default:
+	}
+}
+
+func apiUpgradeFromInfo(info *upgrade.Info, upgraded bool) *defs.APIUpgrade {
+	return &defs.APIUpgrade{
+		Current:   info.Current,
+		Latest:    info.Latest,
+		Available: info.Available,
+		Upgraded:  upgraded,
+	}
+}
+
+// APIUpgradeCheck implements apiParent.
+func (p *Core) APIUpgradeCheck() (*defs.APIUpgrade, error) {
+	info, err := upgrade.CheckVersion(string(version))
+	if err != nil {
+		return nil, err
+	}
+	return apiUpgradeFromInfo(info, false), nil
+}
+
+// APIUpgrade implements apiParent.
+func (p *Core) APIUpgrade() (*defs.APIUpgrade, error) {
+	if !p.upgradeMu.TryLock() {
+		return nil, fmt.Errorf("upgrade already in progress")
+	}
+	defer p.upgradeMu.Unlock()
+
+	info, err := upgrade.Upgrade(string(version), getArch())
+	if err != nil {
+		return nil, err
+	}
+	return apiUpgradeFromInfo(info, info.Available), nil
 }
 
 func (p *Core) persistConf(newConf *conf.Conf) {

@@ -59,6 +59,9 @@ type apiAuthManager interface {
 type apiParent interface {
 	logger.Writer
 	APIConfigSet(conf *conf.Conf)
+	APIRestart()
+	APIUpgradeCheck() (*defs.APIUpgrade, error)
+	APIUpgrade() (*defs.APIUpgrade, error)
 }
 
 type systemMetricsProvider interface {
@@ -109,6 +112,9 @@ func (a *API) Initialize() error {
 
 	group.GET("/info", a.onInfo)
 	group.GET("/metrics/system", a.onSystemMetrics)
+	group.POST("/system/restart", a.onSystemRestart)
+	group.GET("/system/upgrade", a.onSystemUpgradeGet)
+	group.POST("/system/upgrade", a.onSystemUpgradePost)
 
 	group.POST("/auth/jwks/refresh", a.onAuthJwksRefresh)
 

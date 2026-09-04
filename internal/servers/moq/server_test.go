@@ -3,6 +3,8 @@ package moq_test
 import (
 	"context"
 	"crypto/tls"
+	"encoding/base64"
+	"encoding/binary"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -28,6 +30,39 @@ import (
 	"github.com/bluenviron/mediamtx/internal/test"
 	"github.com/bluenviron/mediamtx/internal/unit"
 )
+
+func testAvcC(sps, pps []byte) []byte {
+	avcC := make([]byte, 11+len(sps)+len(pps))
+	avcC[0] = 0x01
+	avcC[1] = sps[1]
+	avcC[2] = sps[2]
+	avcC[3] = sps[3]
+	avcC[4] = 0xff
+	avcC[5] = 0xe1
+	binary.BigEndian.PutUint16(avcC[6:8], uint16(len(sps)))
+	off := 8
+	copy(avcC[off:], sps)
+	off += len(sps)
+	avcC[off] = 0x01
+	off++
+	binary.BigEndian.PutUint16(avcC[off:off+2], uint16(len(pps)))
+	off += 2
+	copy(avcC[off:], pps)
+	return avcC
+}
+
+func testH264CatalogTrack() catalog.Track {
+	sps := test.FormatH264.SPS
+	pps := test.FormatH264.PPS
+	return catalog.Track{
+		Name:      "0",
+		Packaging: "loc",
+		IsLive:    true,
+		Codec:     "avc1.42c028",
+		ClockRate: 90000,
+		InitData:  base64.StdEncoding.EncodeToString(testAvcC(sps, pps)),
+	}
+}
 
 type serverDummyPath struct{}
 
@@ -463,12 +498,7 @@ func TestServer(t *testing.T) {
 
 			require.Equal(t, catalog.Catalog{
 				Version: 1,
-				Tracks: []catalog.Track{{
-					Name:      "0",
-					Packaging: "loc",
-					IsLive:    true,
-					Codec:     "avc3.640028",
-				}},
+				Tracks:  []catalog.Track{testH264CatalogTrack()},
 			}, cat)
 
 			trackBidi, err := sx.OpenStreamSync(ctx)
@@ -519,7 +549,7 @@ func TestServer(t *testing.T) {
 			err = frameSG2.Read(frameStream2)
 			require.NoError(t, err)
 
-			expectedPayload, err2 := h264.AVCC([][]byte{test.FormatH264.SPS, test.FormatH264.PPS, {5, 1}}).Marshal()
+			expectedPayload, err2 := h264.AVCC([][]byte{{5, 1}}).Marshal()
 			require.NoError(t, err2)
 			require.Equal(t, expectedPayload, frameSG.Objects[0].Payload)
 			require.Equal(t, expectedPayload, frameSG2.Objects[0].Payload)
@@ -543,7 +573,7 @@ func TestServer(t *testing.T) {
 			err = frameSG3.Read(frameStream3)
 			require.NoError(t, err)
 
-			expectedPayload2, err2 := h264.AVCC([][]byte{test.FormatH264.SPS, test.FormatH264.PPS, {5, 2}}).Marshal()
+			expectedPayload2, err2 := h264.AVCC([][]byte{{5, 2}}).Marshal()
 			require.NoError(t, err2)
 			require.Equal(t, expectedPayload2, frameSG3.Objects[0].Payload)
 			require.Equal(t, uint64(3), frameSG3.Header.TrackAlias)
@@ -690,12 +720,7 @@ func TestServerNativeQUICSubscribe(t *testing.T) {
 
 			require.Equal(t, catalog.Catalog{
 				Version: 1,
-				Tracks: []catalog.Track{{
-					Name:      "0",
-					Packaging: "loc",
-					IsLive:    true,
-					Codec:     "avc3.640028",
-				}},
+				Tracks:  []catalog.Track{testH264CatalogTrack()},
 			}, cat)
 		})
 	}

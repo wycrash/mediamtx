@@ -28,8 +28,24 @@ type writeDataFunc func(payload []byte, pts int64) error
 // SetupTrackFunc is a function that sets up a track in a MediaMTX stream.
 type SetupTrackFunc func(r *stream.Reader, writeData writeDataFunc)
 
+func outFormatAt(outDesc *description.Session, mediaIdx, formatIdx int, orig format.Format) format.Format {
+	if outDesc == nil || mediaIdx >= len(outDesc.Medias) {
+		return orig
+	}
+	outMedia := outDesc.Medias[mediaIdx]
+	if formatIdx >= len(outMedia.Formats) {
+		return orig
+	}
+	return outMedia.Formats[formatIdx]
+}
+
 // FromStream maps a MediaMTX stream to a Media-over-QUIC catalog and subscribed tracks.
-func FromStream(desc *description.Session) (*catalog.Catalog, []SetupTrackFunc, error) {
+// origDesc is used to bind readers; outDesc (when non-nil) supplies live codec parameters.
+func FromStream(origDesc, outDesc *description.Session) (*catalog.Catalog, []SetupTrackFunc, error) {
+	if outDesc == nil {
+		outDesc = origDesc
+	}
+
 	cat := &catalog.Catalog{
 		Version: 1,
 	}
@@ -45,6 +61,9 @@ func FromStream(desc *description.Session) (*catalog.Catalog, []SetupTrackFunc, 
 		track.Name = strconv.Itoa(len(cat.Tracks))
 		track.Packaging = "loc"
 		track.IsLive = true
+		if track.ClockRate == 0 {
+			track.ClockRate = forma.ClockRate()
+		}
 
 		setup := func(r *stream.Reader, writeData writeDataFunc) {
 			parsePayload := genParsePayload(writeData)
@@ -58,15 +77,16 @@ func FromStream(desc *description.Session) (*catalog.Catalog, []SetupTrackFunc, 
 		setupTracks = append(setupTracks, setup)
 	}
 
-	for _, media := range desc.Medias {
-		for _, forma := range media.Formats {
+	for mediaIdx, media := range origDesc.Medias {
+		for formatIdx, forma := range media.Formats {
 			switch forma := forma.(type) {
 			case *format.AV1:
 				addTrack(
 					media,
 					forma,
 					catalog.Track{
-						Codec: "av01.0.04M.08",
+						Codec:     "av01.0.04M.08",
+						ClockRate: forma.ClockRate(),
 					},
 					func(writeData writeDataFunc) func(u *unit.Unit) error {
 						firstRandomAccess := false
@@ -96,7 +116,8 @@ func FromStream(desc *description.Session) (*catalog.Catalog, []SetupTrackFunc, 
 					media,
 					forma,
 					catalog.Track{
-						Codec: "vp09.00.10.08",
+						Codec:     "vp09.00.10.08",
+						ClockRate: forma.ClockRate(),
 					},
 					func(writeData writeDataFunc) func(u *unit.Unit) error {
 						firstRandomAccess := false
@@ -121,7 +142,8 @@ func FromStream(desc *description.Session) (*catalog.Catalog, []SetupTrackFunc, 
 					media,
 					forma,
 					catalog.Track{
-						Codec: "vp8",
+						Codec:     "vp8",
+						ClockRate: forma.ClockRate(),
 					},
 					func(writeData writeDataFunc) func(u *unit.Unit) error {
 						firstRandomAccess := false
@@ -142,12 +164,25 @@ func FromStream(desc *description.Session) (*catalog.Catalog, []SetupTrackFunc, 
 				)
 
 			case *format.H265:
+				outH265, _ := outFormatAt(outDesc, mediaIdx, formatIdx, forma).(*format.H265)
+				if outH265 == nil {
+					outH265 = forma
+				}
+				h265Track := catalog.Track{
+					Codec:     "hev1.1.6.L93.B0",
+					ClockRate: forma.ClockRate(),
+				}
+				stripH265 := false
+				if len(outH265.VPS) > 0 && len(outH265.SPS) >= 15 && len(outH265.PPS) > 0 {
+					h265Track.Codec = h265CodecString(outH265.SPS)
+					h265Track.InitData = base64.StdEncoding.EncodeToString(
+						makeHvcC(outH265.VPS, outH265.SPS, outH265.PPS))
+					stripH265 = true
+				}
 				addTrack(
 					media,
 					forma,
-					catalog.Track{
-						Codec: "hev1.1.6.L93.B0",
-					},
+					h265Track,
 					func(writeData writeDataFunc) func(u *unit.Unit) error {
 						firstRandomAccess := false
 
@@ -156,12 +191,20 @@ func FromStream(desc *description.Session) (*catalog.Catalog, []SetupTrackFunc, 
 								return nil
 							}
 
-							if !firstRandomAccess && !h265.IsRandomAccess(u.Payload.(unit.PayloadH265)) {
+							nalus := [][]byte(u.Payload.(unit.PayloadH265))
+							if !firstRandomAccess && !h265.IsRandomAccess(nalus) {
 								return nil
 							}
 							firstRandomAccess = true
 
-							payload, err := h264.AVCC(u.Payload.(unit.PayloadH265)).Marshal()
+							if stripH265 {
+								nalus = stripH265Params(nalus)
+								if len(nalus) == 0 {
+									return nil
+								}
+							}
+
+							payload, err := h264.AVCC(nalus).Marshal()
 							if err != nil {
 								return err
 							}
@@ -172,12 +215,24 @@ func FromStream(desc *description.Session) (*catalog.Catalog, []SetupTrackFunc, 
 				)
 
 			case *format.H264:
+				outH264, _ := outFormatAt(outDesc, mediaIdx, formatIdx, forma).(*format.H264)
+				if outH264 == nil {
+					outH264 = forma
+				}
+				h264Track := catalog.Track{
+					Codec:     "avc3.640028",
+					ClockRate: forma.ClockRate(),
+				}
+				stripH264 := false
+				if len(outH264.SPS) >= 4 && len(outH264.PPS) > 0 {
+					h264Track.Codec = h264CodecString(outH264.SPS)
+					h264Track.InitData = base64.StdEncoding.EncodeToString(makeAvcC(outH264.SPS, outH264.PPS))
+					stripH264 = true
+				}
 				addTrack(
 					media,
 					forma,
-					catalog.Track{
-						Codec: "avc3.640028",
-					},
+					h264Track,
 					func(writeData writeDataFunc) func(u *unit.Unit) error {
 						firstRandomAccess := false
 
@@ -186,12 +241,20 @@ func FromStream(desc *description.Session) (*catalog.Catalog, []SetupTrackFunc, 
 								return nil
 							}
 
-							if !firstRandomAccess && !h264.IsRandomAccess(u.Payload.(unit.PayloadH264)) {
+							nalus := [][]byte(u.Payload.(unit.PayloadH264))
+							if !firstRandomAccess && !h264.IsRandomAccess(nalus) {
 								return nil
 							}
 							firstRandomAccess = true
 
-							payload, err := h264.AVCC(u.Payload.(unit.PayloadH264)).Marshal()
+							if stripH264 {
+								nalus = stripH264Params(nalus)
+								if len(nalus) == 0 {
+									return nil
+								}
+							}
+
+							payload, err := h264.AVCC(nalus).Marshal()
 							if err != nil {
 								return err
 							}
@@ -209,6 +272,7 @@ func FromStream(desc *description.Session) (*catalog.Catalog, []SetupTrackFunc, 
 						Codec:      "opus",
 						Samplerate: 48000,
 						Channels:   forma.ChannelCount,
+						ClockRate:  forma.ClockRate(),
 					},
 					func(writeData writeDataFunc) func(u *unit.Unit) error {
 						return func(u *unit.Unit) error {
@@ -247,6 +311,7 @@ func FromStream(desc *description.Session) (*catalog.Catalog, []SetupTrackFunc, 
 							Codec:      "flac",
 							Samplerate: int(streamInfo.SampleRate),
 							Channels:   int(streamInfo.ChannelCount),
+							ClockRate:  forma.ClockRate(),
 							InitData:   base64.StdEncoding.EncodeToString(enc),
 						},
 						func(writeData writeDataFunc) func(u *unit.Unit) error {
@@ -275,6 +340,7 @@ func FromStream(desc *description.Session) (*catalog.Catalog, []SetupTrackFunc, 
 							Codec:      "mp4a.40.2",
 							Samplerate: forma.Config.SampleRate,
 							Channels:   int(forma.Config.ChannelConfig),
+							ClockRate:  forma.ClockRate(),
 							InitData:   base64.StdEncoding.EncodeToString(enc),
 						},
 						func(writeData writeDataFunc) func(u *unit.Unit) error {
@@ -307,6 +373,7 @@ func FromStream(desc *description.Session) (*catalog.Catalog, []SetupTrackFunc, 
 						Codec:      "pcm-s16",
 						Samplerate: forma.SampleRate,
 						Channels:   forma.ChannelCount,
+						ClockRate:  forma.ClockRate(),
 					},
 					func(writeData writeDataFunc) func(u *unit.Unit) error {
 						return func(u *unit.Unit) error {
@@ -355,6 +422,7 @@ func FromStream(desc *description.Session) (*catalog.Catalog, []SetupTrackFunc, 
 						Codec:      codec,
 						Samplerate: forma.SampleRate,
 						Channels:   forma.ChannelCount,
+						ClockRate:  forma.ClockRate(),
 					},
 					func(writeData writeDataFunc) func(u *unit.Unit) error {
 						return func(u *unit.Unit) error {

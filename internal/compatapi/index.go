@@ -1505,8 +1505,9 @@ func (idx *Index) ensurePersistLocked(pathName string, pe *pathIndex) {
 	idx.bindPersistLocked(pathName, pe, day, "")
 }
 
-// ClosePersist flushes snapshots and closes journal files.
-func (idx *Index) ClosePersist() {
+// ClosePersist writes dirty day snapshots, fsyncs journals, and closes them.
+// Returns the number of paths that were flushed.
+func (idx *Index) ClosePersist() int {
 	idx.mutex.Lock()
 	names := make([]string, 0, len(idx.paths))
 	for name := range idx.paths {
@@ -1514,7 +1515,15 @@ func (idx *Index) ClosePersist() {
 	}
 	idx.mutex.Unlock()
 	for _, name := range names {
-		idx.compactPath(name)
+		idx.mutex.Lock()
+		dirty := false
+		if pe := idx.paths[name]; pe != nil && pe.persist != nil && pe.persist.journalOps > 0 {
+			dirty = true
+		}
+		idx.mutex.Unlock()
+		if dirty {
+			idx.compactPath(name)
+		}
 		idx.mutex.Lock()
 		if pe := idx.paths[name]; pe != nil && pe.persist != nil {
 			pe.persist.closeJournal()
@@ -1522,6 +1531,7 @@ func (idx *Index) ClosePersist() {
 		}
 		idx.mutex.Unlock()
 	}
+	return len(names)
 }
 
 // Add inserts or updates a segment.

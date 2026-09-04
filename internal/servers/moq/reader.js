@@ -67,6 +67,7 @@ class MediaMTXMoQReader {
   #uniStreamsListeners = [];
   #videoTrack = null;
   #videoParams = null;
+  #videoConfigured = false;
   #videoCanvas = null;
   #videoDecoder = null;
   #videoReorderer = null;
@@ -123,6 +124,9 @@ class MediaMTXMoQReader {
         } catch (e) {}
         this.#videoDecoder = null;
       }
+      this.#videoConfigured = false;
+      this.#videoParams = null;
+      this.#videoTrack = null;
 
       if (this.#videoCanvas !== null) {
         this.#videoCanvas.remove();
@@ -425,9 +429,14 @@ class MediaMTXMoQReader {
     const groupId = await r.readVarint();
 
     await r.readVarint(); // idDelta
+    let timestamp = null;
     if (withProps) {
       const propsLen = await r.readVarint();
-      if (propsLen > 0n) await r.readBytes(Number(propsLen));
+      if (propsLen > 0n) {
+        timestamp = MediaMTXMoQReader.#parseTimestamp(
+          await r.readBytes(Number(propsLen)),
+        );
+      }
     }
     const len = await r.readVarint();
     if (len === 0n) {
@@ -445,7 +454,7 @@ class MediaMTXMoQReader {
       throw new Error("end chunk has non-zero length");
     }
 
-    return { data, trackAlias, groupId };
+    return { data, trackAlias, groupId, timestamp };
   }
 
   async #subscribeAllTracks() {
@@ -454,7 +463,7 @@ class MediaMTXMoQReader {
     for (let i = 0; i < this.#catalog.tracks.length; i++) {
       const track = this.#catalog.tracks[i];
 
-      if (/^(avc3|hev1|av01|vp09|vp8)/.test(track.codec)) {
+      if (/^(avc1|avc3|hvc1|hev1|av01|vp09|vp8)/.test(track.codec)) {
         if (this.#videoTrack === null) {
           this.#videoTrack = track;
           promises.push(
@@ -633,7 +642,10 @@ class MediaMTXMoQReader {
         optimizeForLatency: true,
       };
 
-      const supported = await VideoDecoder.isConfigSupported(config);
+      const supported = await VideoDecoder.isConfigSupported({
+        codec: track.codec,
+        optimizeForLatency: true,
+      });
       if (!supported.supported) {
         throw new Error(
           "the browser you are using does not support video codec " +
@@ -641,7 +653,14 @@ class MediaMTXMoQReader {
         );
       }
 
-      this.#videoDecoder.configure(config);
+      if (track.initData) {
+        config.description = MediaMTXMoQReader.#base64ToBuffer(track.initData);
+        this.#videoDecoder.configure(config);
+        this.#videoConfigured = true;
+      } else if (!/^(avc1|avc3|hvc1|hev1)/.test(track.codec)) {
+        this.#videoDecoder.configure(config);
+        this.#videoConfigured = true;
+      }
 
       this.#videoReorderer = new MediaMTXMoQReader.#Reorderer(
         MediaMTXMoQReader.#MAX_VIDEO_REORDERED_SUBGROUPS,
@@ -738,27 +757,28 @@ class MediaMTXMoQReader {
   }
 
   async #onDataTrack(readable) {
-    const { data, trackAlias, groupId } = await this.#readSubGroup(readable);
+    const { data, trackAlias, groupId, timestamp } =
+      await this.#readSubGroup(readable);
     if (data.length === 0) {
       return;
     }
 
     if (trackAlias === MediaMTXMoQReader.#VIDEO_REQUEST_ID) {
-      const sgs = this.#videoReorderer.push(data, groupId);
+      const sgs = this.#videoReorderer.push(data, groupId, timestamp);
 
       for (const sg of sgs) {
-        this.#decodeVideo(sg.data, sg.groupId);
+        this.#decodeVideo(sg.data, sg.timestamp);
       }
     } else {
-      const sgs = this.#audioReorderer.push(data, groupId);
+      const sgs = this.#audioReorderer.push(data, groupId, timestamp);
 
       for (const sg of sgs) {
-        this.#decodeAudio(sg.data, sg.groupId);
+        this.#decodeAudio(sg.data, sg.timestamp);
       }
     }
   }
 
-  #decodeVideo(data, groupId) {
+  #decodeVideo(data, pts) {
     // this happens when the screen is off
     if (
       this.#videoDecoder.decodeQueueSize >=
@@ -768,38 +788,43 @@ class MediaMTXMoQReader {
       return;
     }
 
-    if (/^(avc3)/.test(this.#videoTrack.codec)) {
-      let sps = null;
-      let pps = null;
-      for (const nalu of MediaMTXMoQReader.#splitAVCC(data)) {
+    if (!this.#configureVideoFromPayload(data)) {
+      return;
+    }
+
+    const timestamp = MediaMTXMoQReader.#ptsToUs(
+      pts,
+      this.#videoTrack.clockrate || 90000,
+    );
+    this.#videoDecoder.decode(
+      new EncodedVideoChunk({
+        type: MediaMTXMoQReader.#videoChunkType(this.#videoTrack.codec, data),
+        timestamp,
+        data,
+      }),
+    );
+  }
+
+  #configureVideoFromPayload(data) {
+    const codec = this.#videoTrack.codec;
+    const isAvc = /^(avc1|avc3)/.test(codec);
+    const isHevc = /^(hvc1|hev1)/.test(codec);
+    if (!isAvc && !isHevc) {
+      return this.#videoConfigured;
+    }
+
+    let vps = null;
+    let sps = null;
+    let pps = null;
+    for (const nalu of MediaMTXMoQReader.#splitAVCC(data)) {
+      if (isAvc) {
         const naluType = nalu[0] & 0x1f;
         if (naluType === 7) {
           sps = nalu;
         } else if (naluType === 8) {
           pps = nalu;
         }
-      }
-
-      if (
-        sps !== null &&
-        pps !== null &&
-        (this.#videoParams === null ||
-          !MediaMTXMoQReader.#bytesEqual(this.#videoParams.sps, sps) ||
-          !MediaMTXMoQReader.#bytesEqual(this.#videoParams.pps, pps))
-      ) {
-        this.#videoParams = { sps, pps };
-        this.#videoDecoder.configure({
-          codec: this.#videoTrack.codec,
-          optimizeForLatency: true,
-          description: MediaMTXMoQReader.#makeAvcC(sps, pps),
-        });
-        console.log("video params updated");
-      }
-    } else if (/^(hev1)/.test(this.#videoTrack.codec)) {
-      let vps = null;
-      let sps = null;
-      let pps = null;
-      for (const nalu of MediaMTXMoQReader.#splitAVCC(data)) {
+      } else {
         const naluType = (nalu[0] >> 1) & 0x3f;
         if (naluType === 32) {
           vps = nalu;
@@ -809,33 +834,42 @@ class MediaMTXMoQReader {
           pps = nalu;
         }
       }
-
-      if (
-        vps !== null &&
-        sps !== null &&
-        pps !== null &&
-        (this.#videoParams === null ||
-          !MediaMTXMoQReader.#bytesEqual(this.#videoParams.vps, vps) ||
-          !MediaMTXMoQReader.#bytesEqual(this.#videoParams.sps, sps) ||
-          !MediaMTXMoQReader.#bytesEqual(this.#videoParams.pps, pps))
-      ) {
-        this.#videoParams = { vps, sps, pps };
-        this.#videoDecoder.configure({
-          codec: this.#videoTrack.codec,
-          optimizeForLatency: true,
-          description: MediaMTXMoQReader.#makeHvcC(vps, sps, pps),
-        });
-        console.log("video params updated");
-      }
     }
 
-    const timestamp = performance.now() * 1000;
-    this.#videoDecoder.decode(
-      new EncodedVideoChunk({ type: "key", timestamp, data }),
-    );
+    const haveAvc = isAvc && sps !== null && pps !== null;
+    const haveHevc = isHevc && vps !== null && sps !== null && pps !== null;
+    if (!haveAvc && !haveHevc) {
+      return this.#videoConfigured;
+    }
+
+    const changed =
+      this.#videoParams === null ||
+      (isAvc &&
+        (!MediaMTXMoQReader.#bytesEqual(this.#videoParams.sps, sps) ||
+          !MediaMTXMoQReader.#bytesEqual(this.#videoParams.pps, pps))) ||
+      (isHevc &&
+        (!MediaMTXMoQReader.#bytesEqual(this.#videoParams.vps, vps) ||
+          !MediaMTXMoQReader.#bytesEqual(this.#videoParams.sps, sps) ||
+          !MediaMTXMoQReader.#bytesEqual(this.#videoParams.pps, pps)));
+
+    if (!this.#videoConfigured || (changed && !this.#videoTrack.initData)) {
+      this.#videoParams = { vps, sps, pps };
+      const config = {
+        codec,
+        optimizeForLatency: true,
+        description: isAvc
+          ? MediaMTXMoQReader.#makeAvcC(sps, pps)
+          : MediaMTXMoQReader.#makeHvcC(vps, sps, pps),
+      };
+      this.#videoDecoder.configure(config);
+      this.#videoConfigured = true;
+      console.log("video params updated");
+    }
+
+    return this.#videoConfigured;
   }
 
-  #decodeAudio(data, groupId) {
+  #decodeAudio(data, pts) {
     // this happens when the screen is off
     if (
       this.#audioDecoder.decodeQueueSize >=
@@ -845,7 +879,10 @@ class MediaMTXMoQReader {
       return;
     }
 
-    const timestamp = Number(groupId);
+    const timestamp = MediaMTXMoQReader.#ptsToUs(
+      pts,
+      this.#audioTrack.clockrate || this.#audioTrack.samplerate || 48000,
+    );
     this.#audioDecoder.decode(
       new EncodedAudioChunk({ type: "key", timestamp, data }),
     );
@@ -1052,6 +1089,55 @@ class MediaMTXMoQReader {
     return nalus;
   }
 
+  static #parseTimestamp(bytes) {
+    let off = 0;
+    let currentType = 0n;
+    while (off < bytes.length) {
+      const delta = MediaMTXMoQReader.#readVarintFromBytes(bytes, off);
+      off += delta.size;
+      currentType += delta.value;
+      if (currentType % 2n === 1n) {
+        const len = MediaMTXMoQReader.#readVarintFromBytes(bytes, off);
+        off += len.size + Number(len.value);
+        continue;
+      }
+      const val = MediaMTXMoQReader.#readVarintFromBytes(bytes, off);
+      off += val.size;
+      if (currentType === 0x06n) {
+        return val.value;
+      }
+    }
+    return null;
+  }
+
+  static #ptsToUs(pts, clockrate) {
+    if (pts === null || pts === undefined) {
+      return performance.now() * 1000;
+    }
+    return Number((BigInt(pts) * 1000000n) / BigInt(clockrate));
+  }
+
+  static #videoChunkType(codec, data) {
+    if (/^(avc1|avc3)/.test(codec)) {
+      for (const nalu of MediaMTXMoQReader.#splitAVCC(data)) {
+        if ((nalu[0] & 0x1f) === 5) {
+          return "key";
+        }
+      }
+      return "delta";
+    }
+    if (/^(hvc1|hev1)/.test(codec)) {
+      for (const nalu of MediaMTXMoQReader.#splitAVCC(data)) {
+        const t = (nalu[0] >> 1) & 0x3f;
+        if (t >= 16 && t <= 21) {
+          return "key";
+        }
+      }
+      return "delta";
+    }
+    return "key";
+  }
+
   static #base64ToBuffer(b64) {
     const bin = atob(b64);
     const buf = new Uint8Array(bin.length);
@@ -1080,10 +1166,11 @@ class MediaMTXMoQReader {
       this.#maxReorderered = maxReorderered;
     }
 
-    push(data, groupId) {
+    push(data, groupId, timestamp) {
+      const item = { data, groupId, timestamp };
       if (this.#curGroupId === null) {
         this.#curGroupId = groupId;
-        return [{ data, groupId }];
+        return [item];
       } else if (groupId <= this.#curGroupId) {
         console.log("skipping out-of-order subgroup");
       } else if (
@@ -1091,9 +1178,9 @@ class MediaMTXMoQReader {
         this.#pending.size === 0
       ) {
         this.#curGroupId = groupId;
-        return [{ data, groupId }];
+        return [item];
       } else {
-        this.#pending.set(groupId, data);
+        this.#pending.set(groupId, item);
 
         const diff = groupId - this.#curGroupId;
 
@@ -1120,9 +1207,9 @@ class MediaMTXMoQReader {
     #flushUpTo(maxGroupId) {
       const out = [];
       for (let i = this.#curGroupId + 1n; i <= maxGroupId; i++) {
-        const d = this.#pending.get(i);
-        if (d !== undefined) {
-          out.push({ data: d, groupId: i });
+        const item = this.#pending.get(i);
+        if (item !== undefined) {
+          out.push(item);
           this.#pending.delete(i);
         }
       }
@@ -1131,7 +1218,7 @@ class MediaMTXMoQReader {
         const next = this.#pending.get(this.#curGroupId + 1n);
         if (next === undefined) break;
         this.#curGroupId += 1n;
-        out.push({ data: next, groupId: this.#curGroupId });
+        out.push(next);
         this.#pending.delete(this.#curGroupId);
       }
       return out;

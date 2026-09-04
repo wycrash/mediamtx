@@ -25,7 +25,27 @@ const (
 var (
 	tagsRegexp    = regexp.MustCompile(`^refs/tags/(v1\.[0-9]+\.[0-9]+)$`)
 	currentRegexp = regexp.MustCompile(`^(v1\.[0-9]+\.[0-9]+)$`)
+
+	lookupLatest = latestRemoteVersion
+	fetchBinary  = defaultFetchBinary
+	applyBinary  = defaultApplyBinary
 )
+
+// ErrUnofficial is returned when the running binary is not an official release.
+type ErrUnofficial struct {
+	Version string
+}
+
+func (e *ErrUnofficial) Error() string {
+	return fmt.Sprintf("current version (%v) is not official and cannot be upgraded", e.Version)
+}
+
+// Info is the result of a version check or upgrade.
+type Info struct {
+	Current   string
+	Latest    string
+	Available bool
+}
 
 func latestRemoteVersion() (*semver.Version, error) {
 	rem := git.NewRemote(memory.NewStorage(), &config.RemoteConfig{
@@ -56,50 +76,65 @@ func latestRemoteVersion() (*semver.Version, error) {
 	return versions[0], nil
 }
 
-// Upgrade downloads the latest executable and replaces the current one with it.
-func Upgrade(version, arch string) error {
+func inspect(version string) (*Info, error) {
 	if !currentRegexp.MatchString(version) {
-		return fmt.Errorf("current version (%v) is not official and cannot be upgraded", version)
+		return nil, &ErrUnofficial{Version: version}
 	}
 
-	fmt.Println("getting latest version...")
-
-	latest, err := latestRemoteVersion()
+	latest, err := lookupLatest()
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	current, _ := semver.NewVersion(version)
 
-	if current.GreaterThanEqual(latest) {
-		fmt.Printf("current version (%v) is up to date\n", "v"+current.String())
-		return nil
-	}
+	return &Info{
+		Current:   "v" + current.String(),
+		Latest:    "v" + latest.String(),
+		Available: latest.GreaterThan(current),
+	}, nil
+}
 
-	fmt.Printf("downloading version %v...\n", "v"+latest.String())
-
-	ur := fmt.Sprintf(downloadURL, "v"+latest.String(), "v"+latest.String(), runtime.GOOS, arch, extension)
+func defaultFetchBinary(latest, arch string) ([]byte, error) {
+	ur := fmt.Sprintf(downloadURL, latest, latest, runtime.GOOS, arch, extension)
 
 	res, err := http.Get(ur)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	defer res.Body.Close()
+	defer res.Body.Close() //nolint:errcheck
 
 	if res.StatusCode != http.StatusOK {
-		return fmt.Errorf("bad status code: %v", res.StatusCode)
+		return nil, fmt.Errorf("bad status code: %v", res.StatusCode)
 	}
 
-	exe, err := extractExecutable(res.Body)
+	return extractExecutable(res.Body)
+}
+
+func defaultApplyBinary(bin []byte) error {
+	return selfupdate.Apply(bytes.NewReader(bin), selfupdate.Options{})
+}
+
+// Upgrade downloads the latest executable and replaces the current one with it.
+func Upgrade(version, arch string) (*Info, error) {
+	info, err := inspect(version)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
-	err = selfupdate.Apply(bytes.NewReader(exe), selfupdate.Options{})
+	if !info.Available {
+		return info, nil
+	}
+
+	bin, err := fetchBinary(info.Latest, arch)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
-	fmt.Printf("MediaMTX upgraded successfully from %v to %v.\n", "v"+current.String(), "v"+latest.String())
-	return nil
+	err = applyBinary(bin)
+	if err != nil {
+		return nil, err
+	}
+
+	return info, nil
 }

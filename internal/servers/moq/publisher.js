@@ -353,8 +353,15 @@ class MediaMTXMoQPublisher {
   }
 
   async #encodeVideo(mediaTrack, trackAlias) {
-    const isAvc = this.#conf.videoCodec.startsWith("avc3");
-    const isHvc = this.#conf.videoCodec.startsWith("hev1");
+    const isAvc =
+      this.#conf.videoCodec.startsWith("avc1") ||
+      this.#conf.videoCodec.startsWith("avc3");
+    const isHvc =
+      this.#conf.videoCodec.startsWith("hvc1") ||
+      this.#conf.videoCodec.startsWith("hev1");
+    const inBandParams =
+      this.#conf.videoCodec.startsWith("avc3") ||
+      this.#conf.videoCodec.startsWith("hev1");
     const processor = new MediaStreamTrackProcessor({ track: mediaTrack });
     const frameReader = processor.readable.getReader();
 
@@ -381,7 +388,13 @@ class MediaMTXMoQPublisher {
         let data = new Uint8Array(chunk.byteLength);
         chunk.copyTo(data);
 
-        if (isAvc && chunk.type === "key" && sps !== null && pps !== null) {
+        if (
+          inBandParams &&
+          isAvc &&
+          chunk.type === "key" &&
+          sps !== null &&
+          pps !== null
+        ) {
           data = MediaMTXMoQPublisher.#concat(
             MediaMTXMoQPublisher.#avccLen(sps.length),
             sps,
@@ -390,6 +403,7 @@ class MediaMTXMoQPublisher {
             data,
           );
         } else if (
+          inBandParams &&
           isHvc &&
           chunk.type === "key" &&
           vps !== null &&

@@ -1,6 +1,7 @@
 package moq
 
 import (
+	"encoding/base64"
 	"fmt"
 	"strings"
 
@@ -100,10 +101,22 @@ func ToStream(cat *catalog.Catalog, subStream **stream.SubStream) (
 				(*subStream).WriteUnit(media, forma, &unit.Unit{PTS: pts, Payload: unit.PayloadVP8(payload)})
 				return nil
 			})
-		case strings.HasPrefix(track.Codec, "avc3"):
+		case strings.HasPrefix(track.Codec, "avc1"), strings.HasPrefix(track.Codec, "avc3"):
 			forma := &format.H264{
 				PayloadTyp:        96,
 				PacketizationMode: 1,
+			}
+			if track.InitData != "" {
+				enc, err := base64.StdEncoding.DecodeString(track.InitData)
+				if err != nil {
+					return nil, nil, fmt.Errorf("invalid H264 initData: %w", err)
+				}
+				sps, pps, err := parseAvcC(enc)
+				if err != nil {
+					return nil, nil, fmt.Errorf("invalid H264 avcC: %w", err)
+				}
+				forma.SPS = sps
+				forma.PPS = pps
 			}
 			media := &description.Media{
 				Type:    description.MediaTypeVideo,
@@ -122,9 +135,22 @@ func ToStream(cat *catalog.Catalog, subStream **stream.SubStream) (
 				return nil
 			})
 
-		case strings.HasPrefix(track.Codec, "hev1"):
+		case strings.HasPrefix(track.Codec, "hvc1"), strings.HasPrefix(track.Codec, "hev1"):
 			forma := &format.H265{
 				PayloadTyp: 96,
+			}
+			if track.InitData != "" {
+				enc, err := base64.StdEncoding.DecodeString(track.InitData)
+				if err != nil {
+					return nil, nil, fmt.Errorf("invalid H265 initData: %w", err)
+				}
+				vps, sps, pps, err := parseHvcC(enc)
+				if err != nil {
+					return nil, nil, fmt.Errorf("invalid H265 hvcC: %w", err)
+				}
+				forma.VPS = vps
+				forma.SPS = sps
+				forma.PPS = pps
 			}
 			media := &description.Media{
 				Type:    description.MediaTypeVideo,

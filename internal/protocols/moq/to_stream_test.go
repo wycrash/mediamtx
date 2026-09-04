@@ -18,7 +18,9 @@ func TestToStream(t *testing.T) {
 			{Codec: "vp09.00.10.08"},
 			{Codec: "vp8"},
 			{Codec: "hev1.1.6.L93.B0"},
+			{Codec: "hvc1.1.6.L93.B0"},
 			{Codec: "avc3.640028"},
+			{Codec: "avc1.42c028"},
 			{Codec: "opus"},
 			{Codec: "mp4a.40.2", Samplerate: 44100, Channels: 2},
 		},
@@ -43,6 +45,14 @@ func TestToStream(t *testing.T) {
 		{
 			Type:    description.MediaTypeVideo,
 			Formats: []format.Format{&format.H265{PayloadTyp: 96}},
+		},
+		{
+			Type:    description.MediaTypeVideo,
+			Formats: []format.Format{&format.H265{PayloadTyp: 96}},
+		},
+		{
+			Type:    description.MediaTypeVideo,
+			Formats: []format.Format{&format.H264{PayloadTyp: 96, PacketizationMode: 1}},
 		},
 		{
 			Type:    description.MediaTypeVideo,
