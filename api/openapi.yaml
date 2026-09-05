@@ -346,7 +346,7 @@ components:
             $ref: "#/components/schemas/RTSPAuthMethod"
         compatAPI:
           type: boolean
-          description: Compat API (Flussonic-style DVR endpoints on a single HTTP port)
+          description: Compat API (DVR endpoints on a single HTTP port)
         compatAPIAddress:
           type: string
         compatAPIAllowOrigins:

@@ -1,4 +1,4 @@
-// Package compatapi provides a Flussonic-compatible DVR HTTP API on a single port.
+// Package compatapi provides a DVR HTTP API on a single port.
 package compatapi
 
 import (

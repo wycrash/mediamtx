@@ -247,12 +247,12 @@ playbackTrustedProxies: []
 ###############################################
 # Global settings -> Compat API
 
-# Enable a Flussonic compatible HTTP API on a single port:
+# Enable the Compat HTTP API on a single port:
 # - GET /{path}/info.json
 # - GET /{path}/recording_status.json
 # - GET /{path}/index-{start}-{duration}.m3u8  (archive HLS from mpegts recordings)
 # - GET /{path}/index-{start}-{duration}.fmp4.m3u8  (alias of index-*.m3u8)
-# - GET /{path}/archive-{start}-{duration}.m3u8  (Flussonic DVR player alias of index-*.m3u8)
+# - GET /{path}/archive-{start}-{duration}.m3u8  (DVR player alias of index-*.m3u8)
 # - GET /{path}/timeshift_abs-{start}.m3u8     (archive from timestamp until now)
 # - GET /{path}/{segment}.ts                  (archive segments)
 # - GET|HEAD /{path}/{Y}/{m}/{d}/{h}/{M}/{s}.mp4 (1-frame preview MP4, no ffmpeg)
@@ -261,7 +261,7 @@ playbackTrustedProxies: []
 # - GET /{path}/archive-{start}-{duration}.mp4 (archive mp4 if fmp4 segments)
 # - GET /{path}/preview.mp4                   (latest segment, same 1-frame MP4)
 # - GET /{path}/preview.jpeg                  (same as preview.mp4; native, no JPEG decode)
-# - GET /{path}/video.m3u8                    (Flussonic live HLS alias of index.m3u8)
+# - GET /{path}/video.m3u8                    (live HLS alias of index.m3u8)
 # - GET /{path}/video.fmp4.m3u8               (alias of index.m3u8)
 # - GET /{path}/embed.html                    (DVR player; query: dvr, autoplay, token, proto)
 # - GET /lib/dvrplayer/*                      (player JS/CSS; copied at go generate)

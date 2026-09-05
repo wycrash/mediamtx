@@ -57,7 +57,7 @@ func GenerateArchiveM3U8(
 // GenerateArchiveM3U8Indexed builds a VOD playlist from the in-memory index (no disk I/O
 // for mpegts; no disk I/O for fMP4 segments that were inspected at startup/complete).
 // windowStart is the archive-{from}-* timestamp; when the first file starts earlier,
-// EXT-X-START skips to that instant so Flussonic DVR player's PDT+currentTime clock
+// EXT-X-START skips to that instant so the DVR player's PDT+currentTime clock
 // matches the requested from (vanilla hls.js/VLC ignore this and play from 0).
 func GenerateArchiveM3U8Indexed(
 	format conf.RecordFormat,

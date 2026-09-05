@@ -36,7 +36,7 @@ func TestBuildRanges(t *testing.T) {
 
 func TestBuildRangesDoesNotFillRealGaps(t *testing.T) {
 	// 1h nominal (MediaMTX default) used to merge holes up to 2h — that makes the
-	// Flussonic DVR player jump across missing video.
+	// DVR player jump across missing video.
 	segDur := time.Hour
 	base := time.Unix(1_000_000, 0).UTC()
 	segments := []*recordstore.Segment{

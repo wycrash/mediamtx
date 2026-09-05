@@ -318,7 +318,7 @@ type Conf struct {
 	PlaybackAllowOrigins   []string   `json:"playbackAllowOrigins"`
 	PlaybackTrustedProxies IPNetworks `json:"playbackTrustedProxies"`
 
-	// Compat API (Flussonic-style DVR endpoints on a single HTTP port)
+	// Compat API (DVR endpoints on a single HTTP port)
 	CompatAPI                  bool       `json:"compatAPI"`
 	CompatAPIAddress           string     `json:"compatAPIAddress"`
 	CompatAPIEncryption        bool       `json:"compatAPIEncryption"`

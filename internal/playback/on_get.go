@@ -158,7 +158,7 @@ func MuxSegments(
 
 // MuxAvailableSegments muxes every readable segment in the window, skipping
 // truncated files and gaps (non-consecutive mtxi / reconnects). Used by
-// Flussonic archive-{from}-{duration}.mp4 so a broken first file does not
+// archive-{from}-{duration}.mp4 so a broken first file does not
 // drop the rest of the requested range.
 func MuxAvailableSegments(
 	recordFormat conf.RecordFormat,

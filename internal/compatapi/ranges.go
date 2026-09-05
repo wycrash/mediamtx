@@ -13,13 +13,13 @@ type RecordingRange struct {
 	Duration int64 `json:"duration"`
 }
 
-// RecordingStatus is the Flussonic-compatible status payload entry.
+// RecordingStatus is a recording_status.json payload entry.
 type RecordingStatus struct {
 	Stream string           `json:"stream"`
 	Ranges []RecordingRange `json:"ranges"`
 }
 
-// DVRRange is a Flussonic ranges.json timespan.
+// DVRRange is a ranges.json timespan.
 type DVRRange struct {
 	Duration int64 `json:"duration"`
 	From     int64 `json:"from"`
@@ -27,7 +27,7 @@ type DVRRange struct {
 	ClosedAt int64 `json:"closed_at"`
 }
 
-// RangesTiming is the Flussonic collection timing payload.
+// RangesTiming is the collection timing payload in ranges.json.
 type RangesTiming struct {
 	Select int `json:"select"`
 	Sort   int `json:"sort"`
@@ -35,7 +35,7 @@ type RangesTiming struct {
 	Limit  int `json:"limit"`
 }
 
-// RangesJSON is the Flussonic ranges.json response.
+// RangesJSON is the ranges.json response.
 type RangesJSON struct {
 	EstimatedCount int          `json:"estimated_count"`
 	Timing         RangesTiming `json:"timing"`
@@ -76,7 +76,7 @@ func parseUnixQuery(raw string) (int64, bool) {
 	if err != nil || v < 0 {
 		return 0, false
 	}
-	// Flussonic accepts seconds or milliseconds.
+	// Unix timestamps may be seconds or milliseconds.
 	if v >= 1e12 {
 		v /= 1000
 	}

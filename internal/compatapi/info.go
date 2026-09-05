@@ -127,7 +127,7 @@ func tracksFromAPI(tracks []defs.APIPathTrack) []InfoTrack {
 }
 
 func infoTrackFromAPI(t defs.APIPathTrack) (InfoTrack, bool) {
-	codec, content := flussonicCodec(t.Codec, t.CodecProps)
+	codec, content := compatCodec(t.Codec, t.CodecProps)
 	if codec == "" || content == "" {
 		return InfoTrack{}, false
 	}
@@ -174,7 +174,7 @@ func infoTrackFromAPI(t defs.APIPathTrack) (InfoTrack, bool) {
 	return it, true
 }
 
-func flussonicCodec(codec defs.APIPathTrackCodec, props defs.APIPathTrackCodecProps) (string, string) {
+func compatCodec(codec defs.APIPathTrackCodec, props defs.APIPathTrackCodecProps) (string, string) {
 	switch codec {
 	case formatlabel.H264:
 		return "h264", "video"

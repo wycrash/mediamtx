@@ -151,7 +151,7 @@ The iframe method is fit for most use cases, but it has some limitations:
 
 ### DVR player in iframe
 
-When the Compat API is enabled, a DVR player is served next to the Flussonic-style endpoints. Stream name is taken from the URL path; `token` is forwarded to HLS and archive requests:
+When the Compat API is enabled, a DVR player is served next to the other Compat API endpoints. Stream name is taken from the URL path; `token` is forwarded to HLS and archive requests:
 
 ```html
 <iframe
