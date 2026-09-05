@@ -50,6 +50,14 @@ ffmpeg -re -f lavfi -i testsrc=size=1280x720:rate=30 \
 -f mpegts unix:/tmp/socket.sock
 ```
 
+## FFmpeg and MPEG-TS over HTTP
+
+FFmpeg can serve MPEG-TS over HTTP. In _MediaMTX_ configuration, add a path with `source: http+mpegts://127.0.0.1:8080/stream.ts`. Then:
+
+```sh
+ffmpeg -re -stream_loop -1 -i file.mp4 -c copy -f mpegts -listen 1 http://127.0.0.1:8080/stream.ts
+```
+
 ## FFmpeg and RTP over UDP
 
 In _MediaMTX_ configuration, add a path with `source: udp+rtp://238.0.0.1:1234` and a valid `rtpSDP` (read [RTP](13-rtp.md)). Then:

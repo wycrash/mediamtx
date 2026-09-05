@@ -3,7 +3,11 @@ package mpegts_test
 import (
 	"bufio"
 	"context"
+	"io"
 	"net"
+	"net/http"
+	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"testing"
@@ -218,6 +222,95 @@ func TestSourceUnixSocket(t *testing.T) {
 
 			_, err := os.Stat(pa)
 			require.Error(t, err)
+		})
+	}
+}
+
+func writeTestMPEGTS(t *testing.T, w io.Writer) {
+	track := &mpegtslib.Track{
+		Codec: &tscodecs.H264{},
+	}
+
+	mw := &mpegtslib.Writer{W: w, Tracks: []*mpegtslib.Track{track}}
+	err := mw.Initialize()
+	require.NoError(t, err)
+
+	err = mw.WriteH264(track, 0, 0, [][]byte{{ // IDR
+		5, 1,
+	}})
+	require.NoError(t, err)
+
+	err = mw.WriteH264(track, 0, 0, [][]byte{{ // non-IDR
+		5, 2,
+	}})
+	require.NoError(t, err)
+}
+
+func TestSourceHTTP(t *testing.T) {
+	for _, ca := range []string{
+		"plain",
+		"auth",
+	} {
+		t.Run(ca, func(t *testing.T) {
+			hs := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				require.Equal(t, http.MethodGet, r.Method)
+				require.Equal(t, "/stream.ts", r.URL.Path)
+
+				if ca == "auth" {
+					user, pass, ok := r.BasicAuth()
+					require.True(t, ok)
+					require.Equal(t, "myuser", user)
+					require.Equal(t, "mypass", pass)
+				}
+
+				w.Header().Set("Content-Type", "video/MP2T")
+				w.WriteHeader(http.StatusOK)
+
+				writeTestMPEGTS(t, w)
+				w.(http.Flusher).Flush()
+
+				<-r.Context().Done()
+			}))
+			defer hs.Close()
+
+			u, err := url.Parse(hs.URL)
+			require.NoError(t, err)
+			u.Scheme = "http+mpegts"
+			u.Path = "/stream.ts"
+			if ca == "auth" {
+				u.User = url.UserPassword("myuser", "mypass")
+			}
+
+			p := &test.StaticSourceParent{}
+			p.Initialize()
+			defer p.Close()
+
+			so := &mpegts.Source{
+				ReadTimeout: conf.Duration(10 * time.Second),
+				Parent:      p,
+			}
+
+			done := make(chan struct{})
+			defer func() { <-done }()
+
+			ctx, ctxCancel := context.WithCancel(context.Background())
+			defer ctxCancel()
+
+			reloadConf := make(chan *conf.Path)
+
+			go func() {
+				so.Run(defs.StaticSourceRunParams{ //nolint:errcheck
+					Context:        ctx,
+					ResolvedSource: u.String(),
+					Conf:           &conf.Path{},
+					ReloadConf:     reloadConf,
+				})
+				close(done)
+			}()
+
+			<-p.Unit
+
+			reloadConf <- nil
 		})
 	}
 }

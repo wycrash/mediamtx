@@ -6,7 +6,7 @@
 | **audio** | Opus, MPEG-4 Audio (AAC), MPEG-1/2 Audio (MP3), AC-3  |
 | **other** | KLV                                                   |
 
-The server supports ingesting MPEG-TS streams, shipped in two different ways (UDP packets or Unix sockets).
+The server supports ingesting MPEG-TS streams, shipped over UDP packets, Unix sockets, or HTTP.
 
 In order to read a UDP MPEG-TS stream, edit `mediamtx.yml` and replace everything inside section `paths` with the following content:
 
@@ -49,3 +49,13 @@ paths:
   mypath:
     source: unix+mpegts:///tmp/socket.sock
 ```
+
+HTTP can be used to pull a MPEG-TS stream from an existing HTTP server (for instance a camera or a FFmpeg instance):
+
+```yml
+paths:
+  mypath:
+    source: http+mpegts://host:port/stream.ts
+```
+
+HTTPS is also supported with `https+mpegts://`. Username and password can be included in the URL (`http+mpegts://user:pass@host:port/path`). If username or password contain special characters, they need to be [url-encoded](https://www.urlencoder.org/).

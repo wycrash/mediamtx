@@ -99,6 +99,13 @@ func TestResolveSource(t *testing.T) {
 			expected: "udp://192.168.1.100:9000",
 		},
 		{
+			name:     "mpeg ts http",
+			source:   "http+mpegts://$G1:$G2/$G3",
+			matches:  []string{"srv_host_8080_stream.ts", "host", "8080", "stream.ts"},
+			query:    "",
+			expected: "http+mpegts://host:8080/stream.ts",
+		},
+		{
 			name:     "rtp protocol",
 			source:   "udp+rtp://$G1:$G2",
 			matches:  []string{"srv_192.168.1.100_5000", "192.168.1.100", "5000"},

@@ -550,6 +550,13 @@ func (pconf *Path) validate(
 
 	case strings.HasPrefix(pconf.Source, "unix+mpegts://"):
 
+	case strings.HasPrefix(pconf.Source, "http+mpegts://") ||
+		strings.HasPrefix(pconf.Source, "https+mpegts://"):
+		_, err := validateURL(pconf.Source)
+		if err != nil {
+			return err
+		}
+
 	case strings.HasPrefix(pconf.Source, "udp+rtp://"):
 		u, err := validateURL(pconf.Source)
 		if err != nil {

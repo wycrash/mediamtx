@@ -145,6 +145,14 @@ func TestConfFromFile(t *testing.T) {
 			source: "udp+mpegts://$G1:$G2",
 		},
 		{
+			name:   "http mpegts with placeholders",
+			source: "http+mpegts://$G1:$G2/$G3",
+		},
+		{
+			name:   "https mpegts with placeholders",
+			source: "https+mpegts://$G1/$G2",
+		},
+		{
 			name:   "udp rtp with placeholders",
 			source: "udp+rtp://$G1:$G2",
 		},

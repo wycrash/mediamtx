@@ -3,6 +3,7 @@ package mpegts
 
 import (
 	"fmt"
+	"io"
 	"net"
 	"net/url"
 	"time"
@@ -19,6 +20,11 @@ import (
 	"github.com/bluenviron/mediamtx/internal/protocols/unix"
 	"github.com/bluenviron/mediamtx/internal/stream"
 )
+
+type conn interface {
+	io.ReadCloser
+	SetReadDeadline(time.Time) error
+}
 
 type parent interface {
 	logger.Writer
@@ -48,9 +54,15 @@ func (s *Source) Run(params defs.StaticSourceRunParams) error {
 		return err
 	}
 
-	var nc net.Conn
+	var nc conn
 
 	switch u.Scheme {
+	case "http+mpegts", "https+mpegts":
+		nc, err = s.createHTTPConn(params, u)
+		if err != nil {
+			return err
+		}
+
 	case "unix+mpegts":
 		params := unix.URLToParams(u)
 		l := &unix.Listener{
@@ -143,7 +155,7 @@ func (s *Source) Run(params defs.StaticSourceRunParams) error {
 	}
 }
 
-func (s *Source) runReader(nc net.Conn) error {
+func (s *Source) runReader(nc conn) error {
 	nc.SetReadDeadline(time.Now().Add(time.Duration(s.ReadTimeout)))
 	mr := &mpegts.EnhancedReader{R: nc}
 	err := mr.Initialize()

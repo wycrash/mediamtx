@@ -128,7 +128,9 @@ func (s *Handler) Initialize() {
 
 	case strings.HasPrefix(s.Conf.Source, "udp://") ||
 		strings.HasPrefix(s.Conf.Source, "udp+mpegts://") ||
-		strings.HasPrefix(s.Conf.Source, "unix+mpegts://"):
+		strings.HasPrefix(s.Conf.Source, "unix+mpegts://") ||
+		strings.HasPrefix(s.Conf.Source, "http+mpegts://") ||
+		strings.HasPrefix(s.Conf.Source, "https+mpegts://"):
 		s.instance = &ssmpegts.Source{
 			DumpPackets:       s.DumpPackets,
 			ReadTimeout:       s.ReadTimeout,
