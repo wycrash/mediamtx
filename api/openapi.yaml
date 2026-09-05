@@ -2337,7 +2337,7 @@ paths:
             default: 100
         - name: path
           in: query
-          description: filter by path name. Matches "[path NAME]" and messages that mention that path.
+          description: filter by path name. Matches "[path NAME]", "[muxer NAME]", and messages that mention that path.
           schema:
             type: string
       responses:

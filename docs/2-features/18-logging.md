@@ -54,7 +54,7 @@ curl http://127.0.0.1:9997/v3/logs/list
 Optional query parameters:
 
 - `page`, `itemsPerPage` — pagination. Page 0 is the newest entries.
-- `path` — filter by path name. Matches `[path NAME]` and messages that mention that path.
+- `path` — filter by path name. Matches `[path NAME]`, `[muxer NAME]`, and messages that mention that path.
 
 Only lines that passed `logLevel` are stored. The buffer keeps the last 2048 entries in memory and is cleared on restart.
 

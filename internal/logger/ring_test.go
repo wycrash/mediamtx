@@ -29,8 +29,10 @@ func TestRingListFilter(t *testing.T) {
 	r.Push(t0, Info, "[path cam1] ready")
 	r.Push(t0, Info, "[path cam10] other")
 	r.Push(t0, Info, "[RTSP] [session ab] is publishing to path 'cam1'")
+	r.Push(t0, Info, "[HLS] [muxer cam1] skipping track 2 (G711)")
 	r.Push(t0, Info, "[HLS] is reading from muxer 'cam1'")
 	r.Push(t0, Info, "[MoQ] is reading from path cam1")
+	r.Push(t0, Info, "[compatapi] [session ab] created by 1.2.3.4 path=cam1")
 	r.Push(t0, Warn, "unrelated")
 	r.Push(t0, Error, "[path cam1/sub] nested")
 
@@ -40,8 +42,10 @@ func TestRingListFilter(t *testing.T) {
 			"[path cam1] debug",
 			"[path cam1] ready",
 			"[RTSP] [session ab] is publishing to path 'cam1'",
+			"[HLS] [muxer cam1] skipping track 2 (G711)",
 			"[HLS] is reading from muxer 'cam1'",
 			"[MoQ] is reading from path cam1",
+			"[compatapi] [session ab] created by 1.2.3.4 path=cam1",
 		}, messagesOf(out))
 	})
 

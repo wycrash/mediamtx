@@ -98,17 +98,21 @@ func (r *Ring) snapshot() []Entry {
 }
 
 func entryMatchesPath(msg, pathName string) bool {
-	if strings.Contains(msg, "[path "+pathName+"]") {
-		return true
+	for _, needle := range []string{
+		" " + pathName + "]", // [path NAME], [muxer NAME]
+		"path '" + pathName + "'",
+		"muxer '" + pathName + "'",
+		"path=" + pathName,
+		"path " + pathName,
+	} {
+		if containsPathToken(msg, needle) {
+			return true
+		}
 	}
-	if strings.Contains(msg, "path '"+pathName+"'") {
-		return true
-	}
-	if strings.Contains(msg, "muxer '"+pathName+"'") {
-		return true
-	}
+	return false
+}
 
-	needle := "path " + pathName
+func containsPathToken(msg, needle string) bool {
 	from := 0
 	for {
 		i := strings.Index(msg[from:], needle)
