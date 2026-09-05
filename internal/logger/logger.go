@@ -18,6 +18,9 @@ type Logger struct {
 	Structured   bool
 	File         string
 	SysLogPrefix string
+	// Ring receives every entry that passed Level. If nil, Initialize creates one.
+	// Close does not discard the ring so it can be reused across logger recreations.
+	Ring *Ring
 
 	timeNow      func() time.Time
 	stdout       io.Writer
@@ -56,6 +59,11 @@ func (l *Logger) Initialize() error {
 			l.destinations = append(l.destinations, dest)
 		}
 	}
+
+	if l.Ring == nil {
+		l.Ring = NewRing(DefaultRingSize)
+	}
+	l.destinations = append(l.destinations, l.Ring)
 
 	return nil
 }

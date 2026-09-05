@@ -48,14 +48,17 @@ type Server struct {
 	DvrPlayer         fs.FS
 	Parent            logger.Writer
 
-	Index         *Index
-	httpServer    *httpp.Server
-	mutex         sync.RWMutex
-	sessionsMu    sync.RWMutex
-	sessions      map[uuid.UUID]*session
-	reconcileStop chan struct{}
-	reconcileDone chan struct{}
-	reconcileKick chan struct{}
+	Index              *Index
+	httpServer         *httpp.Server
+	mutex              sync.RWMutex
+	sessionsMu         sync.RWMutex
+	sessions           map[uuid.UUID]*session
+	sessionsBySecret   map[uuid.UUID]*session
+	sessionCleanupStop chan struct{}
+	sessionCleanupDone chan struct{}
+	reconcileStop      chan struct{}
+	reconcileDone      chan struct{}
+	reconcileKick      chan struct{}
 }
 
 // Initialize initializes Server.
@@ -73,6 +76,7 @@ func (s *Server) Initialize() error {
 	s.logIndexMem(st, before, after)
 
 	s.sessions = make(map[uuid.UUID]*session)
+	s.sessionsBySecret = make(map[uuid.UUID]*session)
 
 	router := gin.New()
 	router.SetTrustedProxies(s.TrustedProxies.ToTrustedProxies()) //nolint:errcheck
@@ -103,6 +107,7 @@ func (s *Server) Initialize() error {
 		proto = "TCP/HTTPS"
 	}
 	s.Log(logger.Info, "started with listener on %s (%s)", s.Address, proto)
+	s.startSessionCleanup()
 	s.startBackgroundReconcile(loadSt)
 	return nil
 }
@@ -134,6 +139,7 @@ func (s *Server) OnSegmentRemove(segmentPath string) {
 // Close closes Server.
 func (s *Server) Close() {
 	s.Log(logger.Info, "closing")
+	s.stopSessionCleanup()
 	s.stopBackgroundReconcile()
 	s.sessionsKickAll()
 	if s.Index != nil {

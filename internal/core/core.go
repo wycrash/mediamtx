@@ -130,6 +130,7 @@ type Core struct {
 	conf            *conf.Conf
 	supportsIPv6    bool
 	logger          *logger.Logger
+	logRing         *logger.Ring
 	externalCmdPool *externalcmd.Pool
 	authManager     *auth.Manager
 	metrics         *metrics.Metrics
@@ -371,12 +372,14 @@ func (p *Core) createResources(initial bool) error {
 			Structured:   p.conf.LogStructured,
 			File:         p.conf.LogFile,
 			SysLogPrefix: p.conf.SysLogPrefix,
+			Ring:         p.logRing,
 		}
 		err = i.Initialize()
 		if err != nil {
 			return err
 		}
 		p.logger = i
+		p.logRing = i.Ring
 	}
 
 	if initial {
@@ -876,6 +879,7 @@ func (p *Core) createResources(initial bool) error {
 			SRTServer:      p.srtServer,
 			MoQServer:      p.moqServer,
 			SystemMetrics:  p.sysMetrics,
+			Logs:           p.logRing,
 			Parent:         p,
 		}
 		err = i.Initialize()

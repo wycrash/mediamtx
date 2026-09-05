@@ -94,6 +94,7 @@ type API struct {
 	SRTServer      defs.APISRTServer
 	MoQServer      defs.APIMoQServer
 	SystemMetrics  systemMetricsProvider
+	Logs           *logger.Ring
 	Parent         apiParent
 	Admin          fs.FS
 
@@ -111,6 +112,7 @@ func (a *API) Initialize() error {
 	group := router.Group("/v3")
 
 	group.GET("/info", a.onInfo)
+	group.GET("/logs/list", a.onLogsList)
 	group.GET("/metrics/system", a.onSystemMetrics)
 	group.POST("/system/restart", a.onSystemRestart)
 	group.GET("/system/upgrade", a.onSystemUpgradeGet)

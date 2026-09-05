@@ -67,6 +67,50 @@ paths:
               schema:
                 $ref: "#/components/schemas/Error"
 
+  /v3/logs/list:
+    get:
+      operationId: logsList
+      tags: [General]
+      summary: returns recent log entries from the in-memory ring.
+      description: Newest entries first. Only lines that passed logLevel are stored. The buffer keeps the last 2048 entries and is cleared on restart.
+      parameters:
+        - name: page
+          in: query
+          description: page number.
+          schema:
+            type: integer
+            default: 0
+        - name: itemsPerPage
+          in: query
+          description: items per page.
+          schema:
+            type: integer
+            default: 100
+        - name: path
+          in: query
+          description: filter by path name. Matches "[path NAME]" and messages that mention that path.
+          schema:
+            type: string
+      responses:
+        "200":
+          description: the request was successful.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LogList"
+        "400":
+          description: invalid request.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "500":
+          description: server error.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
   /v3/metrics/system:
     get:
       operationId: systemMetrics
@@ -768,7 +812,7 @@ paths:
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/CompatSessionList"
+                $ref: "#/components/schemas/HLSSessionList"
         "400":
           description: invalid request.
           content:
@@ -801,7 +845,7 @@ paths:
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/CompatSession"
+                $ref: "#/components/schemas/HLSSession"
         "400":
           description: invalid request.
           content:

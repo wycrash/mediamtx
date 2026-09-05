@@ -77,9 +77,10 @@ func TestAPISessionsListGetKick(t *testing.T) {
 		query:      "key=val",
 		user:       "user1",
 		userAgent:  "test-agent",
-		cancel:     cancel,
 	}
+	sx.addCancel(cancel)
 	sx.bytes.Store(111)
+	sx.lastReq.Store(created.UnixNano())
 
 	s := &Server{
 		sessions: map[uuid.UUID]*session{
@@ -156,8 +157,88 @@ func TestMiddlewareSessionKick(t *testing.T) {
 	require.Equal(t, "key=val", list.Items[0].Query)
 	require.Equal(t, "alice", list.Items[0].User)
 	require.Equal(t, "compat-test", list.Items[0].UserAgent)
+	require.False(t, list.Items[0].IsCDN)
 
 	err = s.APISessionsKick(list.Items[0].ID)
 	require.NoError(t, err)
 	<-done
+}
+
+func TestMiddlewareSessionPersistsAfterRequest(t *testing.T) {
+	s := &Server{
+		Parent:   testParent{},
+		sessions: make(map[uuid.UUID]*session),
+	}
+
+	r := gin.New()
+	r.Use(s.middlewareSession)
+	r.NoRoute(func(ctx *gin.Context) {
+		ctx.String(http.StatusOK, "archive")
+	})
+
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/cam1/archive-1000-60.mp4?from=1", nil)
+	req.Header.Set("User-Agent", "dvr-player")
+	r.ServeHTTP(w, req)
+	require.Equal(t, http.StatusOK, w.Code)
+
+	list, err := s.APISessionsList()
+	require.NoError(t, err)
+	require.Len(t, list.Items, 1)
+	require.Equal(t, "cam1", list.Items[0].Path)
+	require.Equal(t, "from=1", list.Items[0].Query)
+	require.Equal(t, "dvr-player", list.Items[0].UserAgent)
+	require.Equal(t, uint64(7), list.Items[0].OutboundBytes)
+	id := list.Items[0].ID
+
+	var cookie *http.Cookie
+	for _, c := range w.Result().Cookies() {
+		if c.Name == sessionCookieName {
+			cookie = c
+			break
+		}
+	}
+	require.NotNil(t, cookie)
+	require.Equal(t, "/cam1", cookie.Path)
+
+	w2 := httptest.NewRecorder()
+	req2 := httptest.NewRequest(http.MethodGet, "/cam1/archive-1000-60.m3u8", nil)
+	req2.AddCookie(cookie)
+	r.ServeHTTP(w2, req2)
+	require.Equal(t, http.StatusOK, w2.Code)
+
+	list, err = s.APISessionsList()
+	require.NoError(t, err)
+	require.Len(t, list.Items, 1)
+	require.Equal(t, id, list.Items[0].ID)
+	require.Greater(t, list.Items[0].OutboundBytes, uint64(7))
+}
+
+func TestExpireSessions(t *testing.T) {
+	orig := sessionCloseAfter
+	sessionCloseAfter = time.Millisecond
+	t.Cleanup(func() { sessionCloseAfter = orig })
+
+	id := uuid.New()
+	secret := uuid.New()
+	sx := &session{
+		uuid:   id,
+		secret: secret,
+		path:   "cam1",
+	}
+	sx.lastReq.Store(time.Now().Add(-time.Second).UnixNano())
+
+	s := &Server{
+		sessions: map[uuid.UUID]*session{
+			id: sx,
+		},
+		sessionsBySecret: map[uuid.UUID]*session{
+			secret: sx,
+		},
+	}
+	s.expireSessions()
+
+	list, err := s.APISessionsList()
+	require.NoError(t, err)
+	require.Empty(t, list.Items)
 }

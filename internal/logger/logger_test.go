@@ -39,6 +39,48 @@ func TestLoggerToStdout(t *testing.T) {
 	}
 }
 
+func TestLoggerToRing(t *testing.T) {
+	existing := NewRing(8)
+
+	l := &Logger{
+		Level:        Debug,
+		Destinations: []Destination{},
+		Ring:         existing,
+		timeNow:      func() time.Time { return time.Date(2003, 11, 4, 23, 15, 8, 0, time.UTC) },
+	}
+	err := l.Initialize()
+	require.NoError(t, err)
+	defer l.Close()
+
+	require.Equal(t, existing, l.Ring)
+
+	l.Log(Debug, "skipped by later logger")
+	l.Log(Info, "[path cam1] ready")
+	l.Log(Error, "boom %d", 1)
+
+	out := l.Ring.List(ListFilter{})
+	require.Equal(t, []string{"skipped by later logger", "[path cam1] ready", "boom 1"}, messagesOf(out))
+
+	l2 := &Logger{
+		Level: Info,
+		Ring:  existing,
+	}
+	err = l2.Initialize()
+	require.NoError(t, err)
+	defer l2.Close()
+
+	l2.Log(Debug, "filtered")
+	l2.Log(Warn, "kept")
+
+	out = existing.List(ListFilter{})
+	require.Equal(t, []string{
+		"skipped by later logger",
+		"[path cam1] ready",
+		"boom 1",
+		"kept",
+	}, messagesOf(out))
+}
+
 func TestLoggerToFile(t *testing.T) {
 	for _, ca := range []string{
 		"plain",

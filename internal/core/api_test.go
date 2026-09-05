@@ -10,6 +10,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strings"
 	"testing"
 	"time"
 
@@ -75,6 +76,39 @@ func checkError(t *testing.T, msg string, body io.Reader) {
 	err := json.NewDecoder(body).Decode(&resErr)
 	require.NoError(t, err)
 	require.Equal(t, map[string]any{"status": "error", "error": msg}, resErr)
+}
+
+func TestAPILogsList(t *testing.T) {
+	p, ok := newInstance(t, "api: yes\n")
+	require.Equal(t, true, ok)
+	defer p.Close()
+
+	tr := &http.Transport{}
+	defer tr.CloseIdleConnections()
+	hc := &http.Client{Transport: tr}
+
+	var out defs.APILogList
+	httpRequest(t, hc, http.MethodGet, "http://localhost:9997/v3/logs/list", nil, &out)
+	require.Greater(t, out.ItemCount, 0)
+	require.Greater(t, out.PageCount, 0)
+	require.NotEmpty(t, out.Items)
+
+	found := false
+	for _, e := range out.Items {
+		if strings.Contains(e.Message, "MediaMTX") {
+			found = true
+			break
+		}
+	}
+	require.True(t, found, "expected startup log in %v", logMessages(out.Items))
+}
+
+func logMessages(items []defs.APILogEntry) []string {
+	out := make([]string, len(items))
+	for i, e := range items {
+		out[i] = e.Message
+	}
+	return out
 }
 
 func TestAPISystemMetrics(t *testing.T) {

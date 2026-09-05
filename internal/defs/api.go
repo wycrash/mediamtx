@@ -39,6 +39,20 @@ type APIInfo struct {
 	Started time.Time `json:"started"`
 }
 
+// APILogEntry is a log entry from the in-memory ring.
+type APILogEntry struct {
+	Timestamp time.Time     `json:"timestamp"`
+	Level     conf.LogLevel `json:"level"`
+	Message   string        `json:"message"`
+}
+
+// APILogList is a list of log entries.
+type APILogList struct {
+	ItemCount int           `json:"itemCount"`
+	PageCount int           `json:"pageCount"`
+	Items     []APILogEntry `json:"items"`
+}
+
 // APIUpgrade is the response of GET/POST /v3/system/upgrade.
 type APIUpgrade struct {
 	Current   string `json:"current"`

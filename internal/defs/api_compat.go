@@ -1,8 +1,6 @@
 package defs
 
 import (
-	"time"
-
 	"github.com/google/uuid"
 )
 
@@ -13,21 +11,9 @@ type APICompatServer interface {
 	APISessionsKick(uuid.UUID) error
 }
 
-// APICompatSessionList is a list of Compat API sessions.
-type APICompatSessionList struct {
-	ItemCount int                `json:"itemCount"`
-	PageCount int                `json:"pageCount"`
-	Items     []APICompatSession `json:"items"`
-}
-
 // APICompatSession is an in-flight Compat API HTTP request.
-type APICompatSession struct {
-	ID            uuid.UUID `json:"id"`
-	Created       time.Time `json:"created"`
-	RemoteAddr    string    `json:"remoteAddr"`
-	Path          string    `json:"path"`
-	Query         string    `json:"query"`
-	User          string    `json:"user"`
-	UserAgent     string    `json:"userAgent"`
-	OutboundBytes uint64    `json:"outboundBytes"`
-}
+// JSON format is identical to APIHLSSession.
+type APICompatSession = APIHLSSession
+
+// APICompatSessionList is a list of Compat API sessions.
+type APICompatSessionList = APIHLSSessionList

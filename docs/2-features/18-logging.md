@@ -43,6 +43,21 @@ If _MediaMTX_ is also running as a [system service](17-start-on-boot.md), log en
 journalctl -u mediamtx
 ```
 
+## Logs API
+
+When the [Control API](22-control-api.md) is enabled, recent log entries are available at:
+
+```sh
+curl http://127.0.0.1:9997/v3/logs/list
+```
+
+Optional query parameters:
+
+- `page`, `itemsPerPage` — pagination. Page 0 is the newest entries.
+- `path` — filter by path name. Matches `[path NAME]` and messages that mention that path.
+
+Only lines that passed `logLevel` are stored. The buffer keeps the last 2048 entries in memory and is cleared on restart.
+
 ## Structured logging
 
 Log collectors (like Loki, Logstash, CloudWatch and fluentd) parse logs in a more reliable way if they are fed with entries in structured format (JSONL). This can be enabled with the `logStructured` parameter:
