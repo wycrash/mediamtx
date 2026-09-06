@@ -26,7 +26,8 @@ import (
 )
 
 var (
-	archivePlaylistRegexp = regexp.MustCompile(`^(.*)/(?:index|archive)-(\d+)-(\d+)(?:\.fmp4)?\.m3u8$`)
+	// mono- is a Flussonic alias for index- (future track-filter hook; currently identical).
+	archivePlaylistRegexp = regexp.MustCompile(`^(.*)/(?:index|archive|mono)-(\d+)-(\d+)(?:\.fmp4)?\.m3u8$`)
 	archiveDownloadRegexp = regexp.MustCompile(`^(.*)/archive-(\d+)-(\d+)\.mp4$`)
 	timeshiftAbsRegexp    = regexp.MustCompile(`^(.*)/timeshift_abs-(\d+)(?:\.fmp4)?\.m3u8$`)
 	previewUnixRegexp     = regexp.MustCompile(`^(.*)/(\d{10,13})-preview\.mp4$`)
@@ -439,7 +440,9 @@ func (s *Server) writePreview(ctx *gin.Context, contentType, filename, segPath s
 
 	mp4, err := ExtractPreviewMP4(segPath)
 	if err != nil {
-		s.writeError(ctx, http.StatusInternalServerError, err)
+		// Missing keyframe, missing file, empty/truncated segment: the preview
+		// is simply not available. Do not report this as a server error.
+		s.writeErrorNoLog(ctx, http.StatusNotFound, err)
 		return
 	}
 	ctx.Data(http.StatusOK, contentType, mp4)

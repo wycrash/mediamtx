@@ -332,34 +332,39 @@ func (m *muxer) getCDNSession() *session {
 }
 
 func (m *muxer) findSession(ctx *gin.Context) *session {
-	var rawSecret string
-	if cookie, err := ctx.Request.Cookie(sessionCookieName); err == nil {
-		rawSecret = cookie.Value
-	} else {
-		q := ctx.Request.URL.Query()
-		rawSecret = q.Get(sessionQueryParamName)
+	var candidates []string
+	if cookie, err := ctx.Request.Cookie(sessionCookieName); err == nil && cookie.Value != "" {
+		candidates = append(candidates, cookie.Value)
+	}
+	if q := ctx.Request.URL.Query().Get(sessionQueryParamName); q != "" {
+		candidates = append(candidates, q)
 	}
 
-	secret, err := uuid.Parse(rawSecret)
-	if err != nil {
-		return nil
-	}
+	clientIP := ctx.ClientIP()
 
 	m.mutex.RLock()
 	defer m.mutex.RUnlock()
 
-	sx, ok := m.sessionsBySecret[secret]
-	if !ok {
-		return nil
+	for _, rawSecret := range candidates {
+		secret, err := uuid.Parse(rawSecret)
+		if err != nil {
+			continue
+		}
+
+		sx, ok := m.sessionsBySecret[secret]
+		if !ok {
+			continue
+		}
+
+		if clientIP != sx.ip {
+			continue
+		}
+
+		sx.lastRequestTime.Store(time.Now().UnixNano())
+		return sx
 	}
 
-	if ctx.ClientIP() != sx.ip {
-		return nil
-	}
-
-	sx.lastRequestTime.Store(time.Now().UnixNano())
-
-	return sx
+	return nil
 }
 
 func (m *muxer) handleRequest(ctx *gin.Context, isCDN bool) error {

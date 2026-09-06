@@ -1,0 +1,703 @@
+package gohlslib
+
+import (
+	"bytes"
+	"fmt"
+	"time"
+
+	"github.com/bluenviron/mediacommon/v2/pkg/codecs/av1"
+	"github.com/bluenviron/mediacommon/v2/pkg/codecs/h264"
+	"github.com/bluenviron/mediacommon/v2/pkg/codecs/h265"
+	"github.com/bluenviron/mediacommon/v2/pkg/codecs/mpeg4audio"
+	"github.com/bluenviron/mediacommon/v2/pkg/codecs/opus"
+	"github.com/bluenviron/mediacommon/v2/pkg/codecs/vp9"
+	"github.com/bluenviron/mediacommon/v2/pkg/formats/fmp4"
+
+	"github.com/bluenviron/gohlslib/v2/pkg/codecs"
+)
+
+func multiplyAndDivide(v, m, d int64) int64 {
+	secs := v / d
+	dec := v % d
+	return (secs*m + dec*m/d)
+}
+
+func multiplyAndDivide2(v, m, d time.Duration) time.Duration {
+	secs := v / d
+	dec := v % d
+	return (secs*m + dec*m/d)
+}
+
+func durationToTimestamp(d time.Duration, clockRate int) int64 {
+	return multiplyAndDivide(int64(d), int64(clockRate), int64(time.Second))
+}
+
+func timestampToDuration(d int64, clockRate int) time.Duration {
+	return multiplyAndDivide2(time.Duration(d), time.Second, time.Duration(clockRate))
+}
+
+// advanceSegmentClock builds a stable remux timeline for segment boundaries.
+// Wild PES DTS jumps are replaced with a default frame step so EXTINF stays >= SegmentMinDuration.
+func advanceSegmentClock(track *muxerTrack, dts int64) int64 {
+	defaultStep := durationToTimestamp(40*time.Millisecond, track.ClockRate) // 25 fps
+	maxStep := durationToTimestamp(2*time.Second, track.ClockRate)
+
+	if !track.segmentClockInit {
+		track.segmentClock = dts
+		track.segmentClockLastIn = dts
+		track.segmentClockInit = true
+		track.segmentStartClock = track.segmentClock
+		return track.segmentClock
+	}
+
+	delta := dts - track.segmentClockLastIn
+	track.segmentClockLastIn = dts
+	if delta > 0 && delta <= maxStep {
+		track.segmentClock += delta
+	} else {
+		track.segmentClock += defaultStep
+	}
+	return track.segmentClock
+}
+
+func partDurationIsCompatible(partDuration time.Duration, sampleDuration time.Duration) bool {
+	if sampleDuration > partDuration {
+		return false
+	}
+
+	f := (partDuration / sampleDuration)
+	if (partDuration % sampleDuration) != 0 {
+		f++
+	}
+	f *= sampleDuration
+
+	return partDuration > ((f * 85) / 100)
+}
+
+func partDurationIsCompatibleWithAll(partDuration time.Duration, sampleDurations map[time.Duration]struct{}) bool {
+	for sd := range sampleDurations {
+		if !partDurationIsCompatible(partDuration, sd) {
+			return false
+		}
+	}
+	return true
+}
+
+func findCompatiblePartDuration(
+	minPartDuration time.Duration,
+	sampleDurations map[time.Duration]struct{},
+) time.Duration {
+	i := minPartDuration
+	for ; i < 5*time.Second; i += 5 * time.Millisecond {
+		if partDurationIsCompatibleWithAll(i, sampleDurations) {
+			break
+		}
+	}
+	return i
+}
+
+type fmp4AugmentedSample struct {
+	fmp4.Sample
+	dts int64
+	ntp time.Time
+}
+
+type muxerSegmenterParent interface {
+	createFirstSegment(nextDTS time.Duration, nextNTP time.Time) error
+	rotateSegments(nextDTS time.Duration, nextNTP time.Time) error
+	rotateParts(nextDTS time.Duration) error
+}
+
+type muxerSegmenter struct {
+	variant            MuxerVariant
+	segmentMinDuration time.Duration
+	partMinDuration    time.Duration
+	parent             muxerSegmenterParent
+
+	fmp4SampleDurations            map[time.Duration]struct{} // low-latency only
+	fmp4AdjustedPartDuration       time.Duration              // low-latency only
+	fmp4FreezeAdjustedPartDuration bool                       // low-latency only
+}
+
+func (s *muxerSegmenter) initialize() {
+	if s.variant != MuxerVariantMPEGTS {
+		s.fmp4SampleDurations = make(map[time.Duration]struct{})
+	}
+}
+
+func (s *muxerSegmenter) writeAV1(
+	track *muxerTrack,
+	ntp time.Time,
+	pts int64,
+	tu [][]byte,
+) error {
+	codec := track.Codec.(*codecs.AV1)
+	randomAccess := false
+
+	for _, obu := range tu {
+		typ := av1.OBUType((obu[0] >> 3) & 0b1111)
+
+		if typ == av1.OBUTypeSequenceHeader {
+			randomAccess = true
+
+			if !track.stream.initFilePresent && !bytes.Equal(codec.SequenceHeader, obu) {
+				codec.SequenceHeader = obu
+			}
+		}
+	}
+
+	ps := &fmp4.Sample{}
+	err := ps.FillAV1(tu)
+	if err != nil {
+		return err
+	}
+
+	return s.fmp4WriteSample(
+		track,
+		randomAccess,
+		&fmp4AugmentedSample{
+			Sample: *ps,
+			dts:    pts,
+			ntp:    ntp,
+		})
+}
+
+func (s *muxerSegmenter) writeVP9(
+	track *muxerTrack,
+	ntp time.Time,
+	pts int64,
+	frame []byte,
+) error {
+	var h vp9.Header
+	err := h.Unmarshal(frame)
+	if err != nil {
+		return err
+	}
+
+	codec := track.Codec.(*codecs.VP9)
+	randomAccess := false
+
+	if !h.NonKeyFrame {
+		randomAccess = true
+
+		if !track.stream.initFilePresent {
+			if v := h.Width(); v != codec.Width {
+				codec.Width = v
+			}
+			if v := h.Height(); v != codec.Height {
+				codec.Height = v
+			}
+			if h.Profile != codec.Profile {
+				codec.Profile = h.Profile
+			}
+			if h.ColorConfig.BitDepth != codec.BitDepth {
+				codec.BitDepth = h.ColorConfig.BitDepth
+			}
+			if v := h.ChromaSubsampling(); v != codec.ChromaSubsampling {
+				codec.ChromaSubsampling = v
+			}
+			if h.ColorConfig.ColorRange != codec.ColorRange {
+				codec.ColorRange = h.ColorConfig.ColorRange
+			}
+		}
+	}
+
+	// skip samples silently until we find a random access one
+	if !track.firstRandomAccessReceived {
+		if !randomAccess {
+			return nil
+		}
+		track.firstRandomAccessReceived = true
+	}
+
+	return s.fmp4WriteSample(
+		track,
+		randomAccess,
+		&fmp4AugmentedSample{
+			Sample: fmp4.Sample{
+				IsNonSyncSample: !randomAccess,
+				Payload:         frame,
+			},
+			dts: pts,
+			ntp: ntp,
+		})
+}
+
+func (s *muxerSegmenter) writeH265(
+	track *muxerTrack,
+	ntp time.Time,
+	pts int64,
+	au [][]byte,
+) error {
+	codec := track.Codec.(*codecs.H265)
+	randomAccess := false
+
+	for _, nalu := range au {
+		typ := h265.NALUType((nalu[0] >> 1) & 0b111111)
+
+		switch typ {
+		case h265.NALUType_IDR_W_RADL, h265.NALUType_IDR_N_LP, h265.NALUType_CRA_NUT:
+			randomAccess = true
+
+		case h265.NALUType_VPS_NUT:
+			if !track.stream.initFilePresent && !bytes.Equal(codec.VPS, nalu) {
+				codec.VPS = nalu
+			}
+
+		case h265.NALUType_SPS_NUT:
+			if !track.stream.initFilePresent && !bytes.Equal(codec.SPS, nalu) {
+				codec.SPS = nalu
+			}
+
+		case h265.NALUType_PPS_NUT:
+			if !track.stream.initFilePresent && !bytes.Equal(codec.PPS, nalu) {
+				codec.PPS = nalu
+			}
+		}
+	}
+
+	// skip samples silently until we find a random access one
+	if !track.firstRandomAccessReceived {
+		if !randomAccess {
+			return nil
+		}
+		track.firstRandomAccessReceived = true
+
+		track.h265DTSExtractor = &h265.DTSExtractor{}
+		track.h265DTSExtractor.Initialize()
+	}
+
+	dts, err := track.h265DTSExtractor.Extract(au, pts)
+	if err != nil {
+		return fmt.Errorf("unable to extract DTS: %w", err)
+	}
+
+	ps := &fmp4.Sample{}
+	err = ps.FillH265(
+		int32(pts-dts),
+		au)
+	if err != nil {
+		return err
+	}
+
+	return s.fmp4WriteSample(
+		track,
+		randomAccess,
+		&fmp4AugmentedSample{
+			Sample: *ps,
+			dts:    dts,
+			ntp:    ntp,
+		})
+}
+
+func (s *muxerSegmenter) writeH264(
+	track *muxerTrack,
+	ntp time.Time,
+	pts int64,
+	providedDTS int64,
+	hasDTS bool,
+	au [][]byte,
+) error {
+	codec := track.Codec.(*codecs.H264)
+	randomAccess := false
+	nonIDRPresent := false
+
+	for _, nalu := range au {
+		typ := h264.NALUType(nalu[0] & 0x1F)
+
+		switch typ {
+		case h264.NALUTypeIDR:
+			randomAccess = true
+
+		case h264.NALUTypeNonIDR:
+			nonIDRPresent = true
+
+		case h264.NALUTypeSPS:
+			if !track.stream.initFilePresent && !bytes.Equal(codec.SPS, nalu) {
+				codec.SPS = nalu
+			}
+
+		case h264.NALUTypePPS:
+			if !track.stream.initFilePresent && !bytes.Equal(codec.PPS, nalu) {
+				codec.PPS = nalu
+			}
+		}
+	}
+
+	if !randomAccess && !nonIDRPresent {
+		return nil
+	}
+
+	// skip samples silently until we find a random access one
+	if !track.firstRandomAccessReceived {
+		if !randomAccess {
+			return nil
+		}
+		track.firstRandomAccessReceived = true
+
+		track.h264DTSExtractor = &h264.DTSExtractor{}
+		track.h264DTSExtractor.Initialize()
+	}
+
+	var dts int64
+	var err error
+	if hasDTS {
+		dts = providedDTS
+		// PES DTS must not be after PTS (invalid CTS).
+		if dts > pts {
+			dts = pts
+		}
+	} else {
+		dts, err = track.h264DTSExtractor.Extract(au, pts)
+		if err != nil {
+			return fmt.Errorf("unable to extract DTS: %w", err)
+		}
+	}
+
+	// Keep DTS strictly increasing so PCR advances and segment cuts stay stable.
+	if track.h264LastDTSInitialized {
+		if dts <= track.h264LastDTS {
+			dts = track.h264LastDTS + 1
+			if dts > pts {
+				pts = dts
+			}
+		}
+	} else {
+		track.h264LastDTSInitialized = true
+	}
+	track.h264LastDTS = dts
+
+	if s.variant == MuxerVariantMPEGTS {
+		clock := advanceSegmentClock(track, dts)
+		clockDur := timestampToDuration(clock, track.ClockRate)
+
+		if track.stream.nextSegment == nil {
+			err = s.parent.createFirstSegment(clockDur, ntp)
+			if err != nil {
+				return err
+			}
+			track.segmentStartClock = clock
+		} else if randomAccess {
+			seg := track.stream.nextSegment.(*muxerSegmentMPEGTS)
+			elapsedClock := timestampToDuration(clock-track.segmentStartClock, track.ClockRate)
+			elapsedNTP := ntp.Sub(seg.startNTP)
+			if elapsedNTP < 0 {
+				elapsedNTP = 0
+			}
+			elapsedWall := time.Since(seg.startWall)
+			// Real-time gate prevents GOP-sized cuts when PES DTS jumps forward.
+			// Media clock keeps EXTINF aligned with progressive remux time.
+			elapsedReal := elapsedNTP
+			if elapsedWall > elapsedReal {
+				elapsedReal = elapsedWall
+			}
+			if elapsedClock >= s.segmentMinDuration && elapsedReal >= s.segmentMinDuration {
+				endDTS := seg.startDTS + elapsedClock
+				if endDTS-seg.startDTS < s.segmentMinDuration {
+					endDTS = seg.startDTS + s.segmentMinDuration
+				}
+				prevID := seg.id
+				err = s.parent.rotateSegments(endDTS, ntp)
+				if err != nil {
+					return err
+				}
+				if next, ok := track.stream.nextSegment.(*muxerSegmentMPEGTS); ok && next.id != prevID {
+					track.segmentStartClock = clock
+				}
+			}
+		}
+
+		err = track.stream.nextSegment.(*muxerSegmentMPEGTS).writeH264(
+			track,
+			pts,
+			dts,
+			au,
+		)
+		if err != nil {
+			return err
+		}
+
+		track.stream.setLeadingDTS(dts)
+		return nil
+	}
+
+	ps := &fmp4.Sample{}
+	err = ps.FillH264(
+		int32(pts-dts),
+		au)
+	if err != nil {
+		return err
+	}
+
+	return s.fmp4WriteSample(
+		track,
+		randomAccess,
+		&fmp4AugmentedSample{
+			Sample: *ps,
+			dts:    dts,
+			ntp:    ntp,
+		})
+}
+
+func (s *muxerSegmenter) writeOpus(
+	track *muxerTrack,
+	ntp time.Time,
+	pts int64,
+	packets [][]byte,
+) error {
+	for _, packet := range packets {
+		err := s.fmp4WriteSample(
+			track,
+			true,
+			&fmp4AugmentedSample{
+				Sample: fmp4.Sample{
+					Payload: packet,
+				},
+				dts: pts,
+				ntp: ntp,
+			},
+		)
+		if err != nil {
+			return err
+		}
+
+		deltaT := opus.PacketDuration2(packet)
+		ntp = ntp.Add(timestampToDuration(deltaT, 48000))
+		pts += deltaT
+	}
+
+	return nil
+}
+
+func (s *muxerSegmenter) writeFLAC(
+	track *muxerTrack,
+	ntp time.Time,
+	pts int64,
+	frame []byte,
+) error {
+	return s.fmp4WriteSample(
+		track,
+		true,
+		&fmp4AugmentedSample{
+			Sample: fmp4.Sample{
+				Payload: frame,
+			},
+			dts: pts,
+			ntp: ntp,
+		},
+	)
+}
+
+func (s *muxerSegmenter) writeMPEG4Audio(
+	track *muxerTrack,
+	ntp time.Time,
+	pts int64,
+	aus [][]byte,
+) error {
+	if s.variant == MuxerVariantMPEGTS {
+		if track.isLeading {
+			if track.stream.nextSegment == nil {
+				err := s.parent.createFirstSegment(timestampToDuration(pts, track.ClockRate), ntp)
+				if err != nil {
+					return err
+				}
+			} else if (timestampToDuration(pts, track.ClockRate) -
+				track.stream.nextSegment.(*muxerSegmentMPEGTS).startDTS) >= s.segmentMinDuration { // switch segment
+				err := s.parent.rotateSegments(timestampToDuration(pts, track.ClockRate), ntp)
+				if err != nil {
+					return err
+				}
+			}
+		} else {
+			// wait for the video track
+			if track.stream.nextSegment == nil {
+				return nil
+			}
+		}
+
+		err := track.stream.nextSegment.(*muxerSegmentMPEGTS).writeMPEG4Audio(track, pts, aus)
+		if err != nil {
+			return err
+		}
+
+		return nil
+	}
+
+	for i, au := range aus {
+		auNTP := ntp.Add(time.Duration(i) * mpeg4audio.SamplesPerAccessUnit *
+			time.Second / time.Duration(track.ClockRate))
+		auPTS := pts + int64(i)*mpeg4audio.SamplesPerAccessUnit
+
+		err := s.fmp4WriteSample(
+			track,
+			true,
+			&fmp4AugmentedSample{
+				Sample: fmp4.Sample{
+					Payload: au,
+				},
+				dts: auPTS,
+				ntp: auNTP,
+			},
+		)
+		if err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+func (s *muxerSegmenter) writeMPEG1Audio(
+	track *muxerTrack,
+	ntp time.Time,
+	pts int64,
+	frames [][]byte,
+) error {
+	if s.variant != MuxerVariantMPEGTS {
+		return fmt.Errorf("MPEG-1/2 Audio is only supported with the MPEG-TS muxer variant")
+	}
+
+	if track.isLeading {
+		if track.stream.nextSegment == nil {
+			err := s.parent.createFirstSegment(timestampToDuration(pts, track.ClockRate), ntp)
+			if err != nil {
+				return err
+			}
+		} else if (timestampToDuration(pts, track.ClockRate) -
+			track.stream.nextSegment.(*muxerSegmentMPEGTS).startDTS) >= s.segmentMinDuration {
+			err := s.parent.rotateSegments(timestampToDuration(pts, track.ClockRate), ntp)
+			if err != nil {
+				return err
+			}
+		}
+	} else if track.stream.nextSegment == nil {
+		// wait for the video track
+		return nil
+	}
+
+	return track.stream.nextSegment.(*muxerSegmentMPEGTS).writeMPEG1Audio(track, pts, frames)
+}
+
+func (s *muxerSegmenter) writeKLV(
+	track *muxerTrack,
+	_ time.Time,
+	pts int64,
+	data []byte,
+) error {
+	if s.variant != MuxerVariantMPEGTS {
+		return fmt.Errorf("KLV tracks are only supported with MPEG-TS muxer variant")
+	}
+
+	// wait for the leading track to create the first segment
+	if track.stream.nextSegment == nil {
+		return nil
+	}
+
+	seg, ok := track.stream.nextSegment.(*muxerSegmentMPEGTS)
+	if !ok {
+		return fmt.Errorf("unexpected segment type %T for KLV track", track.stream.nextSegment)
+	}
+
+	return seg.writeKLV(track, pts, data)
+}
+
+// iPhone iOS fails if part durations are less than 85% of maximum part duration.
+// find a part duration that is compatible with all sample durations
+func (s *muxerSegmenter) fmp4AdjustPartDuration(sampleDuration time.Duration) {
+	if s.variant != MuxerVariantLowLatency || s.fmp4FreezeAdjustedPartDuration {
+		return
+	}
+
+	// avoid a crash by skipping invalid durations
+	if sampleDuration == 0 {
+		return
+	}
+
+	if _, ok := s.fmp4SampleDurations[sampleDuration]; !ok {
+		s.fmp4SampleDurations[sampleDuration] = struct{}{}
+		s.fmp4AdjustedPartDuration = findCompatiblePartDuration(
+			s.partMinDuration,
+			s.fmp4SampleDurations,
+		)
+	}
+}
+
+func (s *muxerSegmenter) fmp4WriteSample(
+	track *muxerTrack,
+	randomAccess bool,
+	sample *fmp4AugmentedSample,
+) error {
+	// add a starting DTS to avoid a negative BaseTime
+	sample.dts += durationToTimestamp(fmp4StartDTS, track.ClockRate)
+
+	// BaseTime is still negative, this is not supported by fMP4
+	if sample.dts < 0 {
+		return fmt.Errorf("sample timestamp is impossible to handle")
+	}
+
+	// put samples into a queue in order to compute the sample duration
+	sample, track.fmp4NextSample = track.fmp4NextSample, sample
+	if sample == nil {
+		return nil
+	}
+
+	duration := track.fmp4NextSample.dts - sample.dts
+	if duration < 0 {
+		track.fmp4NextSample.dts = sample.dts
+		duration = 0
+	}
+
+	sample.Duration = uint32(duration)
+
+	if track.isLeading {
+		// create first segment
+		if track.stream.nextSegment == nil {
+			err := s.parent.createFirstSegment(timestampToDuration(sample.dts, track.ClockRate), sample.ntp)
+			if err != nil {
+				return err
+			}
+		}
+	} else {
+		// wait for the leading track
+		if track.stream.nextSegment == nil {
+			return nil
+		}
+	}
+
+	if track.isLeading {
+		s.fmp4AdjustPartDuration(timestampToDuration(int64(sample.Duration), track.ClockRate))
+	}
+
+	err := track.stream.nextPart.writeSample(
+		track,
+		sample,
+	)
+	if err != nil {
+		return err
+	}
+
+	if track.isLeading {
+		// switch segment
+		if randomAccess && ((timestampToDuration(track.fmp4NextSample.dts, track.ClockRate) -
+			track.stream.nextSegment.(*muxerSegmentFMP4).startDTS) >= s.segmentMinDuration) {
+			err = s.parent.rotateSegments(timestampToDuration(track.fmp4NextSample.dts, track.ClockRate),
+				track.fmp4NextSample.ntp)
+			if err != nil {
+				return err
+			}
+
+			s.fmp4FreezeAdjustedPartDuration = true
+
+			// switch part
+		} else if (s.variant == MuxerVariantLowLatency) &&
+			(timestampToDuration(track.fmp4NextSample.dts, track.ClockRate)-
+				track.stream.nextPart.startDTS) >= s.fmp4AdjustedPartDuration {
+			err = s.parent.rotateParts(timestampToDuration(track.fmp4NextSample.dts, track.ClockRate))
+			if err != nil {
+				return err
+			}
+		}
+	}
+
+	return nil
+}

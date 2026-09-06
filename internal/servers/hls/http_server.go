@@ -391,21 +391,61 @@ func (s *httpServer) onRequest(ctx *gin.Context) {
 			return
 		}
 
-	default:
-		muxer, err := s.parent.getMuxer(serverGetMuxerReq{
-			path:   dir,
-			create: false,
-		})
-		if err != nil {
-			s.writeErrorNoLog(ctx, http.StatusUnauthorized, fmt.Errorf("authentication error"))
-			return
-		}
+	case mediaPlaylist:
+		fallthrough
 
+	default:
 		var sx *session
 		if isCDN {
+			muxer, err := s.parent.getMuxer(serverGetMuxerReq{
+				path:   dir,
+				create: false,
+			})
+			if err != nil {
+				s.writeErrorNoLog(ctx, http.StatusUnauthorized, fmt.Errorf("authentication error"))
+				return
+			}
 			sx = muxer.getCDNSession()
 		} else {
-			sx = muxer.findSession(ctx)
+			muxer, err := s.parent.getMuxer(serverGetMuxerReq{
+				path:   dir,
+				create: false,
+			})
+			if err == nil {
+				sx = muxer.findSession(ctx)
+			}
+			if sx == nil {
+				// Session expired or muxer restarted. Re-authenticate with the
+				// token still present on media playlist / segment URLs (VLC does
+				// not go back to index.m3u8 to mint a new session).
+				sx = &session{
+					remoteAddr:      httpp.RemoteAddr(ctx),
+					pathName:        dir,
+					externalCmdPool: s.parent.ExternalCmdPool,
+					pathManager:     s.pathManager,
+					server:          s.parent,
+				}
+				err = sx.initialize(ctx)
+				if err != nil {
+					if terr, ok := errors.AsType[*auth.Error](err); ok {
+						if terr.AskCredentials {
+							ctx.Header("WWW-Authenticate", `Basic realm="mediamtx"`)
+						}
+						s.writeErrorNoLog(ctx, http.StatusUnauthorized, fmt.Errorf("authentication error"))
+						return
+					}
+					if _, ok := errors.AsType[*defs.PathNoStreamAvailableError](err); ok {
+						s.writeErrorNoLog(ctx, http.StatusNotFound, err)
+						return
+					}
+					s.writeErrorNoLog(ctx, http.StatusInternalServerError, err)
+					return
+				}
+
+				q := ctx.Request.URL.Query()
+				q.Set(sessionQueryParamName, sx.secret.String())
+				ctx.Request.URL.RawQuery = q.Encode()
+			}
 		}
 		if sx == nil {
 			s.writeErrorNoLog(ctx, http.StatusUnauthorized, fmt.Errorf("authentication error"))
@@ -423,7 +463,7 @@ func (s *httpServer) onRequest(ctx *gin.Context) {
 
 		ctx.Request.URL.Path = fname
 
-		err = muxer.handleRequest(ctx, isCDN)
+		err := sx.muxer.handleRequest(ctx, isCDN)
 		if err != nil {
 			s.writeErrorNoLog(ctx, http.StatusInternalServerError, err)
 			return

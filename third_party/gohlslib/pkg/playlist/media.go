@@ -1,0 +1,442 @@
+package playlist
+
+import (
+	"fmt"
+	"strconv"
+	"strings"
+	"time"
+
+	"github.com/bluenviron/gohlslib/v2/pkg/playlist/primitives"
+)
+
+const (
+	timeISO8601Millis = "2006-01-02T15:04:05.999Z0700"
+	timeRFC3339Millis = "2006-01-02T15:04:05.999Z07:00"
+)
+
+// HLS uses ISO8601, which supports time zones in multiple formats (-0700, -07:00).
+// Golang uses RFC3336, which is a subset of ISO8601 and supports a single format only (-07:00).
+// Support both ISO8601 and RFC3336.
+func parseTime(v string) (time.Time, error) {
+	ret, err := time.Parse(timeRFC3339Millis, v)
+	if err != nil {
+		ret, err = time.Parse(timeISO8601Millis, v)
+		if err != nil {
+			return time.Time{}, err
+		}
+	}
+	return ret, nil
+}
+
+// MediaStart is a EXT-X-START tag.
+type MediaStart = MultivariantStart
+
+// MediaPlaylistType is a EXT-X-PLAYLIST-TYPE value.
+type MediaPlaylistType string
+
+// standard values
+const (
+	MediaPlaylistTypeEvent MediaPlaylistType = "EVENT"
+	MediaPlaylistTypeVOD   MediaPlaylistType = "VOD"
+)
+
+// Media is a media playlist.
+type Media struct {
+	// EXT-X-VERSION (required)
+	Version int
+
+	// EXT-X-INDEPENDENT-SEGMENTS
+	IndependentSegments bool
+
+	// EXT-X-ALLOWCACHE (removed since v7)
+	AllowCache *bool
+
+	// EXT-X-TARGETDURATION (required)
+	TargetDuration int
+
+	// EXT-X-SERVER-CONTROL
+	ServerControl *MediaServerControl
+
+	// EXT-X-PART-INF
+	PartInf *MediaPartInf
+
+	// EXT-X-MEDIA-SEQUENCE (required)
+	MediaSequence int
+
+	// EXT-X-DISCONTINUITY-SEQUENCE
+	DiscontinuitySequence *int
+
+	// EXT-X-PLAYLIST-TYPE
+	PlaylistType *MediaPlaylistType
+
+	// EXT-X-MAP
+	Map *MediaMap
+
+	// EXT-X-START
+	Start *MediaStart
+
+	// EXT-X-SKIP
+	Skip *MediaSkip
+
+	// segments (at least one is required)
+	Segments []*MediaSegment
+
+	// EXT-X-PART
+	Parts []*MediaPart
+
+	// EXT-X-PRELOAD-HINT
+	PreloadHint *MediaPreloadHint
+
+	// EXT-X-RENDITION-REPORT
+	RenditionReport []*MediaRenditionReport
+
+	// EXT-X-ENDLIST
+	Endlist bool
+}
+
+func (m Media) isPlaylist() {}
+
+// Unmarshal decodes the playlist.
+func (m *Media) Unmarshal(buf []byte) error {
+	s := string(buf)
+
+	s, err := primitives.SkipHeader(s)
+	if err != nil {
+		return err
+	}
+
+	var curKey *MediaKey
+
+	curSegment := &MediaSegment{}
+
+	for {
+		var line string
+		line, s = primitives.ReadLine(s)
+		if line == "" && s == "" {
+			break
+		}
+
+		switch {
+		case strings.HasPrefix(line, "#EXT-X-VERSION:"):
+			line = line[len("#EXT-X-VERSION:"):]
+
+			var tmp uint64
+			tmp, err = strconv.ParseUint(line, 10, 31)
+			if err != nil {
+				return err
+			}
+			m.Version = int(tmp)
+
+			if m.Version > maxSupportedVersion {
+				return fmt.Errorf("unsupported HLS version (%d)", m.Version)
+			}
+
+		case strings.HasPrefix(line, "#EXT-X-INDEPENDENT-SEGMENTS"):
+			m.IndependentSegments = true
+
+		case strings.HasPrefix(line, "#EXT-X-ALLOW-CACHE:"):
+			line = line[len("#EXT-X-ALLOW-CACHE:"):]
+
+			m.AllowCache = ptrOf((line == "YES"))
+
+		case strings.HasPrefix(line, "#EXT-X-TARGETDURATION:"):
+			line = line[len("#EXT-X-TARGETDURATION:"):]
+
+			i := strings.IndexByte(line, '.')
+			if i >= 0 {
+				line = line[:i]
+			}
+
+			var tmp uint64
+			tmp, err = strconv.ParseUint(line, 10, 31)
+			if err != nil {
+				return err
+			}
+			m.TargetDuration = int(tmp)
+
+		case strings.HasPrefix(line, "#EXT-X-SERVER-CONTROL:"):
+			line = line[len("#EXT-X-SERVER-CONTROL:"):]
+
+			m.ServerControl = &MediaServerControl{}
+			err = m.ServerControl.unmarshal(line)
+			if err != nil {
+				return err
+			}
+
+		case strings.HasPrefix(line, "#EXT-X-PART-INF:"):
+			line = line[len("#EXT-X-PART-INF:"):]
+
+			m.PartInf = &MediaPartInf{}
+			err = m.PartInf.unmarshal(line)
+			if err != nil {
+				return err
+			}
+
+		case strings.HasPrefix(line, "#EXT-X-MEDIA-SEQUENCE:"):
+			line = line[len("#EXT-X-MEDIA-SEQUENCE:"):]
+
+			var tmp uint64
+			tmp, err = strconv.ParseUint(line, 10, 31)
+			if err != nil {
+				return err
+			}
+
+			m.MediaSequence = int(tmp)
+
+		case strings.HasPrefix(line, "#EXT-X-DISCONTINUITY-SEQUENCE:"):
+			line = line[len("#EXT-X-DISCONTINUITY-SEQUENCE:"):]
+
+			var tmp uint64
+			tmp, err = strconv.ParseUint(line, 10, 31)
+			if err != nil {
+				return err
+			}
+
+			m.DiscontinuitySequence = ptrOf(int(tmp))
+
+		case strings.HasPrefix(line, "#EXT-X-PLAYLIST-TYPE:"):
+			line = line[len("#EXT-X-PLAYLIST-TYPE:"):]
+
+			v := MediaPlaylistType(line)
+			if v != MediaPlaylistTypeEvent &&
+				v != MediaPlaylistTypeVOD {
+				return fmt.Errorf("invalid playlist type: %s", v)
+			}
+			m.PlaylistType = &v
+
+		case strings.HasPrefix(line, "#EXT-X-MAP:"):
+			line = line[len("#EXT-X-MAP:"):]
+
+			m.Map = &MediaMap{}
+			err = m.Map.unmarshal(line)
+			if err != nil {
+				return err
+			}
+
+		case strings.HasPrefix(line, "#EXT-X-KEY:"):
+			line = line[len("#EXT-X-KEY:"):]
+
+			curKey = &MediaKey{}
+			err = curKey.unmarshal(line)
+			if err != nil {
+				return err
+			}
+
+		case strings.HasPrefix(line, "#EXT-X-START:"):
+			line = line[len("#EXT-X-START:"):]
+
+			m.Start = &MultivariantStart{}
+			err = m.Start.unmarshal(line)
+			if err != nil {
+				return err
+			}
+
+		case strings.HasPrefix(line, "#EXT-X-SKIP:"):
+			line = line[len("#EXT-X-SKIP:"):]
+
+			m.Skip = &MediaSkip{}
+			err = m.Skip.unmarshal(line)
+			if err != nil {
+				return err
+			}
+
+		case line == "#EXT-X-DISCONTINUITY":
+			curSegment.Discontinuity = true
+
+		case line == "#EXT-X-GAP":
+			curSegment.Gap = true
+
+		case strings.HasPrefix(line, "#EXT-X-PROGRAM-DATE-TIME:"):
+			line = line[len("#EXT-X-PROGRAM-DATE-TIME:"):]
+
+			var tmp time.Time
+			tmp, err = parseTime(line)
+			if err != nil {
+				return err
+			}
+
+			curSegment.DateTime = &tmp
+
+		case strings.HasPrefix(line, "#EXT-X-BITRATE:"):
+			line = line[len("#EXT-X-BITRATE:"):]
+
+			var tmp uint64
+			tmp, err = strconv.ParseUint(line, 10, 31)
+			if err != nil {
+				return err
+			}
+
+			tmp2 := int(tmp)
+			curSegment.Bitrate = &tmp2
+
+		case strings.HasPrefix(line, "#EXTINF:"):
+			line = line[len("#EXTINF:"):]
+			parts := strings.SplitN(line, ",", 2)
+
+			var d primitives.Duration
+			err = d.Unmarshal(parts[0])
+			if err != nil {
+				return err
+			}
+
+			curSegment.Duration = time.Duration(d)
+
+			if len(parts) == 2 {
+				curSegment.Title = strings.TrimSpace(parts[1])
+			} else {
+				curSegment.Title = ""
+			}
+
+			curSegment.Key = curKey
+
+		case strings.HasPrefix(line, "#EXT-X-BYTERANGE:"):
+			line = line[len("#EXT-X-BYTERANGE:"):]
+
+			var br primitives.ByteRange
+			err = br.Unmarshal(line)
+			if err != nil {
+				return err
+			}
+
+			curSegment.ByteRangeLength = &br.Length
+			curSegment.ByteRangeStart = br.Start
+
+		case strings.HasPrefix(line, "#EXT-X-PART:"):
+			line = line[len("#EXT-X-PART:"):]
+
+			var part MediaPart
+			err = part.unmarshal(line)
+			if err != nil {
+				return err
+			}
+
+			curSegment.Parts = append(curSegment.Parts, &part)
+
+		case len(line) != 0 && line[0] != '#':
+			curSegment.URI = line
+
+			err = curSegment.validate()
+			if err != nil {
+				return err
+			}
+
+			m.Segments = append(m.Segments, curSegment)
+
+			curSegment = &MediaSegment{}
+
+		case strings.HasPrefix(line, "#EXT-X-PRELOAD-HINT:"):
+			line = line[len("#EXT-X-PRELOAD-HINT:"):]
+
+			m.PreloadHint = &MediaPreloadHint{}
+			err = m.PreloadHint.unmarshal(line)
+			if err != nil {
+				return err
+			}
+
+		case strings.HasPrefix(line, "#EXT-X-RENDITION-REPORT:"):
+			line = line[len("#EXT-X-RENDITION-REPORT:"):]
+
+			report := &MediaRenditionReport{}
+			err = report.unmarshal(line)
+			if err != nil {
+				return err
+			}
+			m.RenditionReport = append(m.RenditionReport, report)
+
+		case line == "#EXT-X-ENDLIST":
+			m.Endlist = true
+		}
+	}
+
+	m.Parts = curSegment.Parts
+
+	if m.TargetDuration == 0 {
+		return fmt.Errorf("TARGETDURATION not set")
+	}
+	if len(m.Segments) == 0 {
+		return fmt.Errorf("no segments found")
+	}
+
+	return nil
+}
+
+// Marshal encodes the playlist.
+func (m Media) Marshal() ([]byte, error) {
+	var ret strings.Builder
+	ret.WriteString("#EXTM3U\n" +
+		"#EXT-X-VERSION:" + strconv.FormatInt(int64(m.Version), 10) + "\n")
+
+	if m.IndependentSegments {
+		ret.WriteString("#EXT-X-INDEPENDENT-SEGMENTS\n")
+	}
+
+	if m.AllowCache != nil {
+		var v string
+		if *m.AllowCache {
+			v = "YES"
+		} else {
+			v = "NO"
+		}
+		ret.WriteString("#EXT-X-ALLOW-CACHE:" + v + "\n")
+	}
+
+	ret.WriteString("#EXT-X-TARGETDURATION:" + strconv.FormatInt(int64(m.TargetDuration), 10) + "\n")
+
+	if m.ServerControl != nil {
+		ret.WriteString(m.ServerControl.marshal())
+	}
+
+	if m.PartInf != nil {
+		ret.WriteString(m.PartInf.marshal())
+	}
+
+	ret.WriteString("#EXT-X-MEDIA-SEQUENCE:" + strconv.FormatInt(int64(m.MediaSequence), 10) + "\n")
+
+	if m.DiscontinuitySequence != nil {
+		ret.WriteString("#EXT-X-DISCONTINUITY-SEQUENCE:" + strconv.FormatInt(int64(*m.DiscontinuitySequence), 10) + "\n")
+	}
+
+	if m.PlaylistType != nil {
+		ret.WriteString("#EXT-X-PLAYLIST-TYPE:" + string(*m.PlaylistType) + "\n")
+	}
+
+	if m.Map != nil {
+		ret.WriteString(m.Map.marshal())
+	}
+
+	if m.Start != nil {
+		ret.WriteString(m.Start.marshal())
+	}
+
+	if m.Skip != nil {
+		ret.WriteString(m.Skip.marshal())
+	}
+
+	var prevKey *MediaKey
+	for _, seg := range m.Segments {
+		if seg.Key != nil && (prevKey == nil || !seg.Key.Equal(prevKey)) {
+			ret.WriteString(seg.Key.marshal())
+			prevKey = seg.Key
+		}
+
+		ret.WriteString(seg.marshal())
+	}
+
+	for _, part := range m.Parts {
+		ret.WriteString(part.marshal())
+	}
+
+	if m.PreloadHint != nil {
+		ret.WriteString(m.PreloadHint.marshal())
+	}
+
+	for _, report := range m.RenditionReport {
+		ret.WriteString(report.marshal())
+	}
+
+	if m.Endlist {
+		ret.WriteString("#EXT-X-ENDLIST\n")
+	}
+
+	return []byte(ret.String()), nil
+}

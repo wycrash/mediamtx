@@ -637,11 +637,11 @@ pathDefaults:
   # Default path settings -> HLS
 
   # Variant of the HLS protocol to use. Available options are:
-  # * mpegts - uses MPEG-TS segments, for maximum compatibility.
+  # * mpegts - uses MPEG-TS segments, for maximum compatibility (VLC / broadcast remux).
   # * fmp4 - uses fragmented MP4 segments, more efficient.
   # * lowLatency - uses Low-Latency HLS.
   # Can be overridden per path in "paths".
-  hlsVariant: lowLatency
+  hlsVariant: mpegts
 
   ###############################################
   # Default path settings -> Publisher source (when source is "publisher")

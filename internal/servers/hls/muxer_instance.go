@@ -23,8 +23,10 @@ import (
 const (
 	sessionCookieName     = "hlsSession"
 	sessionQueryParamName = "session"
-	sessionCloseAfter     = 30 * time.Second
-	sessionCleanupPeriod  = sessionCloseAfter / 3
+	// Keep sessions long enough for VLC / slow players that refresh media
+	// playlists infrequently; expired sessions caused HTTP 401 mid-playback.
+	sessionCloseAfter    = 5 * time.Minute
+	sessionCleanupPeriod = sessionCloseAfter / 3
 )
 
 // this prevents directory traversal.

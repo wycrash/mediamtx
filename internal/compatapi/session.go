@@ -25,7 +25,8 @@ const (
 )
 
 var (
-	sessionCloseAfter    = 30 * time.Second
+	// Align with HLS: VLC keeps a media-playlist URL open for minutes.
+	sessionCloseAfter    = 5 * time.Minute
 	sessionCleanupPeriod = 10 * time.Second
 )
 

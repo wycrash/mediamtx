@@ -24,7 +24,14 @@ import (
 
 // ErrNoSupportedCodecs is returned by FromStream when there are no supported codecs.
 var ErrNoSupportedCodecs = errors.New(
-	"the stream doesn't contain any supported codec, which are currently AV1, VP9, H265, H264, Opus, MPEG-4 Audio, KLV")
+	"the stream doesn't contain any supported codec, which are currently AV1, VP9, H265, H264, Opus, MPEG-4 Audio, MPEG-1/2 Audio, KLV")
+
+func writeMuxerErr(err error) error {
+	if err == nil {
+		return nil
+	}
+	return fmt.Errorf("muxer error: %w", err)
+}
 
 func findFormatAndIndexInMedia(media *description.Media, forma any) int {
 	for i, forma2 := range media.Formats {
@@ -153,16 +160,11 @@ func setupVideoTrack(
 					return nil
 				}
 
-				err := muxer.WriteH265(
+				return writeMuxerErr(muxer.WriteH265(
 					track,
 					u.NTP,
 					u.PTS, // no conversion is needed since we set gohlslib.Track.ClockRate = format.ClockRate
-					u.Payload.(unit.PayloadH265))
-				if err != nil {
-					return fmt.Errorf("muxer error: %w", err)
-				}
-
-				return nil
+					u.Payload.(unit.PayloadH265)))
 			})
 
 		return
@@ -191,16 +193,19 @@ func setupVideoTrack(
 					return nil
 				}
 
-				err := muxer.WriteH264(
+				if u.HasDTS {
+					return writeMuxerErr(muxer.WriteH264WithDTS(
+						track,
+						u.NTP,
+						u.PTS,
+						u.DTS,
+						u.Payload.(unit.PayloadH264)))
+				}
+				return writeMuxerErr(muxer.WriteH264(
 					track,
 					u.NTP,
 					u.PTS, // no conversion is needed since we set gohlslib.Track.ClockRate = format.ClockRate
-					u.Payload.(unit.PayloadH264))
-				if err != nil {
-					return fmt.Errorf("muxer error: %w", err)
-				}
-
-				return nil
+					u.Payload.(unit.PayloadH264)))
 			})
 
 		return
@@ -354,6 +359,32 @@ func setupAudioTracks(
 								[][]byte{ame.Payloads[0][0][0]})
 						})
 				}
+
+			case *format.MPEG1Audio:
+				if muxer.Variant != gohlslib.MuxerVariantMPEGTS {
+					continue
+				}
+
+				track := &gohlslib.Track{
+					Codec:     &codecs.MPEG1Audio{},
+					ClockRate: forma.ClockRate(),
+				}
+
+				addTrack(
+					media,
+					forma,
+					track,
+					func(u *unit.Unit) error {
+						if u.NilPayload() {
+							return nil
+						}
+
+						return writeMuxerErr(muxer.WriteMPEG1Audio(
+							track,
+							u.NTP,
+							u.PTS,
+							u.Payload.(unit.PayloadMPEG1Audio)))
+					})
 			}
 		}
 	}

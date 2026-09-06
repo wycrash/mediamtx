@@ -107,7 +107,9 @@ func (f *formatMPEGTS) initialize() bool {
 							dtsExtractor.Initialize()
 						}
 
-						dts, err := dtsExtractor.Extract(u.Payload.(unit.PayloadH265), u.PTS)
+						dts, err := u.RemuxDTS(func() (int64, error) {
+							return dtsExtractor.Extract(u.Payload.(unit.PayloadH265), u.PTS)
+						})
 						if err != nil {
 							return err
 						}
@@ -149,7 +151,9 @@ func (f *formatMPEGTS) initialize() bool {
 							dtsExtractor.Initialize()
 						}
 
-						dts, err := dtsExtractor.Extract(u.Payload.(unit.PayloadH264), u.PTS)
+						dts, err := u.RemuxDTS(func() (int64, error) {
+							return dtsExtractor.Extract(u.Payload.(unit.PayloadH264), u.PTS)
+						})
 						if err != nil {
 							return err
 						}

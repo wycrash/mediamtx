@@ -101,7 +101,7 @@ func (ssf *subStreamFormat) writeUnitInner(u *unit.Unit) error {
 	}
 
 	if ssf.streamFormat.replaceNTP {
-		u.NTP = ssf.streamFormat.ntpEstimator.Estimate(u.PTS)
+		u.NTP = ssf.streamFormat.ntpEstimator.Estimate(u.TimingTS())
 	}
 
 	if len(u.RTPPackets) != 0 {

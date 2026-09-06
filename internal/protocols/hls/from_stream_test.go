@@ -120,3 +120,36 @@ func TestFromStreamKLVRequiresMPEGTSVariant(t *testing.T) {
 		require.Equal(t, 1, len(m.Tracks))
 	})
 }
+
+func TestFromStreamMPEG1AudioMPEGTS(t *testing.T) {
+	desc := &description.Session{Medias: []*description.Media{
+		{
+			Type:    description.MediaTypeVideo,
+			Formats: []format.Format{&format.H264{PayloadTyp: 96, PacketizationMode: 1}},
+		},
+		{
+			Type:    description.MediaTypeAudio,
+			Formats: []format.Format{&format.MPEG1Audio{}},
+		},
+	}}
+
+	r := &stream.Reader{
+		Parent: test.Logger(func(logger.Level, string, ...any) {
+			t.Error("should not happen")
+		}),
+	}
+
+	m := &gohlslib.Muxer{Variant: gohlslib.MuxerVariantMPEGTS}
+
+	err := FromStream(desc, desc, r, m)
+	require.NoError(t, err)
+	require.Equal(t, 2, len(m.Tracks))
+}
+
+func TestWriteMuxerErr(t *testing.T) {
+	err := writeMuxerErr(fmt.Errorf("unable to extract DTS"))
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "muxer error")
+
+	require.NoError(t, writeMuxerErr(nil))
+}

@@ -1587,7 +1587,7 @@ func (idx *Index) CompleteSegment(pathName, fpath string, duration time.Duration
 		return
 	}
 	pathConf, _, err := conf.FindPathConf(pathConfs, pathName)
-	if err != nil || pathConf.RecordFormat != conf.RecordFormatFMP4 {
+	if err != nil {
 		return
 	}
 
@@ -1596,23 +1596,30 @@ func (idx *Index) CompleteSegment(pathName, fpath string, duration time.Duration
 	if duration <= 0 {
 		duration = nominal
 	}
-	tracks := idx.internedTracksOf(pathName)
-	meta := fmp4SegMeta{
-		Duration:  duration,
-		MoofCount: estimateMoofCount(duration, part, nominal),
-		Ready:     duration > 0,
-	}
-	if !meta.Ready {
+	if duration <= 0 {
 		return
 	}
-	if len(tracks) == 0 {
-		if ins, tr, ierr := inspectFMP4Segment(fpath); ierr == nil && ins.Ready {
-			ins.Duration = duration
-			if ins.MoofCount == 0 {
-				ins.MoofCount = meta.MoofCount
+
+	// Duration/Ready must be set for both formats: day snapshots skip !Ready
+	// segments, so MPEG-TS archive playlists would otherwise go empty after
+	// compact/reload even though .ts files exist on disk.
+	meta := fmp4SegMeta{
+		Duration: duration,
+		Ready:    true,
+	}
+	var tracks []*fmp4.InitTrack
+	if pathConf.RecordFormat == conf.RecordFormatFMP4 {
+		meta.MoofCount = estimateMoofCount(duration, part, nominal)
+		tracks = idx.internedTracksOf(pathName)
+		if len(tracks) == 0 {
+			if ins, tr, ierr := inspectFMP4Segment(fpath); ierr == nil && ins.Ready {
+				ins.Duration = duration
+				if ins.MoofCount == 0 {
+					ins.MoofCount = meta.MoofCount
+				}
+				meta = ins
+				tracks = tr
 			}
-			meta = ins
-			tracks = tr
 		}
 	}
 	idx.SetFMP4Meta(pathName, fpath, meta, tracks)

@@ -33,13 +33,16 @@ func TestRequestPathName(t *testing.T) {
 	require.Equal(t, "group/cam1", requestPathName("/group/cam1/embed.html"))
 	require.Equal(t, "cam1", requestPathName("/cam1/index-1000-60.m3u8"))
 	require.Equal(t, "cam1", requestPathName("/cam1/archive-1000-60.m3u8"))
+	require.Equal(t, "cam1", requestPathName("/cam1/mono-1000-60.m3u8"))
 	require.Equal(t, "cam1", requestPathName("/cam1/archive-1000-60.fmp4.m3u8"))
+	require.Equal(t, "cam1", requestPathName("/cam1/mono-1000-60.fmp4.m3u8"))
 	require.Equal(t, "cam1", requestPathName("/cam1/timeshift_abs-1000.m3u8"))
 	require.Equal(t, "group/cam1", requestPathName("/group/cam1/timeshift_abs-1000.fmp4.m3u8"))
 	require.Equal(t, "cam1", requestPathName("/cam1/index-1786648330-89.fmp4.m3u8"))
 	require.Equal(t, "cam1", requestPathName("/cam1/archive-1786643672-658.mp4"))
 	require.Equal(t, "group/cam1", requestPathName("/group/cam1/archive-1786643672-658.mp4"))
 	require.Equal(t, "group/cam1", requestPathName("/group/cam1/index-1000-60.m3u8"))
+	require.Equal(t, "group/cam1", requestPathName("/group/cam1/mono-1000-60.m3u8"))
 	require.Equal(t, "cam1", requestPathName("/cam1/2024/01/02/03/04/05.mp4"))
 	require.Equal(t, "cam1", requestPathName("/cam1/2024/01/02/03/04/05-preview.mp4"))
 	require.Equal(t, "cam1", requestPathName("/cam1/1786648428-preview.mp4"))
@@ -63,6 +66,22 @@ func TestArchivePlaylistRegexpFMP4Alias(t *testing.T) {
 	require.Equal(t, "cam1", m[1])
 	require.Equal(t, "1786648330", m[2])
 	require.Equal(t, "89", m[3])
+
+	m = archivePlaylistRegexp.FindStringSubmatch("cam1/mono-1788667800-7200.m3u8")
+	require.Equal(t, []string{
+		"cam1/mono-1788667800-7200.m3u8",
+		"cam1",
+		"1788667800",
+		"7200",
+	}, m)
+
+	m = archivePlaylistRegexp.FindStringSubmatch("cam1/mono-1788667800-7200.fmp4.m3u8")
+	require.Equal(t, []string{
+		"cam1/mono-1788667800-7200.fmp4.m3u8",
+		"cam1",
+		"1788667800",
+		"7200",
+	}, m)
 }
 
 func TestAPISessionsListGetKick(t *testing.T) {

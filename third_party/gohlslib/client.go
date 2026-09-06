@@ -1,0 +1,354 @@
+/*
+Package gohlslib is a HLS client and muxer library for the Go programming language.
+
+Examples are available at https://github.com/bluenviron/gohlslib/tree/main/examples
+*/
+package gohlslib
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"log"
+	"net/http"
+	"net/http/cookiejar"
+	"net/url"
+	"time"
+)
+
+const (
+	clientMaxTracksPerStream     = 10
+	clientMPEGTSSampleQueueSize  = 100
+	clientMaxMPEGTSQueuedSamples = 1000
+	clientMaxDTSSystemDiff       = 10 * time.Second
+	clientMaxInboundPlaylistSize = 1 * 1024 * 1024
+	clientMaxInboundSegmentSize  = 100 * 1024 * 1024
+	clientMaxInboundPartSize     = 10 * 1024 * 1024
+)
+
+// ErrClientEOS is returned by Wait() when the stream has ended.
+var ErrClientEOS = errors.New("end of stream")
+
+// ClientOnDownloadPrimaryPlaylistFunc is the prototype of Client.OnDownloadPrimaryPlaylist.
+type ClientOnDownloadPrimaryPlaylistFunc func(url string)
+
+// ClientOnDownloadStreamPlaylistFunc is the prototype of Client.OnDownloadStreamPlaylist.
+type ClientOnDownloadStreamPlaylistFunc func(url string)
+
+// ClientOnDownloadSegmentFunc is the prototype of Client.OnDownloadSegment.
+type ClientOnDownloadSegmentFunc func(url string)
+
+// ClientOnDownloadPartFunc is the prototype of Client.OnDownloadPart.
+type ClientOnDownloadPartFunc func(url string)
+
+// ClientOnDecodeErrorFunc is the prototype of Client.OnDecodeError.
+type ClientOnDecodeErrorFunc func(err error)
+
+// ClientOnRequestFunc is the prototype of the function passed to OnRequest().
+type ClientOnRequestFunc func(*http.Request)
+
+// ClientOnTracksFunc is the prototype of the function passed to OnTracks().
+type ClientOnTracksFunc func([]*Track) error
+
+// ClientOnDataAV1Func is the prototype of the function passed to OnDataAV1().
+type ClientOnDataAV1Func func(pts int64, tu [][]byte)
+
+// ClientOnDataVP9Func is the prototype of the function passed to OnDataVP9().
+type ClientOnDataVP9Func func(pts int64, frame []byte)
+
+// ClientOnDataH26xFunc is the prototype of the function passed to OnDataH26x().
+type ClientOnDataH26xFunc func(pts int64, dts int64, au [][]byte)
+
+// ClientOnDataMPEG4AudioFunc is the prototype of the function passed to OnDataMPEG4Audio().
+type ClientOnDataMPEG4AudioFunc func(pts int64, aus [][]byte)
+
+// ClientOnDataOpusFunc is the prototype of the function passed to OnDataOpus().
+type ClientOnDataOpusFunc func(pts int64, packets [][]byte)
+
+// ClientOnDataFLACFunc is the prototype of the function passed to OnDataFLAC().
+type ClientOnDataFLACFunc func(pts int64, frame []byte)
+
+// ClientOnDataKLVFunc is the prototype of the function passed to OnDataKLV().
+type ClientOnDataKLVFunc func(pts int64, uni []byte)
+
+func clientAbsoluteURL(base *url.URL, relative string) (*url.URL, error) {
+	u, err := url.Parse(relative)
+	if err != nil {
+		return nil, err
+	}
+	return base.ResolveReference(u), nil
+}
+
+// Client is a HLS client.
+type Client struct {
+	//
+	// parameters (all optional except URI)
+	//
+	// URI of the playlist.
+	URI string
+	// Start distance from the end of the playlist,
+	// expressed as number of segments.
+	// It defaults to 3.
+	StartDistance int
+	// Maximum distance from the end of the playlist,
+	// expressed as number of segments.
+	// It defaults to 5.
+	MaxDistance int
+	// HTTP client.
+	// It defaults to a new http.Client with cookies enabled.
+	HTTPClient *http.Client
+
+	//
+	// callbacks (all optional)
+	//
+	// called when sending a request to the server.
+	OnRequest ClientOnRequestFunc
+	// called when tracks are available.
+	OnTracks ClientOnTracksFunc
+	// called before downloading a primary playlist.
+	OnDownloadPrimaryPlaylist ClientOnDownloadPrimaryPlaylistFunc
+	// called before downloading a stream playlist.
+	OnDownloadStreamPlaylist ClientOnDownloadStreamPlaylistFunc
+	// called before downloading a segment.
+	OnDownloadSegment ClientOnDownloadSegmentFunc
+	// called before downloading a part.
+	OnDownloadPart ClientOnDownloadPartFunc
+	// called when a non-fatal decode error occurs.
+	OnDecodeError ClientOnDecodeErrorFunc
+
+	//
+	// private
+	//
+
+	ctx               context.Context
+	ctxCancel         func()
+	playlistURL       *url.URL
+	primaryDownloader *clientPrimaryDownloader
+	timeConv          clientTimeConv
+	tracks            map[*Track]*clientTrack
+	closeError        error
+
+	// out
+	done          chan struct{}
+	timeConvReady chan struct{}
+}
+
+// Start starts the client.
+func (c *Client) Start() error {
+	if c.StartDistance == 0 {
+		c.StartDistance = 3
+	}
+	if c.MaxDistance == 0 {
+		c.MaxDistance = 5
+	}
+	if c.HTTPClient == nil {
+		jar, _ := cookiejar.New(nil)
+		c.HTTPClient = &http.Client{
+			Jar: jar,
+		}
+	}
+	if c.OnRequest == nil {
+		c.OnRequest = func(_ *http.Request) {}
+	}
+	if c.OnTracks == nil {
+		c.OnTracks = func(_ []*Track) error {
+			return nil
+		}
+	}
+	if c.OnDownloadPrimaryPlaylist == nil {
+		c.OnDownloadPrimaryPlaylist = func(u string) {
+			log.Printf("downloading primary playlist %v", u)
+		}
+	}
+	if c.OnDownloadStreamPlaylist == nil {
+		c.OnDownloadStreamPlaylist = func(u string) {
+			log.Printf("downloading stream playlist %v", u)
+		}
+	}
+	if c.OnDownloadSegment == nil {
+		c.OnDownloadSegment = func(u string) {
+			log.Printf("downloading segment %v", u)
+		}
+	}
+	if c.OnDownloadPart == nil {
+		c.OnDownloadPart = func(u string) {
+			log.Printf("downloading part %v", u)
+		}
+	}
+	if c.OnDecodeError == nil {
+		c.OnDecodeError = func(err error) {
+			log.Println(err.Error())
+		}
+	}
+
+	var err error
+	c.playlistURL, err = url.Parse(c.URI)
+	if err != nil {
+		return err
+	}
+
+	c.ctx, c.ctxCancel = context.WithCancel(context.Background())
+
+	c.done = make(chan struct{})
+	c.timeConvReady = make(chan struct{})
+
+	go c.run()
+
+	return nil
+}
+
+// Close closes all the Client resources and waits for them to exit.
+func (c *Client) Close() {
+	c.ctxCancel()
+	<-c.done
+}
+
+// Wait waits for any error of the Client.
+//
+// Deprecated: replaced by Wait2.
+func (c *Client) Wait() chan error {
+	ch := make(chan error)
+	go func() {
+		<-c.done
+		ch <- c.closeError
+	}()
+	return ch
+}
+
+// Wait2 waits until all client resources are closed.
+// This can happen when a fatal error occurs or when Close() is called.
+func (c *Client) Wait2() error {
+	<-c.done
+	return c.closeError
+}
+
+// OnDataAV1 sets a callback that is called when data from an AV1 track is received.
+func (c *Client) OnDataAV1(track *Track, cb ClientOnDataAV1Func) {
+	c.tracks[track].onData = func(pts int64, _ int64, data [][]byte) {
+		cb(pts, data)
+	}
+}
+
+// OnDataVP9 sets a callback that is called when data from a VP9 track is received.
+func (c *Client) OnDataVP9(track *Track, cb ClientOnDataVP9Func) {
+	c.tracks[track].onData = func(pts int64, _ int64, data [][]byte) {
+		cb(pts, data[0])
+	}
+}
+
+// OnDataH26x sets a callback that is called when data from an H26x track is received.
+func (c *Client) OnDataH26x(track *Track, cb ClientOnDataH26xFunc) {
+	c.tracks[track].onData = func(pts int64, dts int64, data [][]byte) {
+		cb(pts, dts, data)
+	}
+}
+
+// OnDataMPEG4Audio sets a callback that is called when data from a MPEG-4 Audio track is received.
+func (c *Client) OnDataMPEG4Audio(track *Track, cb ClientOnDataMPEG4AudioFunc) {
+	c.tracks[track].onData = func(pts int64, _ int64, data [][]byte) {
+		cb(pts, data)
+	}
+}
+
+// OnDataOpus sets a callback that is called when data from an Opus track is received.
+func (c *Client) OnDataOpus(track *Track, cb ClientOnDataOpusFunc) {
+	c.tracks[track].onData = func(pts int64, _ int64, data [][]byte) {
+		cb(pts, data)
+	}
+}
+
+// OnDataFLAC sets a callback that is called when data from a FLAC track is received.
+func (c *Client) OnDataFLAC(track *Track, cb ClientOnDataFLACFunc) {
+	c.tracks[track].onData = func(pts int64, _ int64, data [][]byte) {
+		cb(pts, data[0])
+	}
+}
+
+// OnDataKLV sets a callback that is called when data from an KLV track is received.
+func (c *Client) OnDataKLV(track *Track, cb ClientOnDataKLVFunc) {
+	c.tracks[track].onData = func(pts int64, _ int64, data [][]byte) {
+		cb(pts, data[0])
+	}
+}
+
+var zero time.Time
+
+// AbsoluteTime returns the absolute timestamp of the last sample.
+func (c *Client) AbsoluteTime(track *Track) (time.Time, bool) {
+	return c.tracks[track].absoluteTime()
+}
+
+func (c *Client) run() {
+	c.closeError = c.runInner()
+	close(c.done)
+}
+
+func (c *Client) runInner() error {
+	rp := &clientRoutinePool{}
+	rp.initialize()
+
+	c.primaryDownloader = &clientPrimaryDownloader{
+		primaryPlaylistURL:        c.playlistURL,
+		startDistance:             c.StartDistance,
+		maxDistance:               c.MaxDistance,
+		httpClient:                c.HTTPClient,
+		rp:                        rp,
+		onRequest:                 c.OnRequest,
+		onDownloadPrimaryPlaylist: c.OnDownloadPrimaryPlaylist,
+		onDownloadStreamPlaylist:  c.OnDownloadStreamPlaylist,
+		onDownloadSegment:         c.OnDownloadSegment,
+		onDownloadPart:            c.OnDownloadPart,
+		onDecodeError:             c.OnDecodeError,
+		client:                    c,
+	}
+	c.primaryDownloader.initialize()
+	rp.add(c.primaryDownloader)
+
+	select {
+	case err := <-rp.errorChan():
+		rp.close()
+		return err
+
+	case <-c.ctx.Done():
+		rp.close()
+		return fmt.Errorf("terminated")
+	}
+}
+
+func (c *Client) setTracks(tracks []*Track) (map[*Track]*clientTrack, error) {
+	c.tracks = make(map[*Track]*clientTrack)
+	for _, track := range tracks {
+		c.tracks[track] = &clientTrack{
+			track:  track,
+			onData: func(_, _ int64, _ [][]byte) {},
+		}
+	}
+
+	err := c.OnTracks(tracks)
+	if err != nil {
+		return nil, err
+	}
+
+	return c.tracks, nil
+}
+
+func (c *Client) setTimeConv(ts clientTimeConv) {
+	c.timeConv = ts
+
+	startSystem := time.Now()
+
+	for _, track := range c.tracks {
+		track.startSystem = startSystem
+	}
+
+	close(c.timeConvReady)
+}
+
+func (c *Client) waitTimeConv(ctx context.Context) (clientTimeConv, bool) {
+	select {
+	case <-c.timeConvReady:
+		return c.timeConv, true
+	case <-ctx.Done():
+		return nil, false
+	}
+}

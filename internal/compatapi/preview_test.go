@@ -147,3 +147,46 @@ func TestPreviewHead(t *testing.T) {
 	r.ServeHTTP(w, req)
 	require.Equal(t, http.StatusMethodNotAllowed, w.Code)
 }
+
+func TestPreviewNoKeyframeReturns404(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	var buf bytes.Buffer
+	track := &mpegts.Track{Codec: &tscodecs.H264{}}
+	wts := &mpegts.Writer{W: &buf, Tracks: []*mpegts.Track{track}}
+	err := wts.Initialize()
+	require.NoError(t, err)
+
+	err = wts.WriteH264(track, 0, 0, [][]byte{
+		testPreviewH264SPS,
+		{8}, // PPS
+		{1}, // non-IDR, no keyframe
+	})
+	require.NoError(t, err)
+
+	dir := t.TempDir()
+	tsPath := filepath.Join(dir, "seg.ts")
+	require.NoError(t, os.WriteFile(tsPath, buf.Bytes(), 0o644))
+
+	_, err = ExtractPreviewMP4(tsPath)
+	require.ErrorIs(t, err, errNoVideoKeyframe)
+
+	idx := NewIndex()
+	idx.Add("cam1", tsPath, time.Now().UTC())
+
+	s := &Server{
+		PathConfs: map[string]*conf.Path{
+			"cam1": {Name: "cam1"},
+		},
+		AuthManager: test.NilAuthManager,
+		Parent:      test.NilLogger,
+		Index:       idx,
+	}
+	r := gin.New()
+	r.NoRoute(s.onRequest)
+
+	req := httptest.NewRequest(http.MethodGet, "/cam1/preview.mp4?t=119242530", nil)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+	require.Equal(t, http.StatusNotFound, w.Code)
+}

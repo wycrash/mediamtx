@@ -504,6 +504,56 @@ func TestIndexCompleteSegmentUsesRecorderDuration(t *testing.T) {
 	idx.ClosePersist()
 }
 
+func TestIndexCompleteSegmentMPEGTSPersistsForPlaylist(t *testing.T) {
+	dir := t.TempDir()
+	cam := filepath.Join(dir, "cam1")
+	start := time.Date(2020, 1, 1, 0, 0, 0, 0, time.Local)
+	a := filepath.Join(cam, start.Format("2006-01-02_15-04-05")+"-000000.ts")
+	b := filepath.Join(cam, start.Add(5*time.Second).Format("2006-01-02_15-04-05")+"-000000.ts")
+	require.NoError(t, os.MkdirAll(cam, 0o755))
+	require.NoError(t, os.WriteFile(a, []byte{0x47}, 0o644))
+	require.NoError(t, os.WriteFile(b, []byte{0x47}, 0o644))
+
+	pathConf := &conf.Path{
+		Name:                  "cam1",
+		RecordPath:            filepath.Join(dir, "%path/%Y-%m-%d_%H-%M-%S-%f"),
+		RecordFormat:          conf.RecordFormatMPEGTS,
+		RecordSegmentDuration: conf.Duration(5 * time.Second),
+		RecordPartDuration:    conf.Duration(time.Second),
+	}
+	confs := map[string]*conf.Path{"cam1": pathConf}
+
+	idx := NewIndex()
+	idx.LoadFromDisk(confs)
+	idx.CompleteSegment("cam1", a, 5*time.Second)
+	idx.CompleteSegment("cam1", b, 5*time.Second)
+
+	out := idx.SegmentsInWindow("cam1", start, time.Minute)
+	require.Len(t, out, 2)
+	require.True(t, out[0].fmp4.Ready)
+	require.Equal(t, 5*time.Second, out[0].fmp4.Duration)
+
+	body := GenerateArchiveM3U8Indexed(conf.RecordFormatMPEGTS, out, 5*time.Second, 0, start)
+	require.Contains(t, body, filepath.Base(a))
+	require.Contains(t, body, filepath.Base(b))
+	require.NotEqual(t, "#EXTM3U\n#EXT-X-PLAYLIST-TYPE:VOD\n#EXT-X-VERSION:10\n#EXT-X-TARGETDURATION:5\n#EXT-X-MEDIA-SEQUENCE:0\n#EXT-X-ENDLIST\n", body)
+
+	// Day change forces compact; without Ready the previous day snap would be empty.
+	next := filepath.Join(cam, start.Add(24*time.Hour).Format("2006-01-02_15-04-05")+"-000000.ts")
+	require.NoError(t, os.WriteFile(next, []byte{0x47}, 0o644))
+	idx.CompleteSegment("cam1", next, 5*time.Second)
+	idx.ClosePersist()
+
+	idx2 := NewIndex()
+	st := idx2.LoadFromDisk(confs)
+	require.GreaterOrEqual(t, st.Segments, 2)
+	out2 := idx2.SegmentsInWindow("cam1", start, time.Minute)
+	require.Len(t, out2, 2)
+	body2 := GenerateArchiveM3U8Indexed(conf.RecordFormatMPEGTS, out2, 5*time.Second, 0, start)
+	require.Contains(t, body2, filepath.Base(a))
+	idx2.ClosePersist()
+}
+
 func TestIndexDateDirStoresShardInDayFolder(t *testing.T) {
 	dir := t.TempDir()
 	hist := time.Date(2020, 1, 1, 12, 0, 0, 0, time.Local)

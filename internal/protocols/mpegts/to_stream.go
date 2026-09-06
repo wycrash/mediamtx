@@ -21,6 +21,31 @@ var errNoSupportedCodecs = errors.New(
 	"the stream doesn't contain any supported codec, which are currently " +
 		"H265, H264, MPEG-4 Video, MPEG-1/2 Video, Opus, MPEG-4 Audio, MPEG-1/2 Audio, AC-3")
 
+const mpegtsTSModulus = int64(1 << 33) // 33-bit MPEG-TS timestamp modulus
+
+// dtsFromPTS converts a raw PES DTS into the same unwrapped timeline as decodedPTS.
+// rawPTS/rawDTS are 33-bit values; their difference is taken modulo 2^33 so
+// composition offsets remain correct across the wrap boundary.
+func dtsFromPTS(rawPTS int64, rawDTS int64, decodedPTS int64) int64 {
+	diff := (rawDTS - rawPTS) % mpegtsTSModulus
+	if diff < 0 {
+		diff += mpegtsTSModulus
+	}
+	if diff > mpegtsTSModulus/2 {
+		diff -= mpegtsTSModulus
+	}
+	return decodedPTS + diff
+}
+
+func videoUnit(pts int64, rawPTS int64, rawDTS int64, payload unit.Payload) *unit.Unit {
+	return &unit.Unit{
+		PTS:     pts,
+		DTS:     dtsFromPTS(rawPTS, rawDTS, pts),
+		HasDTS:  true,
+		Payload: payload,
+	}
+}
+
 // ToStream maps a MPEG-TS stream to a MediaMTX stream.
 func ToStream(
 	r *EnhancedReader,
@@ -45,13 +70,12 @@ func ToStream(
 				}},
 			}
 
-			r.OnDataH265(track, func(pts int64, _ int64, au [][]byte) error {
+			r.OnDataH265(track, func(pts int64, dts int64, au [][]byte) error {
+				rawPTS := pts
 				pts = td.Decode(pts)
 
-				(*subStream).WriteUnit(medi, medi.Formats[0], &unit.Unit{
-					PTS:     pts, // no conversion is needed since clock rate is 90khz in both MPEG-TS and RTSP
-					Payload: unit.PayloadH265(au),
-				})
+				(*subStream).WriteUnit(medi, medi.Formats[0],
+					videoUnit(pts, rawPTS, dts, unit.PayloadH265(au)))
 				return nil
 			})
 
@@ -64,13 +88,12 @@ func ToStream(
 				}},
 			}
 
-			r.OnDataH264(track, func(pts int64, _ int64, au [][]byte) error {
+			r.OnDataH264(track, func(pts int64, dts int64, au [][]byte) error {
+				rawPTS := pts
 				pts = td.Decode(pts)
 
-				(*subStream).WriteUnit(medi, medi.Formats[0], &unit.Unit{
-					PTS:     pts, // no conversion is needed since clock rate is 90khz in both MPEG-TS and RTSP
-					Payload: unit.PayloadH264(au),
-				})
+				(*subStream).WriteUnit(medi, medi.Formats[0],
+					videoUnit(pts, rawPTS, dts, unit.PayloadH264(au)))
 				return nil
 			})
 
