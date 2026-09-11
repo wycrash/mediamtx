@@ -189,7 +189,7 @@ func TestRecorder(t *testing.T) {
 					}
 					segCreated <- struct{}{}
 				},
-				OnSegmentComplete: func(segPath string, du time.Duration) {
+				OnSegmentComplete: func(segPath string, du time.Duration, parts []SegmentPart) {
 					switch n {
 					case 0:
 						require.Equal(t, filepath.Join(dir, "mypath", "2008-05-20_22-15-25-000000."+ext), segPath)
@@ -200,6 +200,17 @@ func TestRecorder(t *testing.T) {
 					default:
 						require.Equal(t, filepath.Join(dir, "mypath", "2010-05-20_22-15-25-000000."+ext), segPath)
 						require.Equal(t, 100*time.Millisecond, du)
+					}
+					if ca == "fmp4" {
+						require.NotEmpty(t, parts)
+						end := int64(0)
+						for i, p := range parts {
+							require.Greater(t, p.Len, int64(0), "part %d", i)
+							require.GreaterOrEqual(t, p.Off, end, "part %d", i)
+							end = p.Off + p.Len
+						}
+					} else {
+						require.Nil(t, parts)
 					}
 					n++
 					segDone <- struct{}{}
@@ -927,7 +938,7 @@ func TestRecorderTimeDriftDetector(t *testing.T) {
 					default:
 					}
 				},
-				OnSegmentComplete: func(_ string, _ time.Duration) {
+				OnSegmentComplete: func(_ string, _ time.Duration, _ []SegmentPart) {
 					select {
 					case segDone <- struct{}{}:
 					default:

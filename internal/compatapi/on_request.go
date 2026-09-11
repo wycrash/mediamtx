@@ -569,7 +569,7 @@ func (s *Server) tryServeArchiveSegment(ctx *gin.Context, pathName string, fileN
 	case conf.RecordFormatFMP4:
 		ctx.Header("Content-Type", "video/mp4")
 		ctx.Header("Cache-Control", "no-cache")
-		return true, serveFMP4ArchivePart(ctx, fpath)
+		return true, serveFMP4ArchivePart(ctx, fpath, s.Index, pathName)
 	default:
 		return false, nil
 	}
@@ -580,7 +580,7 @@ func (s *Server) tryServeArchiveSegment(ctx *gin.Context, pathName string, fileN
 // hls=media&sn=&td= rewrites mfhd/tfdt into a continuous timeline for VLC seek.
 // hls=media&off=&n= serves n fMP4 parts starting at file offset off (IDR-aligned chunks).
 // Tracks Chrome MSE cannot play (LPCM/ipcm) are stripped from HLS parts.
-func serveFMP4ArchivePart(ctx *gin.Context, fpath string) error {
+func serveFMP4ArchivePart(ctx *gin.Context, fpath string, idx *Index, pathName string) error {
 	part := ctx.Query("hls")
 	switch part {
 	case "", "full":
@@ -655,7 +655,14 @@ func serveFMP4ArchivePart(ctx *gin.Context, fpath string) error {
 			ctx.AbortWithStatus(http.StatusBadRequest)
 			return nil
 		}
-		start, slen, err2 := fmp4HLSSliceRange(fpath, off, n)
+		var start, slen int64
+		okRange := false
+		if idx != nil {
+			start, slen, okRange = idx.hlsSliceRange(pathName, fpath, off, n, size)
+		}
+		if !okRange {
+			start, slen, err2 = fmp4HLSSliceRange(fpath, off, n)
+		}
 		if err2 != nil || start+slen > size {
 			ctx.AbortWithStatus(http.StatusNotFound)
 			return nil

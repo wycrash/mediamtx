@@ -15,7 +15,7 @@ func writePart(
 	f io.Writer,
 	sequenceNumber uint32,
 	partTracks map[*formatFMP4Track]*fmp4.PartTrack,
-) error {
+) (int64, error) {
 	fmp4PartTracks := make([]*fmp4.PartTrack, len(partTracks))
 	i := 0
 	for _, partTrack := range partTracks {
@@ -31,11 +31,11 @@ func writePart(
 	var buf seekablebuffer.Buffer
 	err := part.Marshal(&buf)
 	if err != nil {
-		return err
+		return 0, err
 	}
 
-	_, err = f.Write(buf.Bytes())
-	return err
+	n, err := f.Write(buf.Bytes())
+	return int64(n), err
 }
 
 type formatFMP4Part struct {
@@ -47,13 +47,14 @@ type formatFMP4Part struct {
 	partTracks map[*formatFMP4Track]*fmp4.PartTrack
 	size       uint64
 	endDTS     time.Duration
+	hasIDR     bool
 }
 
 func (p *formatFMP4Part) initialize() {
 	p.partTracks = make(map[*formatFMP4Track]*fmp4.PartTrack)
 }
 
-func (p *formatFMP4Part) close(w io.Writer) error {
+func (p *formatFMP4Part) close(w io.Writer) (int64, error) {
 	return writePart(w, p.number, p.partTracks)
 }
 
@@ -63,6 +64,9 @@ func (p *formatFMP4Part) write(track *formatFMP4Track, sample *formatFMP4Sample,
 		return fmt.Errorf("reached maximum part size")
 	}
 	p.size += size
+	if !p.hasIDR && track.initTrack.Codec.IsVideo() && !sample.IsNonSyncSample {
+		p.hasIDR = true
+	}
 
 	partTrack, ok := p.partTracks[track]
 	if !ok {

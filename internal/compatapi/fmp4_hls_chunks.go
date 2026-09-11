@@ -362,6 +362,34 @@ func makeHLSChunk(parts []fmp4MediaPart) hlsMediaChunk {
 	}
 }
 
+func hlsChunkByteRange(chunks []hlsMediaChunk, off int64, n int, fileSize int64) (int64, int64, bool) {
+	if n < 1 || n > maxHLSSliceParts || len(chunks) < 2 {
+		return 0, 0, false
+	}
+	for i, ch := range chunks {
+		if ch.Off != off {
+			continue
+		}
+		if ch.N != 0 && ch.N != n {
+			continue
+		}
+		start := ch.Off
+		var end int64
+		if i+1 < len(chunks) {
+			end = chunks[i+1].Off
+		} else if fileSize > start {
+			end = fileSize
+		} else {
+			return 0, 0, false
+		}
+		if end <= start {
+			return 0, 0, false
+		}
+		return start, end - start, true
+	}
+	return 0, 0, false
+}
+
 func fmp4HLSSliceRange(fpath string, off int64, n int) (int64, int64, error) {
 	if n < 1 || n > maxHLSSliceParts {
 		return 0, 0, fmt.Errorf("invalid HLS slice part count")

@@ -28,6 +28,7 @@ const (
 	dvrSnapName      = ".mtx-dvr-index"
 	dvrMetaName      = ".mtx-dvr-meta"
 	dvrJournalSuffix = ".journal"
+	dvrPackSuffix    = ".pack"
 	dvrOpUpsert      = uint8(1)
 	dvrOpDelete      = uint8(2)
 	dvrOpCodec       = uint8(3)
@@ -36,7 +37,12 @@ const (
 	// No full snapshot rewrite: the journal is the durable day index.
 	dvrJournalSyncEvery = 32
 	dvrMetaEvery        = 64
-	dayCacheLimit       = 8
+	// dayCachePerPath keeps recently sought days resident so a timeline click
+	// does not re-read the journal. Pinned (today) days are not stored here.
+	dayCachePerPath = 4
+	// dayCacheLimit is a process-wide cap so 50 cameras cannot pin the whole
+	// archive through the per-path slots (4×50 = 200, plus headroom).
+	dayCacheLimit = 256
 )
 
 var errDvrIndexBadMagic = errors.New("dvr index: bad magic")
@@ -264,6 +270,10 @@ func (l dvrPathLayout) daySnap(day string) string {
 
 func (l dvrPathLayout) dayJournal(day string) string {
 	return l.daySnap(day) + dvrJournalSuffix
+}
+
+func (l dvrPathLayout) dayPack(day string) string {
+	return l.daySnap(day) + dvrPackSuffix
 }
 
 func dayIndexExists(l dvrPathLayout, day string) bool {

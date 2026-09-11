@@ -17,6 +17,7 @@ import (
 	"github.com/bluenviron/mediamtx/internal/externalcmd"
 	"github.com/bluenviron/mediamtx/internal/logger"
 	"github.com/bluenviron/mediamtx/internal/metrics"
+	"github.com/bluenviron/mediamtx/internal/recorder"
 	"github.com/bluenviron/mediamtx/internal/servers/hls"
 	"github.com/bluenviron/mediamtx/internal/storage"
 )
@@ -80,7 +81,7 @@ type pathManagerParent interface {
 
 type recordSegmentListener interface {
 	OnSegmentCreate(pathName, segmentPath string)
-	OnSegmentComplete(pathName, segmentPath string, duration time.Duration)
+	OnSegmentComplete(pathName, segmentPath string, duration time.Duration, parts []recorder.SegmentPart)
 	OnSegmentRemove(segmentPath string)
 }
 
@@ -718,13 +719,13 @@ func (pm *pathManager) onRecordSegmentCreate(pathName, segmentPath string) {
 	}
 }
 
-func (pm *pathManager) onRecordSegmentComplete(pathName, segmentPath string, duration time.Duration) {
+func (pm *pathManager) onRecordSegmentComplete(pathName, segmentPath string, duration time.Duration, parts []recorder.SegmentPart) {
 	pm.recordSegMu.Lock()
 	delete(pm.activeRecordSegments, segmentPath)
 	l := pm.recordSegmentListener
 	pm.recordSegMu.Unlock()
 	if l != nil {
-		l.OnSegmentComplete(pathName, segmentPath, duration)
+		l.OnSegmentComplete(pathName, segmentPath, duration, parts)
 	}
 }
 

@@ -16,8 +16,18 @@ const (
 // OnSegmentCreateFunc is the prototype of the function passed as OnSegmentCreate
 type OnSegmentCreateFunc = func(path string)
 
+// SegmentPart is one fMP4 moof+mdat flushed to disk. Offsets are from the
+// start of the file. MPEG-TS completions pass a nil slice.
+type SegmentPart struct {
+	Off      int64
+	Len      int64
+	Duration time.Duration
+	DTSStart time.Duration
+	HasIDR   bool
+}
+
 // OnSegmentCompleteFunc is the prototype of the function passed as OnSegmentComplete
-type OnSegmentCompleteFunc = func(path string, duration time.Duration)
+type OnSegmentCompleteFunc = func(path string, duration time.Duration, parts []SegmentPart)
 
 // PickRootFunc selects a storage disk for a new segment.
 // skip lists roots already tried in this attempt (ENOSPC / dead disk).
@@ -57,7 +67,7 @@ func (r *Recorder) Initialize() {
 		}
 	}
 	if r.OnSegmentComplete == nil {
-		r.OnSegmentComplete = func(string, time.Duration) {
+		r.OnSegmentComplete = func(string, time.Duration, []SegmentPart) {
 		}
 	}
 	if r.restartPause == 0 {

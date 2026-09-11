@@ -20,6 +20,7 @@ import (
 	"github.com/bluenviron/mediamtx/internal/defs"
 	"github.com/bluenviron/mediamtx/internal/logger"
 	"github.com/bluenviron/mediamtx/internal/protocols/httpp"
+	"github.com/bluenviron/mediamtx/internal/recorder"
 )
 
 type serverAuthManager interface {
@@ -142,11 +143,11 @@ func (s *Server) OnSegmentCreate(pathName, segmentPath string) {
 }
 
 // OnSegmentComplete is called when a recording segment file is closed.
-func (s *Server) OnSegmentComplete(pathName, segmentPath string, duration time.Duration) {
+func (s *Server) OnSegmentComplete(pathName, segmentPath string, duration time.Duration, parts []recorder.SegmentPart) {
 	if s.Index == nil {
 		return
 	}
-	s.Index.CompleteSegment(pathName, segmentPath, duration)
+	s.Index.CompleteSegment(pathName, segmentPath, duration, parts)
 }
 
 // OnSegmentRemove is called when a recording segment file is deleted.
@@ -181,7 +182,7 @@ func (s *Server) runIndexLifecycle() {
 
 	before := readProcMem()
 	s.Log(logger.Info, "loading recording index (%s)", before.logLine())
-	s.beginReconcile(defs.APICompatIndexStatusRebuild)
+	s.beginReconcile(defs.APICompatIndexStatusUpdate)
 	t0 := time.Now()
 	loadSt := s.Index.loadFromDisk(s.PathConfs, s.reconcileStop)
 	if stopped(s.reconcileStop) {
@@ -198,6 +199,10 @@ func (s *Server) runIndexLifecycle() {
 		s.Log(logger.Info, "recording index needs repair (fromDisk=%d/%d pendingDays=%v)",
 			loadSt.DiskPaths, loadSt.Paths, s.Index.HasPendingDayRepairs())
 	}
+	// Warm older days in the background so the first timeline seek is not a
+	// cold journal read. Must not block HTTP or the first reconcile pass.
+	go s.Index.PrefetchDays(s.reconcileStop)
+	go s.Index.RunChunkFill(s.reconcileStop)
 	// First pass always: full rebuild for incomplete paths, day-level repair
 	// for damaged journals, edge check for healthy paths.
 	s.runBackgroundReconcile(false)
@@ -266,14 +271,14 @@ func (s *Server) runBackgroundReconcile(slow bool) {
 	}
 
 	state := defs.APICompatIndexStatusUpdate
-	if !slow {
+	if !slow && s.Index.NeedsRebuildCount() > 0 {
 		state = defs.APICompatIndexStatusRebuild
 	}
 	s.beginReconcile(state)
 	defer s.endReconcile()
 
 	kind := "background update"
-	if !slow {
+	if state == defs.APICompatIndexStatusRebuild {
 		kind = "full rebuild"
 	}
 	s.Log(logger.Info, "recording index %s started", kind)

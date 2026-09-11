@@ -339,6 +339,8 @@ type fmp4PlaylistSeg struct {
 	tracks    []*fmp4.InitTrack
 	off       int64
 	n         int
+	chunks    []hlsMediaChunk
+	noScan    bool
 }
 
 func durationToTdMs(d time.Duration) int64 {
@@ -400,6 +402,8 @@ func generateM3U8FMP4Indexed(
 			duration:  dur,
 			moofCount: seg.fmp4.MoofCount,
 			tracks:    seg.tracks(),
+			chunks:    seg.fmp4.Chunks,
+			noScan:    true,
 		})
 	}
 	infos = expandFMP4PlaylistSegs(infos, chunkDuration)
@@ -429,6 +433,8 @@ func generateM3U8FMP4Timeshift(
 			duration:  dur,
 			moofCount: seg.fmp4.MoofCount,
 			tracks:    seg.tracks(),
+			chunks:    seg.fmp4.Chunks,
+			noScan:    true,
 		})
 	}
 	infos = expandFMP4PlaylistSegs(infos, chunkDuration)
@@ -450,7 +456,13 @@ func expandFMP4PlaylistSegs(infos []fmp4PlaylistSeg, chunkDuration time.Duration
 }
 
 func expandFMP4PlaylistSeg(info fmp4PlaylistSeg, chunkDuration time.Duration) []fmp4PlaylistSeg {
-	if !shouldSliceFMP4(info.duration, chunkDuration) || info.fpath == "" {
+	if !shouldSliceFMP4(info.duration, chunkDuration) {
+		return []fmp4PlaylistSeg{info}
+	}
+	if len(info.chunks) > 1 {
+		return playlistSegsFromChunks(info)
+	}
+	if info.noScan || info.fpath == "" {
 		return []fmp4PlaylistSeg{info}
 	}
 	parts, err := loadFMP4MediaParts(info.fpath)
@@ -461,15 +473,21 @@ func expandFMP4PlaylistSeg(info fmp4PlaylistSeg, chunkDuration time.Duration) []
 	if len(chunks) <= 1 {
 		return []fmp4PlaylistSeg{info}
 	}
-	out := make([]fmp4PlaylistSeg, 0, len(chunks))
+	info.chunks = chunks
+	return playlistSegsFromChunks(info)
+}
+
+func playlistSegsFromChunks(info fmp4PlaylistSeg) []fmp4PlaylistSeg {
+	out := make([]fmp4PlaylistSeg, 0, len(info.chunks))
 	elapsed := time.Duration(0)
-	for _, ch := range chunks {
+	for _, ch := range info.chunks {
 		dur := ch.Duration
 		if dur <= 0 {
 			elapsed += dur
 			continue
 		}
 		item := info
+		item.chunks = nil
 		item.start = info.start.Add(elapsed)
 		item.duration = dur
 		item.ptsEnd = ch.PTSEnd

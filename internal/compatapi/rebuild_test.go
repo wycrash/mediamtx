@@ -229,11 +229,14 @@ func TestPinDayMergesWhenAlreadyPinned(t *testing.T) {
 	pe.pinnedDays = map[string]struct{}{day: {}}
 	idx.mutex.Unlock()
 
-	require.Len(t, idx.SegmentsInWindow("cam1", start, time.Minute), 1, "precondition: only live edge in memory")
+	require.Len(t, pe.segments, 1, "precondition: only live edge in RAM")
 
 	idx.pinDay("cam1", day)
+	idx.mutex.RLock()
+	nRAM := len(idx.paths["cam1"].segments)
+	idx.mutex.RUnlock()
+	require.Equal(t, 2, nRAM, "pinDay must merge day snapshot into an already-pinned day")
 	out := idx.SegmentsInWindow("cam1", start, time.Minute)
-	require.Len(t, out, 2, "pinDay must merge day snapshot into an already-pinned day")
 
 	body := GenerateArchiveM3U8Indexed(conf.RecordFormatFMP4, out, 5*time.Second, 0, 0, start)
 	require.Contains(t, body, filepath.Base(a))
@@ -279,6 +282,7 @@ func TestRebuildOnlyDamagedDay(t *testing.T) {
 	st := idx2.LoadFromDisk(confs)
 	require.Equal(t, 1, st.DiskPaths, "meta still healthy → path loads from disk")
 	require.False(t, idx2.pathNeedsRebuild("cam1"))
+	idx2.PrefetchDays(nil)
 	require.True(t, idx2.HasPendingDayRepairs())
 
 	st = idx2.ReconcileAll(nil, false)

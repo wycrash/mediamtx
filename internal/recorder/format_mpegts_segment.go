@@ -39,7 +39,7 @@ func (s *formatMPEGTSSegment) close() error {
 
 		if err2 == nil {
 			duration := s.lastDTS - s.startDTS
-			s.onSegmentComplete(s.path, duration)
+			s.onSegmentComplete(s.path, duration, nil)
 		}
 	}
 

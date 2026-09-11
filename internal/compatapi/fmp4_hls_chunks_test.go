@@ -22,6 +22,13 @@ func writeFMP4Parts(t *testing.T, fpath string, n int, idrEvery int) {
 	writeFMP4PartsAt(t, fpath, n, idrEvery, 0)
 }
 
+func mustLoadParts(t *testing.T, fpath string) []fmp4MediaPart {
+	t.Helper()
+	parts, err := loadFMP4MediaParts(fpath)
+	require.NoError(t, err)
+	return parts
+}
+
 func writeFMP4PartsAt(t *testing.T, fpath string, n int, idrEvery int, ptsOffset uint64) {
 	t.Helper()
 	f, err := os.Create(fpath)
@@ -167,7 +174,12 @@ func TestGenerateTimeshiftM3U8IndexedFiltersSlicedChunks(t *testing.T) {
 			Rel:    filepath.Base(path),
 			common: dir,
 			Start:  base,
-			fmp4:   fmp4SegMeta{Duration: 60 * time.Second, MoofCount: 60, Ready: true},
+			fmp4: fmp4SegMeta{
+				Duration:  60 * time.Second,
+				MoofCount: 60,
+				Ready:     true,
+				Chunks:    groupHLSChunks(mustLoadParts(t, path), 5*time.Second),
+			},
 		},
 	}, 60*time.Second, 5*time.Second, 0, edge)
 	require.NotContains(t, body, "#EXTINF:60.000,")

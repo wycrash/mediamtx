@@ -236,6 +236,7 @@ func (idx *Index) rebuildRangesFromDayFiles(pathName string, persist bool) {
 	nominal := pe.segmentDuration
 	idx.mutex.RUnlock()
 
+	idx.logInfo("index io op=rebuild-ranges path=%s days=%d persist=%v", pathName, len(days), persist)
 	diskRanges := make(map[string][]RecordingRange)
 	var ranges []RecordingRange
 	for _, d := range days {
@@ -305,6 +306,18 @@ func (pe *pathIndex) lastDay() string {
 		return ""
 	}
 	return pe.days[len(pe.days)-1].Date
+}
+
+func (pe *pathIndex) addRepairDay(r repairDay) {
+	if pe == nil || r.day == "" {
+		return
+	}
+	for _, e := range pe.repairDays {
+		if e.common == r.common && e.day == r.day {
+			return
+		}
+	}
+	pe.repairDays = append(pe.repairDays, r)
 }
 
 func (pe *pathIndex) metaSnapshot() dvrMeta {
@@ -434,6 +447,8 @@ func (idx *Index) sealOpenDay(pathName string) {
 
 	p.closeJournal()
 
+	idx.writeDayPack(pathName, day)
+
 	idx.mutex.Lock()
 	defer idx.mutex.Unlock()
 	pe = idx.paths[pathName]
@@ -509,32 +524,46 @@ func cloneDaySnapshot(s dvrSnapshot) dvrSnapshot {
 }
 
 func loadOneDaySnapshot(l dvrPathLayout, day string, hash uint64) (dvrSnapshot, []dvrJournalOp, bool) {
-	snap, ops, ok, _ := loadOneDayIndex(l, day, hash)
+	snap, ops, ok, _ := loadOneDayIndex(nil, l, day, hash)
 	return snap, ops, ok
 }
 
-func loadOneDayIndex(l dvrPathLayout, day string, hash uint64) (dvrSnapshot, []dvrJournalOp, bool, bool) {
-	snap, ops, ok, corrupt, _ := loadOneDayIndexDetail(l, day, hash)
+func loadOneDayIndex(idx *Index, l dvrPathLayout, day string, hash uint64) (dvrSnapshot, []dvrJournalOp, bool, bool) {
+	snap, ops, ok, corrupt, _ := loadOneDayIndexDetail(idx, l, day, hash)
 	return snap, ops, ok, corrupt
 }
 
-func loadOneDayIndexDetail(l dvrPathLayout, day string, hash uint64) (dvrSnapshot, []dvrJournalOp, bool, bool, loadDayOp) {
+func loadOneDayIndexDetail(idx *Index, l dvrPathLayout, day string, hash uint64) (dvrSnapshot, []dvrJournalOp, bool, bool, loadDayOp) {
 	info := loadDayOp{day: day}
 	if l.common == "" || day == "" {
 		return dvrSnapshot{}, nil, false, false, info
 	}
 
 	tRead := time.Now()
-	snapData, snapErr := os.ReadFile(l.daySnap(day))
+	snapPath := l.daySnap(day)
+	snapData, snapErr := os.ReadFile(snapPath)
 	if snapErr == nil {
 		info.snapB = int64(len(snapData))
 	}
-	jourData, jErr := os.ReadFile(l.dayJournal(day))
-	if os.IsNotExist(jErr) {
-		jourData, jErr = nil, nil
+	if idx != nil {
+		idx.logIndexIO("read-snap", snapPath, info.snapB, time.Since(tRead), snapErr)
 	}
-	if jErr == nil {
-		info.journalB = int64(len(jourData))
+
+	tJ := time.Now()
+	jourPath := l.dayJournal(day)
+	jourData, jErr := os.ReadFile(jourPath)
+	if os.IsNotExist(jErr) {
+		if idx != nil {
+			idx.logIndexIO("read-journal", jourPath, 0, time.Since(tJ), jErr)
+		}
+		jourData, jErr = nil, nil
+	} else {
+		if jErr == nil {
+			info.journalB = int64(len(jourData))
+		}
+		if idx != nil {
+			idx.logIndexIO("read-journal", jourPath, info.journalB, time.Since(tJ), jErr)
+		}
 	}
 	info.read = time.Since(tRead)
 
@@ -586,19 +615,31 @@ func (idx *Index) loadDaySegs(pathName, day string) []*IndexedSegment {
 		return nil
 	}
 	layouts := append([]dvrPathLayout(nil), pe.allLayouts()...)
-	hash := uint64(0)
-	if pe.persist != nil {
-		hash = pe.persist.hash
-	}
+	hash := idx.pathHash(pathName, pe)
 	idx.mutex.RUnlock()
 
 	var segs []*IndexedSegment
+	var repairs []repairDay
 	for _, l := range layouts {
-		snap, ok := idx.loadCachedDaySnapshot(l, day, hash)
-		if !ok {
+		snap, _, ok, corrupt := idx.loadCachedDayIndex(l, day, hash)
+		if ok {
+			daySegs := segsFromSnapshot(l.common, snap)
+			idx.overlayDayPack(l, day, hash, daySegs)
+			segs = append(segs, daySegs...)
 			continue
 		}
-		segs = append(segs, segsFromSnapshot(l.common, snap)...)
+		if corrupt {
+			repairs = append(repairs, repairDay{common: l.common, day: day})
+		}
+	}
+	if len(repairs) > 0 {
+		idx.mutex.Lock()
+		if pe := idx.paths[pathName]; pe != nil {
+			for _, r := range repairs {
+				pe.addRepairDay(r)
+			}
+		}
+		idx.mutex.Unlock()
 	}
 	sort.Slice(segs, func(i, j int) bool { return segs[i].Start.Before(segs[j].Start) })
 	return segs
@@ -658,18 +699,23 @@ func snapMemoKey(l dvrPathLayout, day string) string {
 }
 
 func (idx *Index) loadCachedDaySnapshot(l dvrPathLayout, day string, hash uint64) (dvrSnapshot, bool) {
+	snap, _, ok, _ := idx.loadCachedDayIndex(l, day, hash)
+	return snap, ok
+}
+
+func (idx *Index) loadCachedDayIndex(l dvrPathLayout, day string, hash uint64) (dvrSnapshot, []dvrJournalOp, bool, bool) {
 	key := snapMemoKey(l, day)
 	if idx != nil && key != "" {
 		idx.snapMemoMu.Lock()
 		if idx.snapMemo != nil {
 			if e, ok := idx.snapMemo[key]; ok {
 				idx.snapMemoMu.Unlock()
-				return cloneDaySnapshot(e.snap), e.ok
+				return cloneDaySnapshot(e.snap), e.ops, e.ok, e.corrupt
 			}
 		}
 		idx.snapMemoMu.Unlock()
 	}
-	snap, ops, ok, corrupt := loadOneDayIndex(l, day, hash)
+	snap, ops, ok, corrupt := loadOneDayIndex(idx, l, day, hash)
 	if idx != nil && key != "" {
 		idx.snapMemoMu.Lock()
 		if idx.snapMemo != nil {
@@ -679,7 +725,7 @@ func (idx *Index) loadCachedDaySnapshot(l dvrPathLayout, day string, hash uint64
 		}
 		idx.snapMemoMu.Unlock()
 	}
-	return snap, ok
+	return snap, ops, ok, corrupt
 }
 
 func (idx *Index) cachedJournalOps(l dvrPathLayout, day string) ([]dvrJournalOp, bool) {
@@ -699,15 +745,20 @@ func (idx *Index) cachedJournalOps(l dvrPathLayout, day string) ([]dvrJournalOp,
 	return e.ops, true
 }
 
-// loadDiskMeta reads meta (list of day indexes) then each named day journal.
-// A missing day file is skipped. A present but unreadable journal is queued
-// for rebuild. Walk of recordings is not used here.
+// loadDiskMeta reads the per-disk meta (ranges + day list). It does not replay
+// day journals: that is what made startup take minutes on dozens of cameras.
+// Missing journal/snapshot files are queued for repair. Unreadable journals
+// are discovered when the day is first pinned, sought, or prefetched.
 func (idx *Index) loadDiskMeta(l dvrPathLayout, hash uint64, tr *loadPathOps) (dvrMeta, []repairDay, []dvrDayInfo, bool) {
 	if l.meta == "" {
 		return dvrMeta{}, nil, nil, false
 	}
 	tMeta := time.Now()
-	meta, err := readMetaFile(l.meta)
+	data, err := idx.readIndexFile("read-meta", l.meta)
+	var meta dvrMeta
+	if err == nil {
+		meta, err = decodeMeta(data)
+	}
 	if tr != nil {
 		tr.meta += time.Since(tMeta)
 	}
@@ -724,15 +775,13 @@ func (idx *Index) loadDiskMeta(l dvrPathLayout, hash uint64, tr *loadPathOps) (d
 		if d.Date == "" {
 			continue
 		}
-		snap, _, ok, corrupt := idx.memoLoadDay(l, d.Date, hash, tr)
-		if ok {
-			d.NSeg = uint32(len(snap.Segs))
-			loaded = append(loaded, d)
-			continue
+		if err := idx.statIndexFile("stat-journal", l.dayJournal(d.Date)); err != nil {
+			if err2 := idx.statIndexFile("stat-snap", l.daySnap(d.Date)); err2 != nil {
+				repairs = append(repairs, repairDay{common: l.common, day: d.Date})
+				continue
+			}
 		}
-		if corrupt {
-			repairs = append(repairs, repairDay{common: l.common, day: d.Date})
-		}
+		loaded = append(loaded, d)
 	}
 	if tr != nil {
 		tr.days += time.Since(tDays)
@@ -744,6 +793,27 @@ func (idx *Index) loadDiskMeta(l dvrPathLayout, hash uint64, tr *loadPathOps) (d
 		return dvrMeta{}, nil, nil, false
 	}
 	return meta, repairs, loaded, true
+}
+
+// hotLoadDays is the set of day journals loaded into RAM at startup: today,
+// or the last archived day when today has not been written yet. Older days
+// stay on disk until a playlist/seek or PrefetchDays asks for them.
+func hotLoadDays(days []dvrDayInfo, today, last string) []string {
+	hasToday := false
+	for _, d := range days {
+		if d.Date == today {
+			hasToday = true
+			break
+		}
+	}
+	switch {
+	case hasToday:
+		return []string{today}
+	case last != "":
+		return []string{last}
+	default:
+		return nil
+	}
 }
 
 func (idx *Index) memoLoadDay(l dvrPathLayout, day string, hash uint64, tr *loadPathOps) (dvrSnapshot, []dvrJournalOp, bool, bool) {
@@ -758,7 +828,7 @@ func (idx *Index) memoLoadDay(l dvrPathLayout, day string, hash uint64, tr *load
 		}
 		idx.snapMemoMu.Unlock()
 	}
-	snap, ops, ok, corrupt, info := loadOneDayIndexDetail(l, day, hash)
+	snap, ops, ok, corrupt, info := loadOneDayIndexDetail(idx, l, day, hash)
 	if tr != nil {
 		tr.dayOps = append(tr.dayOps, info)
 	}
@@ -791,8 +861,10 @@ func (idx *Index) loadDayToCache(pathName, day string) *loadedDay {
 	idx.mutex.Lock()
 	if pe := idx.paths[pathName]; pe != nil && pe.dayIsPinned(day) {
 		ld := idx.pinnedAsLoadedLocked(pe, day)
-		idx.mutex.Unlock()
-		return ld
+		if pe.dayNSeg(day) <= 0 || len(ld.segs) >= pe.dayNSeg(day) {
+			idx.mutex.Unlock()
+			return ld
+		}
 	}
 	if ld, ok := idx.dayCache[key]; ok {
 		idx.touchDayLRULocked(key)
@@ -813,8 +885,10 @@ func (idx *Index) loadDayToCache(pathName, day string) *loadedDay {
 	}
 	if pe.dayIsPinned(day) {
 		ld := idx.pinnedAsLoadedLocked(pe, day)
-		idx.mutex.Unlock()
-		return ld
+		if pe.dayNSeg(day) <= 0 || len(ld.segs) >= pe.dayNSeg(day) {
+			idx.mutex.Unlock()
+			return ld
+		}
 	}
 	if ld, exists := idx.dayCache[key]; exists {
 		idx.touchDayLRULocked(key)
@@ -833,13 +907,31 @@ func (idx *Index) loadDayToCache(pathName, day string) *loadedDay {
 	}
 	idx.dayCache[key] = ld
 	idx.dayLRU = append(idx.dayLRU, key)
+	idx.evictDayCacheLocked(key.path)
+	idx.mutex.Unlock()
+	return ld
+}
+
+func (idx *Index) evictDayCacheLocked(pathName string) {
+	if pathName != "" {
+		n := 0
+		for i := len(idx.dayLRU) - 1; i >= 0; i-- {
+			if idx.dayLRU[i].path != pathName {
+				continue
+			}
+			n++
+			if n > dayCachePerPath {
+				old := idx.dayLRU[i]
+				idx.dayLRU = append(idx.dayLRU[:i], idx.dayLRU[i+1:]...)
+				delete(idx.dayCache, old)
+			}
+		}
+	}
 	for len(idx.dayCache) > dayCacheLimit {
 		old := idx.dayLRU[0]
 		idx.dayLRU = idx.dayLRU[1:]
 		delete(idx.dayCache, old)
 	}
-	idx.mutex.Unlock()
-	return ld
 }
 
 func (idx *Index) pinnedAsLoadedLocked(pe *pathIndex, day string) *loadedDay {
@@ -877,29 +969,49 @@ func (idx *Index) pinDay(pathName, day string) {
 	if pe == nil {
 		return
 	}
+	if pe.byName == nil {
+		pe.byName = make(map[string]*IndexedSegment, len(segs))
+	}
 	if pe.pinnedDays == nil {
 		pe.pinnedDays = make(map[string]struct{})
 	}
-	// Always merge disk segs even when already pinned. Live CompleteSegment
-	// during rebuild calls bindPersist and marks the day pinned with only the
-	// live edge; skipping here left archive windows empty after rebuild.
+	added := 0
 	for _, seg := range segs {
-		if tr := seg.tracks(); len(tr) > 0 && len(pe.internedTracks) == 0 {
-			pe.internedTracks = append(pe.internedTracks, tr)
+		if tr := seg.tracks(); len(tr) > 0 {
+			interned := internTracks(pe, tr)
+			seg.fmp4.codecID = internCodecID(pe, interned)
 		}
-		idx.addLocked(pe, seg.Fpath(), seg.Start)
-		if existing, ok := pe.byName[seg.Name()]; ok {
+		seg.codecs = &pe.internedTracks
+		name := seg.Name()
+		if existing, ok := pe.byName[name]; ok {
 			existing.fmp4.Duration = seg.fmp4.Duration
 			existing.fmp4.MoofCount = seg.fmp4.MoofCount
 			existing.fmp4.Ready = seg.fmp4.Ready
 			if tr := seg.tracks(); len(tr) > 0 {
 				interned := internTracks(pe, tr)
 				existing.fmp4.codecID = internCodecID(pe, interned)
-			} else {
+			} else if seg.fmp4.codecID != 0 {
 				existing.fmp4.codecID = seg.fmp4.codecID
 			}
 			existing.codecs = &pe.internedTracks
+			if len(seg.fmp4.Chunks) > 1 {
+				existing.fmp4.Chunks = seg.fmp4.Chunks
+				existing.fmp4.Size = seg.fmp4.Size
+			}
+			if existing.Rel == "" {
+				existing.Rel = seg.Rel
+				existing.common = seg.common
+			}
+			continue
 		}
+		pe.byName[name] = seg
+		pe.segments = append(pe.segments, seg)
+		added++
+	}
+	if added > 0 {
+		sort.Slice(pe.segments, func(i, j int) bool {
+			return pe.segments[i].Start.Before(pe.segments[j].Start)
+		})
 	}
 	pe.pinnedDays[day] = struct{}{}
 	delete(idx.dayCache, dayCacheKey{path: pathName, day: day})
@@ -931,11 +1043,15 @@ func (idx *Index) evictStalePinned(pathName string) {
 	if pe == nil {
 		return
 	}
-	cutoffDay := dvrDayDate(time.Now().Add(-reconcileEdgeWindow))
-	today := dvrDayDate(time.Now())
-	last := pe.lastDay()
+	keep := make(map[string]struct{}, len(pe.days)+1)
+	if pe.openDay != "" {
+		keep[pe.openDay] = struct{}{}
+	}
+	for _, d := range pe.days {
+		keep[d.Date] = struct{}{}
+	}
 	for day := range pe.pinnedDays {
-		if day == pe.openDay || day == today || day == last || day >= cutoffDay {
+		if _, ok := keep[day]; ok {
 			continue
 		}
 		idx.unpinDayLocked(pe, day)
@@ -943,36 +1059,34 @@ func (idx *Index) evictStalePinned(pathName string) {
 }
 
 func (idx *Index) segsForDay(pathName, day string) []*IndexedSegment {
+	ld := idx.loadDayToCache(pathName, day)
+	var out []*IndexedSegment
+	seen := map[string]struct{}{}
+	if ld != nil {
+		out = make([]*IndexedSegment, 0, len(ld.segs))
+		for _, s := range ld.segs {
+			cp := *s
+			out = append(out, &cp)
+			seen[s.Name()] = struct{}{}
+		}
+	}
 	idx.mutex.RLock()
 	pe := idx.paths[pathName]
-	pinned := pe != nil && pe.dayIsPinned(day)
-	idx.mutex.RUnlock()
-	if pinned {
-		idx.mutex.RLock()
-		pe = idx.paths[pathName]
-		var out []*IndexedSegment
-		if pe != nil {
-			for _, s := range pe.segments {
-				if dvrDayDate(s.Start) == day {
-					cp := *s
-					out = append(out, &cp)
-				}
+	if pe != nil {
+		for _, s := range pe.segments {
+			if dvrDayDate(s.Start) != day {
+				continue
 			}
+			if _, ok := seen[s.Name()]; ok {
+				continue
+			}
+			cp := *s
+			out = append(out, &cp)
 		}
-		idx.mutex.RUnlock()
-		if len(out) > 0 {
-			return out
-		}
-		// Pinned but empty: fall through to disk (bindPersist without pinDay).
 	}
-	ld := idx.loadDayToCache(pathName, day)
-	if ld == nil {
-		return nil
-	}
-	out := make([]*IndexedSegment, len(ld.segs))
-	for i, s := range ld.segs {
-		cp := *s
-		out[i] = &cp
+	idx.mutex.RUnlock()
+	if len(out) > 1 {
+		sort.Slice(out, func(i, j int) bool { return out[i].Start.Before(out[j].Start) })
 	}
 	return out
 }
@@ -1016,10 +1130,6 @@ func (idx *Index) bindPersistLocked(pathName string, pe *pathIndex, day, fpath s
 		pe.internedTracks = nil
 	}
 	pe.openDay = day
-	if pe.pinnedDays == nil {
-		pe.pinnedDays = make(map[string]struct{})
-	}
-	pe.pinnedDays[day] = struct{}{}
 	pe.persist.bindDay(pe.layout, day)
 	_ = pe.persist.openJournalAppend()
 }
@@ -1056,8 +1166,74 @@ func (idx *Index) unlinkDayFiles(pe *pathIndex, day string) {
 	for _, layout := range pe.allLayouts() {
 		_ = os.Remove(layout.daySnap(day))
 		_ = os.Remove(layout.dayJournal(day))
+		_ = os.Remove(layout.dayPack(day))
 		if layout.dateDir {
 			_ = os.Remove(filepath.Join(layout.common, day))
 		}
 	}
+}
+
+type prefetchJob struct {
+	path string
+	day  string
+}
+
+// PrefetchDays loads every day journal into RAM and pins it. Meta load leaves
+// only ranges in memory; this pass is what actually holds the archive index.
+func (idx *Index) PrefetchDays(stop <-chan struct{}) {
+	if idx == nil {
+		return
+	}
+	jobs := idx.prefetchJobs()
+	if len(jobs) == 0 {
+		return
+	}
+	t0 := time.Now()
+	n := 0
+	curPath := ""
+	tPath := time.Now()
+	for _, job := range jobs {
+		if stopped(stop) {
+			return
+		}
+		if curPath != "" && job.path != curPath {
+			idx.logInfo("recording index ram path=%s in %s", curPath, time.Since(tPath))
+			tPath = time.Now()
+		}
+		if job.path != curPath {
+			curPath = job.path
+		}
+		idx.pinDay(job.path, job.day)
+		n++
+	}
+	if curPath != "" {
+		idx.logInfo("recording index ram path=%s in %s", curPath, time.Since(tPath))
+	}
+	idx.logInfo("recording index in memory days=%d/%d segs=%d in %s",
+		n, len(jobs), idx.SegmentCount(), time.Since(t0))
+	idx.wakeChunkScan()
+}
+
+func (idx *Index) prefetchJobs() []prefetchJob {
+	idx.mutex.RLock()
+	defer idx.mutex.RUnlock()
+	var out []prefetchJob
+	for name, pe := range idx.paths {
+		if pe == nil {
+			continue
+		}
+		for _, d := range pe.days {
+			if pe.dayIsPinned(d.Date) {
+				continue
+			}
+			out = append(out, prefetchJob{path: name, day: d.Date})
+		}
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].path != out[j].path {
+			return out[i].path < out[j].path
+		}
+		return out[i].day > out[j].day
+	})
+	return out
 }

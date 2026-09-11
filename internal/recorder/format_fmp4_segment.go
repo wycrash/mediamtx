@@ -23,7 +23,7 @@ func writeInit(
 	dts time.Duration,
 	ntp time.Time,
 	tracks []*formatFMP4Track,
-) error {
+) (int64, error) {
 	fmp4Tracks := make([]*fmp4.InitTrack, len(tracks))
 	for i, track := range tracks {
 		fmp4Tracks[i] = track.initTrack
@@ -47,11 +47,11 @@ func writeInit(
 	var buf seekablebuffer.Buffer
 	err := init.Marshal(&buf)
 	if err != nil {
-		return err
+		return 0, err
 	}
 
-	_, err = f.Write(buf.Bytes())
-	return err
+	n, err := f.Write(buf.Bytes())
+	return int64(n), err
 }
 
 func writeDuration(f io.ReadWriteSeeker, d time.Duration) error {
@@ -129,6 +129,8 @@ type formatFMP4Segment struct {
 	curPart        *formatFMP4Part
 	endDTS         time.Duration
 	nextPartNumber uint32
+	size           int64
+	parts          []SegmentPart
 }
 
 func (s *formatFMP4Segment) initialize() {
@@ -158,7 +160,7 @@ func (s *formatFMP4Segment) close() error {
 		}
 
 		if err2 == nil {
-			s.f.ri.onSegmentComplete(s.path, duration)
+			s.f.ri.onSegmentComplete(s.path, duration, s.parts)
 		}
 	}
 
@@ -176,7 +178,7 @@ func (s *formatFMP4Segment) closeCurPart() error {
 
 		s.f.ri.onSegmentCreate(s.path)
 
-		err = writeInit(
+		n, err := writeInit(
 			fi,
 			s.f.ri.streamID,
 			s.number,
@@ -189,9 +191,28 @@ func (s *formatFMP4Segment) closeCurPart() error {
 		}
 
 		s.fi = fi
+		s.size = n
 	}
 
-	return s.curPart.close(s.fi)
+	part := s.curPart
+	off := s.size
+	n, err := part.close(s.fi)
+	if err != nil {
+		return err
+	}
+	dtsStart := part.startDTS - part.segmentStartDTS
+	if dtsStart < 0 {
+		dtsStart = 0
+	}
+	s.parts = append(s.parts, SegmentPart{
+		Off:      off,
+		Len:      n,
+		Duration: part.duration(),
+		DTSStart: dtsStart,
+		HasIDR:   part.hasIDR,
+	})
+	s.size += n
+	return nil
 }
 
 func (s *formatFMP4Segment) write(track *formatFMP4Track, sample *formatFMP4Sample, dts time.Duration) error {

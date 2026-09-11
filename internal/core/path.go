@@ -42,7 +42,7 @@ type pathParent interface {
 	removePath(*path)
 	AddReader(req defs.PathAddReaderReq) (*defs.PathAddReaderRes, error)
 	onRecordSegmentCreate(pathName, segmentPath string)
-	onRecordSegmentComplete(pathName, segmentPath string, duration time.Duration)
+	onRecordSegmentComplete(pathName, segmentPath string, duration time.Duration, parts []recorder.SegmentPart)
 	kickRecordCleaner()
 }
 
@@ -1047,8 +1047,8 @@ func (pa *path) startRecording() {
 				cmd.Start()
 			}
 		},
-		OnSegmentComplete: func(segmentPath string, segmentDuration time.Duration) {
-			pa.parent.onRecordSegmentComplete(pa.name, segmentPath, segmentDuration)
+		OnSegmentComplete: func(segmentPath string, segmentDuration time.Duration, parts []recorder.SegmentPart) {
+			pa.parent.onRecordSegmentComplete(pa.name, segmentPath, segmentDuration, parts)
 
 			if pa.conf.RunOnRecordSegmentComplete != "" {
 				env := pa.ExternalCmdEnv()

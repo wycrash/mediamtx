@@ -67,7 +67,7 @@ func serveHLSPart(t *testing.T, fpath, rawQuery string) *httptest.ResponseRecord
 	w := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(w)
 	c.Request = httptest.NewRequest(http.MethodGet, "/cam1/seg.mp4?"+rawQuery, nil)
-	require.NoError(t, serveFMP4ArchivePart(c, fpath))
+	require.NoError(t, serveFMP4ArchivePart(c, fpath, nil, ""))
 	return w
 }
 
