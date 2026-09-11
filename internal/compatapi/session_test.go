@@ -2,8 +2,10 @@ package compatapi
 
 import (
 	"context"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -11,6 +13,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
 
+	"github.com/bluenviron/mediamtx/internal/conf"
 	"github.com/bluenviron/mediamtx/internal/logger"
 )
 
@@ -37,7 +40,11 @@ func TestRequestPathName(t *testing.T) {
 	require.Equal(t, "cam1", requestPathName("/cam1/archive-1000-60.fmp4.m3u8"))
 	require.Equal(t, "cam1", requestPathName("/cam1/mono-1000-60.fmp4.m3u8"))
 	require.Equal(t, "cam1", requestPathName("/cam1/timeshift_abs-1000.m3u8"))
+	require.Equal(t, "cam1", requestPathName("/cam1/mono-timeshift_abs-1000.m3u8"))
 	require.Equal(t, "group/cam1", requestPathName("/group/cam1/timeshift_abs-1000.fmp4.m3u8"))
+	require.Equal(t, "cam1", requestPathName("/cam1/timeshift_rel-3582.m3u8"))
+	require.Equal(t, "cam1", requestPathName("/cam1/mono-timeshift_rel-3582.m3u8"))
+	require.Equal(t, "group/cam1", requestPathName("/group/cam1/mono-timeshift_rel-3600.fmp4.m3u8"))
 	require.Equal(t, "cam1", requestPathName("/cam1/index-1786648330-89.fmp4.m3u8"))
 	require.Equal(t, "cam1", requestPathName("/cam1/archive-1786643672-658.mp4"))
 	require.Equal(t, "group/cam1", requestPathName("/group/cam1/archive-1786643672-658.mp4"))
@@ -231,6 +238,134 @@ func TestMiddlewareSessionPersistsAfterRequest(t *testing.T) {
 	require.Len(t, list.Items, 1)
 	require.Equal(t, id, list.Items[0].ID)
 	require.Greater(t, list.Items[0].OutboundBytes, uint64(7))
+}
+
+func TestMiddlewareSessionPersistsViaQuery(t *testing.T) {
+	s := &Server{
+		Parent:   testParent{},
+		sessions: make(map[uuid.UUID]*session),
+	}
+
+	r := gin.New()
+	r.Use(s.middlewareSession)
+	r.NoRoute(func(ctx *gin.Context) {
+		ctx.String(http.StatusOK, "ok")
+	})
+
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/cam1/index-1000-60.m3u8?token=secret", nil)
+	req.RemoteAddr = "192.0.2.10:1234"
+	r.ServeHTTP(w, req)
+	require.Equal(t, http.StatusOK, w.Code)
+
+	list, err := s.APISessionsList()
+	require.NoError(t, err)
+	require.Len(t, list.Items, 1)
+	id := list.Items[0].ID
+
+	var secret string
+	for _, c := range w.Result().Cookies() {
+		if c.Name == sessionCookieName {
+			secret = c.Value
+			break
+		}
+	}
+	require.NotEmpty(t, secret)
+
+	// ExoPlayer-style: no cookie, only ?session= from playlist URIs.
+	w2 := httptest.NewRecorder()
+	req2 := httptest.NewRequest(http.MethodGet,
+		"/cam1/seg.ts?token=secret&session="+secret, nil)
+	req2.RemoteAddr = "192.0.2.10:5678"
+	r.ServeHTTP(w2, req2)
+	require.Equal(t, http.StatusOK, w2.Code)
+
+	list, err = s.APISessionsList()
+	require.NoError(t, err)
+	require.Len(t, list.Items, 1)
+	require.Equal(t, id, list.Items[0].ID)
+
+	// Different client IP must not reuse the query session.
+	w3 := httptest.NewRecorder()
+	req3 := httptest.NewRequest(http.MethodGet,
+		"/cam1/seg2.ts?session="+secret, nil)
+	req3.RemoteAddr = "198.51.100.1:9"
+	r.ServeHTTP(w3, req3)
+	require.Equal(t, http.StatusOK, w3.Code)
+
+	list, err = s.APISessionsList()
+	require.NoError(t, err)
+	require.Len(t, list.Items, 2)
+}
+
+func TestArchivePlaylistForwardsSessionToSegments(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	dir := t.TempDir()
+	segName := "2026-08-31-21-59-51-1788202791-801076.mp4"
+	fpath := filepath.Join(dir, segName)
+	writeArchiveTestSegment(t, fpath)
+
+	start := time.Unix(1788202791, 0).UTC()
+	idx := NewIndex()
+	idx.Add("cam1", fpath, start)
+	idx.SetFMP4Meta("cam1", fpath, fmp4SegMeta{
+		Duration:  2 * time.Second,
+		MoofCount: 1,
+		Ready:     true,
+	})
+
+	s := &Server{
+		PathConfs: map[string]*conf.Path{
+			"cam1": {
+				Name:                  "cam1",
+				RecordFormat:          conf.RecordFormatFMP4,
+				RecordSegmentDuration: conf.Duration(10 * time.Second),
+			},
+		},
+		AuthManager: tokenAuthManager(),
+		Parent:      testParent{},
+		Index:       idx,
+		sessions:    make(map[uuid.UUID]*session),
+	}
+	r := gin.New()
+	r.Use(s.middlewareSession)
+	r.NoRoute(s.onRequest)
+
+	req := httptest.NewRequest(http.MethodGet,
+		"/cam1/index-1788202791-10.m3u8?token=secret", nil)
+	req.RemoteAddr = "192.0.2.10:1"
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+	require.Equal(t, http.StatusOK, w.Code)
+
+	var secret string
+	for _, c := range w.Result().Cookies() {
+		if c.Name == sessionCookieName {
+			secret = c.Value
+			break
+		}
+	}
+	require.NotEmpty(t, secret)
+
+	body, err := io.ReadAll(w.Body)
+	require.NoError(t, err)
+	got := string(body)
+	require.Contains(t, got, "token=secret")
+	require.Contains(t, got, "session="+secret)
+	require.Contains(t, got, segName)
+
+	// Segment fetch with session query only — same compat session.
+	req2 := httptest.NewRequest(http.MethodGet,
+		"/cam1/"+segName+"?hls=media&sn=0&td=0&token=secret&session="+secret, nil)
+	req2.RemoteAddr = "192.0.2.10:2"
+	w2 := httptest.NewRecorder()
+	r.ServeHTTP(w2, req2)
+	require.Equal(t, http.StatusOK, w2.Code)
+
+	list, err := s.APISessionsList()
+	require.NoError(t, err)
+	require.Len(t, list.Items, 1)
 }
 
 func TestExpireSessions(t *testing.T) {

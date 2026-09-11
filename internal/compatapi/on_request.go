@@ -29,7 +29,8 @@ var (
 	// mono- is a Flussonic alias for index- (future track-filter hook; currently identical).
 	archivePlaylistRegexp = regexp.MustCompile(`^(.*)/(?:index|archive|mono)-(\d+)-(\d+)(?:\.fmp4)?\.m3u8$`)
 	archiveDownloadRegexp = regexp.MustCompile(`^(.*)/archive-(\d+)-(\d+)\.mp4$`)
-	timeshiftAbsRegexp    = regexp.MustCompile(`^(.*)/timeshift_abs-(\d+)(?:\.fmp4)?\.m3u8$`)
+	timeshiftAbsRegexp    = regexp.MustCompile(`^(.*)/(?:mono-)?timeshift_abs-(\d+)(?:\.fmp4)?\.m3u8$`)
+	timeshiftRelRegexp    = regexp.MustCompile(`^(.*)/(?:mono-)?timeshift_rel-(\d+)(?:\.fmp4)?\.m3u8$`)
 	previewUnixRegexp     = regexp.MustCompile(`^(.*)/(\d{10,13})-preview\.mp4$`)
 	previewRegexp         = regexp.MustCompile(
 		`^(.+)/(\d{4})/(\d{2})/(\d{2})/(\d{2})/(\d{2})/(\d{2})(?:-preview)?\.mp4$`)
@@ -62,6 +63,9 @@ func requestPathName(rawPath string) string {
 		return m[1]
 	}
 	if m := timeshiftAbsRegexp.FindStringSubmatch(pa); m != nil {
+		return m[1]
+	}
+	if m := timeshiftRelRegexp.FindStringSubmatch(pa); m != nil {
 		return m[1]
 	}
 	if m := archiveDownloadRegexp.FindStringSubmatch(pa); m != nil {
@@ -145,6 +149,11 @@ func (s *Server) onRequest(ctx *gin.Context) {
 			dur = time.Second
 		}
 		s.onArchivePlaylist(ctx, m[1], start, dur)
+
+	case timeshiftRelRegexp.MatchString(pa):
+		m := timeshiftRelRegexp.FindStringSubmatch(pa)
+		agoSec, _ := strconv.ParseInt(m[2], 10, 64)
+		s.onTimeshiftRelPlaylist(ctx, m[1], time.Duration(agoSec)*time.Second)
 
 	case archiveDownloadRegexp.MatchString(pa):
 		m := archiveDownloadRegexp.FindStringSubmatch(pa)
@@ -273,9 +282,12 @@ func (s *Server) onInfoJSON(ctx *gin.Context, pathName string) {
 		return
 	}
 
+	s.mutex.RLock()
+	pm := s.PathManager
+	s.mutex.RUnlock()
 	var path *defs.APIPath
-	if s.PathManager != nil {
-		if p, err := s.PathManager.APIPathsGet(pathName); err == nil {
+	if pm != nil {
+		if p, err := pm.APIPathsGet(pathName); err == nil {
 			path = p
 		}
 	}
@@ -360,8 +372,64 @@ func (s *Server) onArchivePlaylist(
 
 	windowed := s.Index.SegmentsInWindow(pathName, start, duration)
 	segDur := time.Duration(pathConf.RecordSegmentDuration)
+	chunkDur := time.Duration(pathConf.RecordHlsChunkDuration)
 	body := appendQueryToPlaylistURIs(
-		GenerateArchiveM3U8Indexed(pathConf.RecordFormat, windowed, segDur, s.TimeOffsetMinutes, start),
+		GenerateArchiveM3U8Indexed(pathConf.RecordFormat, windowed, segDur, chunkDur, s.TimeOffsetMinutes, start),
+		playlistAuthQuery(ctx),
+	)
+
+	ctx.Header("Content-Type", "application/vnd.apple.mpegurl; charset=utf-8")
+	ctx.Header("Cache-Control", "no-cache")
+	ctx.String(http.StatusOK, body)
+}
+
+// onTimeshiftRelPlaylist serves a continuous delayed-live HLS playlist:
+// the live edge is always (now - ago), and the playlist slides forward without ENDLIST
+// so players keep reloading (Flussonic timeshift_rel / mono-timeshift_rel).
+func (s *Server) onTimeshiftRelPlaylist(ctx *gin.Context, pathName string, ago time.Duration) {
+	if err := conf.IsValidPathName(pathName); err != nil {
+		s.writeError(ctx, http.StatusBadRequest, err)
+		return
+	}
+	if !s.doAuth(ctx, pathName) {
+		return
+	}
+
+	pathConf, err := s.safeFindPathConf(pathName)
+	if err != nil {
+		s.writeError(ctx, http.StatusBadRequest, err)
+		return
+	}
+
+	if ago < time.Second {
+		ago = time.Second
+	}
+	if ago > maxArchiveDuration {
+		ago = maxArchiveDuration
+	}
+
+	now := time.Now().UTC()
+	delayedEdge := now.Add(-ago)
+	segDur := time.Duration(pathConf.RecordSegmentDuration)
+	chunkDur := time.Duration(pathConf.RecordHlsChunkDuration)
+	lookback := timeshiftLookback(hlsPlaylistStep(segDur, chunkDur))
+	windowStart := delayedEdge.Add(-lookback)
+	if windowStart.After(delayedEdge) {
+		windowStart = delayedEdge.Add(-time.Second)
+	}
+
+	windowed := s.Index.SegmentsInWindow(pathName, windowStart, delayedEdge.Sub(windowStart))
+	// Do not expose segments that start after the delayed edge (still "future" on the delay timeline).
+	filtered := windowed[:0]
+	for _, seg := range windowed {
+		if seg.Start.After(delayedEdge) {
+			continue
+		}
+		filtered = append(filtered, seg)
+	}
+
+	body := appendQueryToPlaylistURIs(
+		GenerateTimeshiftM3U8Indexed(pathConf.RecordFormat, filtered, segDur, chunkDur, s.TimeOffsetMinutes, delayedEdge),
 		playlistAuthQuery(ctx),
 	)
 
@@ -510,6 +578,7 @@ func (s *Server) tryServeArchiveSegment(ctx *gin.Context, pathName string, fileN
 // serveFMP4ArchivePart serves a recording fMP4 as a whole resource.
 // hls=init / hls=media split the file so VLC does not need EXT-X-BYTERANGE.
 // hls=media&sn=&td= rewrites mfhd/tfdt into a continuous timeline for VLC seek.
+// hls=media&off=&n= serves n fMP4 parts starting at file offset off (IDR-aligned chunks).
 // Tracks Chrome MSE cannot play (LPCM/ipcm) are stripped from HLS parts.
 func serveFMP4ArchivePart(ctx *gin.Context, fpath string) error {
 	part := ctx.Query("hls")
@@ -566,7 +635,35 @@ func serveFMP4ArchivePart(ctx *gin.Context, fpath string) error {
 		return nil
 	}
 
+	offStr := ctx.Query("off")
+	nStr := ctx.Query("n")
+	if (offStr == "") != (nStr == "") {
+		ctx.AbortWithStatus(http.StatusBadRequest)
+		return nil
+	}
+
+	mediaOff := initSize
 	mediaLen := size - initSize
+	if offStr != "" {
+		off, err2 := strconv.ParseInt(offStr, 10, 64)
+		if err2 != nil || off < initSize {
+			ctx.AbortWithStatus(http.StatusBadRequest)
+			return nil
+		}
+		n, err2 := strconv.Atoi(nStr)
+		if err2 != nil {
+			ctx.AbortWithStatus(http.StatusBadRequest)
+			return nil
+		}
+		start, slen, err2 := fmp4HLSSliceRange(fpath, off, n)
+		if err2 != nil || start+slen > size {
+			ctx.AbortWithStatus(http.StatusNotFound)
+			return nil
+		}
+		mediaOff = start
+		mediaLen = slen
+	}
+
 	snStr := ctx.Query("sn")
 	tdStr := ctx.Query("td")
 	var startSeq uint64
@@ -589,13 +686,13 @@ func serveFMP4ArchivePart(ctx *gin.Context, fpath string) error {
 	name = strings.TrimSuffix(name, ".mp4") + "_media.mp4"
 	needRewrite := len(drop) > 0 || startSeq != 0 || tdMs != 0
 	if !needRewrite {
-		section := io.NewSectionReader(f, initSize, mediaLen)
+		section := io.NewSectionReader(f, mediaOff, mediaLen)
 		http.ServeContent(ctx.Writer, ctx.Request, name, fi.ModTime(), section)
 		return nil
 	}
 
 	media := make([]byte, mediaLen)
-	if _, err = f.ReadAt(media, initSize); err != nil {
+	if _, err = f.ReadAt(media, mediaOff); err != nil {
 		return err
 	}
 
@@ -633,13 +730,16 @@ func (s *Server) serveLive(ctx *gin.Context) {
 		req.URL.RawPath = ""
 	}
 
-	if s.HLSHandler == nil {
+	s.mutex.RLock()
+	h := s.HLSHandler
+	s.mutex.RUnlock()
+	if h == nil {
 		http.Error(ctx.Writer, "HLS backend unavailable", http.StatusBadGateway)
 		return
 	}
 
 	s.Log(logger.Debug, "[conn %v] serve live %s", httpp.RemoteAddr(ctx), req.URL.Path)
-	s.HLSHandler.ServeHTTP(&relativeLocationWriter{
+	h.ServeHTTP(&relativeLocationWriter{
 		ResponseWriter: ctx.Writer,
 		reqPath:        ctx.Request.URL.Path,
 	}, req)

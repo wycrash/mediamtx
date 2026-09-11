@@ -2,6 +2,7 @@ package core
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"slices"
@@ -42,6 +43,7 @@ type pathParent interface {
 	AddReader(req defs.PathAddReaderReq) (*defs.PathAddReaderRes, error)
 	onRecordSegmentCreate(pathName, segmentPath string)
 	onRecordSegmentComplete(pathName, segmentPath string, duration time.Duration)
+	kickRecordCleaner()
 }
 
 type pathOnDemandState int
@@ -999,10 +1001,23 @@ func (pa *path) setNotAvailable() {
 
 func (pa *path) startRecording() {
 	var pickRoot recorder.PickRootFunc
+	var noteRoot recorder.NoteRootFunc
 	if pa.conf.Storage != "" && pa.storage != nil {
 		name := pa.conf.Storage
 		pickRoot = func(skip []string) (string, error) {
-			return pa.storage.Pick(name, skip)
+			root, err := pa.storage.Pick(name, pa.name, skip)
+			if errors.Is(err, storage.ErrNoWritableDisk) {
+				pa.parent.kickRecordCleaner()
+			}
+			return root, err
+		}
+		noteRoot = func(root string, err error) {
+			if err != nil {
+				cooldown := pa.storage.MarkFailed(root, err)
+				pa.Log(logger.Warn, "storage disk %s failed (%v), skipping for %s", root, err, cooldown)
+				return
+			}
+			pa.storage.MarkOK(root)
 		}
 	}
 	pa.recorder = &recorder.Recorder{
@@ -1014,6 +1029,7 @@ func (pa *path) startRecording() {
 		PathName:        pa.name,
 		Stream:          pa.stream,
 		PickRoot:        pickRoot,
+		NoteRoot:        noteRoot,
 		OnSegmentCreate: func(segmentPath string) {
 			pa.parent.onRecordSegmentCreate(pa.name, segmentPath)
 

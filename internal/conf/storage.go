@@ -44,11 +44,28 @@ func (d *StorageStrategy) UnmarshalEnv(_ string, v string) error {
 // Storage is a named pool of recording disks.
 type Storage struct {
 	// How to pick a disk for a new recording segment (roundRobin, fillFirst).
+	// roundRobin alternates disks independently for each path.
 	Strategy StorageStrategy `json:"strategy"`
-	// Skip a disk when used space is >= this percent. 0 disables the check (ENOSPC only).
+	// Threshold for disk used space (%).
+	// Without deleteUntilPercent: skip the disk when used >= this value (0 = ENOSPC only).
+	// With deleteUntilPercent > 0: do not refuse writes; start deleting oldest
+	// segments when used >= this value so new recordings can continue.
 	MaxUsedPercent *float64 `json:"maxUsedPercent"`
+	// When > 0, reclaim disk space by deleting oldest recordings until used space
+	// is <= this percent. Must be lower than maxUsedPercent.
+	// 0 or unset: refuse-only behavior at maxUsedPercent (no automatic deletes).
+	DeleteUntilPercent *float64 `json:"deleteUntilPercent"`
 	// Recording roots. Order is used by roundRobin / fillFirst.
 	Disks []string `json:"disks"`
+}
+
+// HasSpaceReclaim reports whether this pool deletes oldest segments under pressure
+// instead of refusing new recordings at maxUsedPercent.
+func (s *Storage) HasSpaceReclaim() bool {
+	if s == nil || s.MaxUsedPercent == nil || *s.MaxUsedPercent <= 0 {
+		return false
+	}
+	return s.DeleteUntilPercent != nil && *s.DeleteUntilPercent > 0
 }
 
 func (s *Storage) validate(name string) error {
@@ -72,6 +89,21 @@ func (s *Storage) validate(name string) error {
 	}
 	if *s.MaxUsedPercent < 0 || *s.MaxUsedPercent > 100 {
 		return fmt.Errorf("'maxUsedPercent' of storage '%s' must be between 0 and 100", name)
+	}
+
+	if s.DeleteUntilPercent != nil {
+		v := *s.DeleteUntilPercent
+		if v < 0 || v > 100 {
+			return fmt.Errorf("'deleteUntilPercent' of storage '%s' must be between 0 and 100", name)
+		}
+		if v > 0 {
+			if *s.MaxUsedPercent <= 0 {
+				return fmt.Errorf("'deleteUntilPercent' of storage '%s' requires 'maxUsedPercent' > 0", name)
+			}
+			if v >= *s.MaxUsedPercent {
+				return fmt.Errorf("'deleteUntilPercent' of storage '%s' must be lower than 'maxUsedPercent'", name)
+			}
+		}
 	}
 
 	if len(s.Disks) == 0 {

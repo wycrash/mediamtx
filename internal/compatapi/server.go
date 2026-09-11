@@ -2,6 +2,7 @@
 package compatapi
 
 import (
+	"errors"
 	"fmt"
 	"io/fs"
 	"net"
@@ -31,22 +32,25 @@ type pathAPIGetter interface {
 
 // Server is the compat API server.
 type Server struct {
-	Address           string
-	Encryption        bool
-	ServerKey         string
-	ServerCert        string
-	DumpPackets       bool
-	AllowOrigins      []string
-	TrustedProxies    conf.IPNetworks
-	ReadTimeout       conf.Duration
-	WriteTimeout      conf.Duration
-	TimeOffsetMinutes int
-	PathConfs         map[string]*conf.Path
-	PathManager       pathAPIGetter
-	AuthManager       serverAuthManager
-	HLSHandler        http.Handler
-	DvrPlayer         fs.FS
-	Parent            logger.Writer
+	Address             string
+	Encryption          bool
+	ServerKey           string
+	ServerCert          string
+	DumpPackets         bool
+	AllowOrigins        []string
+	TrustedProxies      conf.IPNetworks
+	ReadTimeout         conf.Duration
+	WriteTimeout        conf.Duration
+	TimeOffsetMinutes   int
+	IndexUpdateInterval conf.Duration
+	PathConfs           map[string]*conf.Path
+	PathManager         pathAPIGetter
+	AuthManager         serverAuthManager
+	HLSHandler          http.Handler
+	DvrPlayer           fs.FS
+	Parent              logger.Writer
+	// MaintMu serializes index reconcile/rebuild with recordcleaner ticks.
+	MaintMu *sync.Mutex
 
 	Index              *Index
 	httpServer         *httpp.Server
@@ -59,21 +63,33 @@ type Server struct {
 	reconcileStop      chan struct{}
 	reconcileDone      chan struct{}
 	reconcileKick      chan struct{}
+	reconcileStatusMu  sync.RWMutex
+	reconcileState     defs.APICompatIndexStatusState
+	reconcileStarted   time.Time
+	debugStop          chan struct{}
+	debugDone          chan struct{}
 }
 
-// Initialize initializes Server.
+// SetPathManager attaches the path manager after it is created.
+func (s *Server) SetPathManager(pm pathAPIGetter) {
+	s.mutex.Lock()
+	s.PathManager = pm
+	s.mutex.Unlock()
+}
+
+// SetHLSHandler attaches the live HLS backend after it is created.
+func (s *Server) SetHLSHandler(h http.Handler) {
+	s.mutex.Lock()
+	s.HLSHandler = h
+	s.mutex.Unlock()
+}
+
+// Initialize starts the HTTP listener immediately. Index load and the first
+// reconcile run in the background so recorders can register live segments.
 func (s *Server) Initialize() error {
 	s.Index = NewIndex()
-	before := readProcMem()
-	s.Log(logger.Info, "loading recording index (%s)", before.logLine())
-	t0 := time.Now()
-	loadSt := s.Index.LoadFromDisk(s.PathConfs)
-	elapsed := time.Since(t0)
-	after := readProcMem()
-	st := s.Index.MemStats()
-	s.Log(logger.Info, "recording index loaded (%d segments, %d paths, %d from disk) in %s",
-		loadSt.Segments, loadSt.Paths, loadSt.DiskPaths, elapsed)
-	s.logIndexMem(st, before, after)
+	s.Index.Parent = s
+	s.Index.EnablePersist(s.PathConfs)
 
 	s.sessions = make(map[uuid.UUID]*session)
 	s.sessionsBySecret = make(map[uuid.UUID]*session)
@@ -107,8 +123,13 @@ func (s *Server) Initialize() error {
 		proto = "TCP/HTTPS"
 	}
 	s.Log(logger.Info, "started with listener on %s (%s)", s.Address, proto)
+	s.reconcileStop = make(chan struct{})
+	s.reconcileDone = make(chan struct{})
+	s.reconcileKick = make(chan struct{}, 1)
+	s.reconcileState = defs.APICompatIndexStatusIdle
 	s.startSessionCleanup()
-	s.startBackgroundReconcile(loadSt)
+	s.startDebugStats()
+	go s.runIndexLifecycle()
 	return nil
 }
 
@@ -139,45 +160,93 @@ func (s *Server) OnSegmentRemove(segmentPath string) {
 // Close closes Server.
 func (s *Server) Close() {
 	s.Log(logger.Info, "closing")
+	s.stopDebugStats()
 	s.stopSessionCleanup()
-	s.stopBackgroundReconcile()
+	s.stopIndexLifecycle()
 	s.sessionsKickAll()
 	if s.Index != nil {
 		t0 := time.Now()
-		n := s.Index.ClosePersist()
-		s.Log(logger.Info, "dvr index flushed to disk (%d paths) in %s", n, time.Since(t0))
+		st := s.Index.ClosePersist()
+		s.Log(logger.Info, "dvr index flushed to disk (%d dirty / %d paths) in %s",
+			st.Dirty, st.Paths, time.Since(t0))
 	}
 	s.httpServer.Close()
 }
 
-func (s *Server) startBackgroundReconcile(loadSt IndexLoadStats) {
+func (s *Server) runIndexLifecycle() {
+	defer close(s.reconcileDone)
 	if s.Index == nil {
 		return
 	}
-	s.reconcileStop = make(chan struct{})
-	s.reconcileDone = make(chan struct{})
-	s.reconcileKick = make(chan struct{}, 1)
-	// Deleted/missing snapshot: rebuild now, no throttle, no 5-minute wait.
-	// A healthy index is only edge-checked on the scheduler.
-	missing := loadSt.DiskPaths < loadSt.Paths
-	go func() {
-		defer close(s.reconcileDone)
-		if missing {
-			s.runBackgroundReconcile(false)
-		}
-		ticker := time.NewTicker(5 * time.Minute)
-		defer ticker.Stop()
+
+	before := readProcMem()
+	s.Log(logger.Info, "loading recording index (%s)", before.logLine())
+	s.beginReconcile(defs.APICompatIndexStatusRebuild)
+	t0 := time.Now()
+	loadSt := s.Index.loadFromDisk(s.PathConfs, s.reconcileStop)
+	if stopped(s.reconcileStop) {
+		return
+	}
+	elapsed := time.Since(t0)
+	after := readProcMem()
+	st := s.Index.MemStats()
+	s.Log(logger.Info, "recording index loaded (%d segments, %d paths, %d from disk) in %s",
+		loadSt.Segments, loadSt.Paths, loadSt.DiskPaths, elapsed)
+	s.logIndexMem(st, before, after)
+
+	if loadSt.DiskPaths < loadSt.Paths || s.Index.HasPendingDayRepairs() {
+		s.Log(logger.Info, "recording index needs repair (fromDisk=%d/%d pendingDays=%v)",
+			loadSt.DiskPaths, loadSt.Paths, s.Index.HasPendingDayRepairs())
+	}
+	// First pass always: full rebuild for incomplete paths, day-level repair
+	// for damaged journals, edge check for healthy paths.
+	s.runBackgroundReconcile(false)
+	if stopped(s.reconcileStop) {
+		return
+	}
+
+	updateEvery := time.Duration(s.IndexUpdateInterval)
+	if updateEvery <= 0 {
+		s.Log(logger.Info, "recording index periodic update disabled")
 		for {
 			select {
 			case <-s.reconcileStop:
 				return
 			case <-s.reconcileKick:
-				s.runBackgroundReconcile(false)
-			case <-ticker.C:
-				s.runBackgroundReconcile(true)
+				s.drainForcedRebuilds()
 			}
 		}
-	}()
+	}
+	ticker := time.NewTicker(updateEvery)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-s.reconcileStop:
+			return
+		case <-s.reconcileKick:
+			s.drainForcedRebuilds()
+		case <-ticker.C:
+			s.runBackgroundReconcile(true)
+		}
+	}
+}
+
+// drainForcedRebuilds runs forced rebuilds until the incomplete queue stops shrinking.
+func (s *Server) drainForcedRebuilds() {
+	for {
+		if stopped(s.reconcileStop) {
+			return
+		}
+		before := s.Index.NeedsRebuildCount()
+		if before == 0 {
+			return
+		}
+		s.runBackgroundReconcile(false)
+		after := s.Index.NeedsRebuildCount()
+		if after == 0 || after >= before {
+			return
+		}
+	}
 }
 
 func (s *Server) kickBackgroundReconcile() {
@@ -191,6 +260,18 @@ func (s *Server) kickBackgroundReconcile() {
 }
 
 func (s *Server) runBackgroundReconcile(slow bool) {
+	if s.MaintMu != nil {
+		s.MaintMu.Lock()
+		defer s.MaintMu.Unlock()
+	}
+
+	state := defs.APICompatIndexStatusUpdate
+	if !slow {
+		state = defs.APICompatIndexStatusRebuild
+	}
+	s.beginReconcile(state)
+	defer s.endReconcile()
+
 	kind := "background update"
 	if !slow {
 		kind = "full rebuild"
@@ -198,11 +279,30 @@ func (s *Server) runBackgroundReconcile(slow bool) {
 	s.Log(logger.Info, "recording index %s started", kind)
 	t0 := time.Now()
 	st := s.Index.ReconcileAll(s.reconcileStop, slow)
-	s.Log(logger.Info, "recording index %s done (built=%d added=%d removed=%d inspected=%d) in %s",
-		kind, st.Built, st.Added, st.Removed, st.Inspected, time.Since(t0))
+	dbg := s.Index.DebugSnapshot()
+	s.Log(logger.Info, "recording index %s done (built=%d added=%d removed=%d inspected=%d pendingRepairs=%d) in %s; %s",
+		kind, st.Built, st.Added, st.Removed, st.Inspected, s.Index.PendingDayRepairCount(), time.Since(t0),
+		dbg.logLine())
 }
 
-func (s *Server) stopBackgroundReconcile() {
+func (s *Server) beginReconcile(state defs.APICompatIndexStatusState) {
+	s.reconcileStatusMu.Lock()
+	s.reconcileState = state
+	s.reconcileStarted = time.Now()
+	s.reconcileStatusMu.Unlock()
+}
+
+func (s *Server) endReconcile() {
+	if s.Index != nil {
+		s.Index.setProgressPath("")
+	}
+	s.reconcileStatusMu.Lock()
+	s.reconcileState = defs.APICompatIndexStatusIdle
+	s.reconcileStarted = time.Time{}
+	s.reconcileStatusMu.Unlock()
+}
+
+func (s *Server) stopIndexLifecycle() {
 	if s.reconcileStop == nil {
 		return
 	}
@@ -214,6 +314,189 @@ func (s *Server) stopBackgroundReconcile() {
 	if s.reconcileDone != nil {
 		<-s.reconcileDone
 	}
+}
+
+const debugStatsInterval = 30 * time.Second
+
+func (s *Server) startDebugStats() {
+	if s.Index == nil {
+		return
+	}
+	s.debugStop = make(chan struct{})
+	s.debugDone = make(chan struct{})
+	go func() {
+		defer close(s.debugDone)
+		ticker := time.NewTicker(debugStatsInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-s.debugStop:
+				return
+			case <-ticker.C:
+				s.logDebugStatsInterval()
+			}
+		}
+	}()
+}
+
+func (s *Server) stopDebugStats() {
+	if s.debugStop == nil {
+		return
+	}
+	select {
+	case <-s.debugStop:
+	default:
+		close(s.debugStop)
+	}
+	if s.debugDone != nil {
+		<-s.debugDone
+	}
+}
+
+func (s *Server) logDebugStatsInterval() {
+	if s.Index == nil {
+		return
+	}
+	snap := s.Index.DebugSnapshot()
+	mem := readProcMem()
+	s.reconcileStatusMu.RLock()
+	state := s.reconcileState
+	s.reconcileStatusMu.RUnlock()
+	if state == "" {
+		state = defs.APICompatIndexStatusIdle
+	}
+	// Always log when there was work, or when heap/goroutines look elevated.
+	busy := snap.SegmentCreate+snap.SegmentComplete+snap.SegmentRemove+
+		snap.WriteMeta+snap.ReconcilePath+snap.InspectFMP4+snap.SlowOps > 0
+	if !busy && mem.goroutines < 200 && mem.heapAlloc < 300<<20 {
+		return
+	}
+	s.Log(logger.Info, "index debug (%s) state=%s segs=%d pendingRepairs=%d %s",
+		mem.logLine(),
+		state,
+		s.Index.SegmentCount(),
+		s.Index.PendingDayRepairCount(),
+		snap.logLine(),
+	)
+}
+
+// ErrPathNotFound is returned when a rebuild target path does not exist.
+var ErrPathNotFound = errors.New("path not found")
+
+// APIIndexRebuild implements defs.APICompatServer.
+// pathName empty queues a rebuild of every recording path. Concurrent calls
+// only mark paths incomplete and coalesce into the single reconcile worker.
+func (s *Server) APIIndexRebuild(pathName string) (*defs.APICompatIndexRebuild, error) {
+	if s.Index == nil {
+		return nil, fmt.Errorf("recording index is not available")
+	}
+
+	out := &defs.APICompatIndexRebuild{
+		Status: defs.APIOKStatusOK,
+	}
+
+	if pathName == "" {
+		s.mutex.RLock()
+		names := recordingPathNames(s.PathConfs)
+		s.mutex.RUnlock()
+		for _, name := range names {
+			s.Index.MarkNeedsRebuild(name)
+		}
+		// Also mark any already-loaded paths that recordingPathNames missed
+		// (e.g. removed from disk but still in memory).
+		s.Index.MarkAllNeedsRebuild()
+		out.All = true
+		out.Queued = s.Index.NeedsRebuildCount()
+		s.Log(logger.Info, "recording index rebuild queued (all, pending=%d)", out.Queued)
+	} else {
+		if err := conf.IsValidPathName(pathName); err != nil {
+			return nil, err
+		}
+		s.mutex.RLock()
+		pathConfs := s.PathConfs
+		s.mutex.RUnlock()
+		if _, _, err := conf.FindPathConf(pathConfs, pathName); err != nil {
+			return nil, ErrPathNotFound
+		}
+		s.Index.MarkNeedsRebuild(pathName)
+		out.Path = pathName
+		out.Queued = s.Index.NeedsRebuildCount()
+		s.Log(logger.Info, "recording index rebuild queued (path=%s, pending=%d)", pathName, out.Queued)
+	}
+
+	s.kickBackgroundReconcile()
+	return out, nil
+}
+
+// APIIndexStatus implements defs.APICompatServer.
+func (s *Server) APIIndexStatus() (*defs.APICompatIndexStatus, error) {
+	if s.Index == nil {
+		return nil, fmt.Errorf("recording index is not available")
+	}
+
+	s.reconcileStatusMu.RLock()
+	state := s.reconcileState
+	started := s.reconcileStarted
+	s.reconcileStatusMu.RUnlock()
+	if state == "" {
+		state = defs.APICompatIndexStatusIdle
+	}
+
+	current := s.Index.ProgressPath()
+	pending := s.Index.NeedsRebuildPaths()
+	queue := make([]string, 0, len(pending))
+	for _, name := range pending {
+		if name == current {
+			continue
+		}
+		queue = append(queue, name)
+	}
+
+	queued := len(queue)
+	if current != "" {
+		for _, name := range pending {
+			if name == current {
+				queued++
+				break
+			}
+		}
+	}
+
+	out := &defs.APICompatIndexStatus{
+		State:             state,
+		Current:           current,
+		Queue:             queue,
+		Queued:            queued,
+		Segments:          s.Index.SegmentCount(),
+		PendingDayRepairs: s.Index.PendingDayRepairCount(),
+	}
+	mem := readProcMem()
+	out.HeapAlloc = mem.heapAlloc
+	out.Goroutines = mem.goroutines
+	dbg := s.Index.DebugSnapshot()
+	out.Debug = &defs.APICompatIndexDebug{
+		SegmentCreate:      dbg.SegmentCreate,
+		SegmentComplete:    dbg.SegmentComplete,
+		SegmentRemove:      dbg.SegmentRemove,
+		WriteMeta:          dbg.WriteMeta,
+		WriteMetaAvgMs:     dbg.WriteMetaAvgMs,
+		PersistUpsert:      dbg.PersistUpsert,
+		ReconcilePath:      dbg.ReconcilePath,
+		ReconcilePathAvgMs: dbg.ReconcilePathAvgMs,
+		InspectFMP4:        dbg.InspectFMP4,
+		InspectFMP4AvgMs:   dbg.InspectFMP4AvgMs,
+		SlowOps:            dbg.SlowOps,
+		LastCompleteAgo:    formatAgo(dbg.LastComplete),
+		LastWriteMetaAgo:   formatAgo(dbg.LastWriteMeta),
+	}
+	if !started.IsZero() && state != defs.APICompatIndexStatusIdle {
+		t := started
+		out.Started = &t
+	}
+	if out.Queue == nil {
+		out.Queue = []string{}
+	}
+	return out, nil
 }
 
 // Log implements logger.Writer.
@@ -322,6 +605,12 @@ func playlistAuthQuery(ctx *gin.Context) string {
 		if creds != nil && creds.Token != "" {
 			out.Set("token", creds.Token)
 		}
+	}
+	// Sticky session for players that do not store cookies (ExoPlayer).
+	if sx := sessionFromGin(ctx); sx != nil {
+		out.Set(sessionQueryParamName, sx.secret.String())
+	} else if sid := q.Get(sessionQueryParamName); sid != "" {
+		out.Set(sessionQueryParamName, sid)
 	}
 	return out.Encode()
 }

@@ -28,6 +28,12 @@ type APISystemMetricsMemory struct {
 	ProcessRssBytes uint64  `json:"processRssBytes"`
 }
 
+// Recording disk health as reported by GET /v3/metrics/system.
+const (
+	APIDiskStatusOK    = "ok"
+	APIDiskStatusError = "error"
+)
+
 // APISystemMetricsDisk is usage and IO of a volume used for recordings.
 type APISystemMetricsDisk struct {
 	Path             string  `json:"path"`
@@ -37,6 +43,11 @@ type APISystemMetricsDisk struct {
 	UsedPercent      float64 `json:"usedPercent"`
 	ReadBytesPerSec  float64 `json:"readBytesPerSec"`
 	WriteBytesPerSec float64 `json:"writeBytesPerSec"`
+	// Status is "ok" when MediaMTX can write to the disk, "error" when the
+	// volume is missing, hung, or skipped after a write failure.
+	Status string `json:"status"`
+	// Error is set when Status is "error".
+	Error string `json:"error,omitempty"`
 }
 
 // APISystemMetricsNIC is traffic of a network interface.

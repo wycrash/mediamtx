@@ -93,6 +93,30 @@ func atLeastOneRecordDeleteAfter(pathConfs map[string]*conf.Path) bool {
 	return false
 }
 
+func atLeastOneDeleteUntilPercent(storages map[string]*conf.Storage) bool {
+	for _, s := range storages {
+		if s != nil && s.DeleteUntilPercent != nil && *s.DeleteUntilPercent > 0 {
+			return true
+		}
+	}
+	return false
+}
+
+func needsRecordCleaner(pathConfs map[string]*conf.Path, storages map[string]*conf.Storage) bool {
+	return atLeastOneRecordDeleteAfter(pathConfs) || atLeastOneDeleteUntilPercent(storages)
+}
+
+func (p *Core) wireRecordCleanerLister() {
+	if p.recordCleaner == nil {
+		return
+	}
+	if p.compatServer != nil && p.compatServer.Index != nil {
+		p.recordCleaner.SetSegmentLister(p.compatServer.Index)
+		return
+	}
+	p.recordCleaner.SetSegmentLister(nil)
+}
+
 func getRTPMaxPayloadSize(udpMaxPayloadSize int, rtspEncryption conf.Encryption) int {
 	// UDP max payload size - 12 (RTP header)
 	v := udpMaxPayloadSize - 12
@@ -139,18 +163,20 @@ type Core struct {
 	playbackServer  *playback.Server
 	pathManager     *pathManager
 	storageReg      *storage.Registry
-	rtspServer      *rtsp.Server
-	rtspsServer     *rtsp.Server
-	rtmpServer      *rtmp.Server
-	rtmpsServer     *rtmp.Server
-	hlsServer       *hls.Server
-	compatServer    *compatapi.Server
-	webRTCServer    *webrtc.Server
-	srtServer       *srt.Server
-	moqServer       *moq.Server
-	sysMetrics      *sysmetrics.Collector
-	api             *api.API
-	confWatcher     *confwatcher.ConfWatcher
+	// recordingMaintMu serializes recordcleaner ticks and DVR index rebuilds.
+	recordingMaintMu sync.Mutex
+	rtspServer       *rtsp.Server
+	rtspsServer      *rtsp.Server
+	rtmpServer       *rtmp.Server
+	rtmpsServer      *rtmp.Server
+	hlsServer        *hls.Server
+	compatServer     *compatapi.Server
+	webRTCServer     *webrtc.Server
+	srtServer        *srt.Server
+	moqServer        *moq.Server
+	sysMetrics       *sysmetrics.Collector
+	api              *api.API
+	confWatcher      *confwatcher.ConfWatcher
 
 	// in
 	chAPIConfigSet chan *conf.Conf
@@ -481,17 +507,31 @@ func (p *Core) createResources(initial bool) error {
 	}
 
 	if p.recordCleaner == nil &&
-		atLeastOneRecordDeleteAfter(p.conf.Paths) {
+		needsRecordCleaner(p.conf.Paths, p.conf.Storages) {
 		p.recordCleaner = &recordcleaner.Cleaner{
 			PathConfs: p.conf.Paths,
+			Storages:  p.conf.Storages,
 			Parent:    p,
+			MaintMu:   &p.recordingMaintMu,
 			OnSegmentRemove: func(fpath string) {
 				if p.pathManager != nil {
 					p.pathManager.onRecordSegmentRemove(fpath)
 				}
 			},
+			OnSpaceFreed: func() {
+				if p.storageReg != nil {
+					p.storageReg.InvalidateUsage()
+				}
+			},
+			IsActiveSegment: func(fpath string) bool {
+				if p.pathManager == nil {
+					return false
+				}
+				return p.pathManager.isActiveRecordSegment(fpath)
+			},
 		}
 		p.recordCleaner.Initialize()
+		p.wireRecordCleanerLister()
 	}
 
 	if p.conf.Playback &&
@@ -517,6 +557,43 @@ func (p *Core) createResources(initial bool) error {
 		p.playbackServer = i
 	}
 
+	// Compat HTTP must listen before recorders start so live segments are
+	// not lost while the DVR index is still loading from disk.
+	if p.conf.CompatAPI &&
+		p.compatServer == nil {
+		i := &compatapi.Server{
+			Address:             p.conf.CompatAPIAddress,
+			Encryption:          p.conf.CompatAPIEncryption,
+			ServerKey:           p.conf.CompatAPIServerKey,
+			ServerCert:          p.conf.CompatAPIServerCert,
+			DumpPackets:         p.conf.DumpPackets,
+			AllowOrigins:        p.conf.CompatAPIAllowOrigins,
+			TrustedProxies:      p.conf.CompatAPITrustedProxies,
+			ReadTimeout:         p.conf.ReadTimeout,
+			WriteTimeout:        p.conf.WriteTimeout,
+			TimeOffsetMinutes:   p.conf.CompatAPITimeOffsetMinutes,
+			IndexUpdateInterval: p.conf.CompatAPIIndexUpdateInterval,
+			HLSHandler:          p.hlsServer,
+			PathConfs:           p.conf.Paths,
+			PathManager:         p.pathManager,
+			AuthManager:         p.authManager,
+			Parent:              p,
+			MaintMu:             &p.recordingMaintMu,
+		}
+		err = i.Initialize()
+		if err != nil {
+			return err
+		}
+		p.compatServer = i
+		if p.api != nil {
+			p.api.SetCompatServer(i)
+		}
+		if p.pathManager != nil {
+			p.pathManager.SetRecordSegmentListener(i)
+		}
+		p.wireRecordCleanerLister()
+	}
+
 	if p.pathManager == nil {
 		rtpMaxPayloadSize := getRTPMaxPayloadSize(p.conf.UDPMaxPayloadSize, p.conf.RTSPEncryption)
 
@@ -524,6 +601,11 @@ func (p *Core) createResources(initial bool) error {
 			p.storageReg = storage.NewRegistry(p.conf.Storages)
 		} else {
 			p.storageReg.Reload(p.conf.Storages)
+		}
+		p.storageReg.OnPressure = func() {
+			if p.recordCleaner != nil {
+				p.recordCleaner.Kick()
+			}
 		}
 
 		p.pathManager = &pathManager{
@@ -543,8 +625,19 @@ func (p *Core) createResources(initial bool) error {
 			metrics:           p.metrics,
 			storage:           p.storageReg,
 			parent:            p,
+			kickRecordCleanerFn: func() {
+				if p.recordCleaner != nil {
+					p.recordCleaner.Kick()
+				}
+			},
+		}
+		if p.compatServer != nil {
+			p.pathManager.SetRecordSegmentListener(p.compatServer)
 		}
 		p.pathManager.initialize()
+		if p.compatServer != nil {
+			p.compatServer.SetPathManager(p.pathManager)
+		}
 	}
 
 	if p.conf.RTSP &&
@@ -723,34 +816,8 @@ func (p *Core) createResources(initial bool) error {
 			return err
 		}
 		p.hlsServer = i
-	}
-
-	if p.conf.CompatAPI &&
-		p.compatServer == nil {
-		i := &compatapi.Server{
-			Address:           p.conf.CompatAPIAddress,
-			Encryption:        p.conf.CompatAPIEncryption,
-			ServerKey:         p.conf.CompatAPIServerKey,
-			ServerCert:        p.conf.CompatAPIServerCert,
-			DumpPackets:       p.conf.DumpPackets,
-			AllowOrigins:      p.conf.CompatAPIAllowOrigins,
-			TrustedProxies:    p.conf.CompatAPITrustedProxies,
-			ReadTimeout:       p.conf.ReadTimeout,
-			WriteTimeout:      p.conf.WriteTimeout,
-			TimeOffsetMinutes: p.conf.CompatAPITimeOffsetMinutes,
-			HLSHandler:        p.hlsServer,
-			PathConfs:         p.conf.Paths,
-			PathManager:       p.pathManager,
-			AuthManager:       p.authManager,
-			Parent:            p,
-		}
-		err = i.Initialize()
-		if err != nil {
-			return err
-		}
-		p.compatServer = i
-		if p.pathManager != nil {
-			p.pathManager.SetRecordSegmentListener(i)
+		if p.compatServer != nil {
+			p.compatServer.SetHLSHandler(i)
 		}
 	}
 
@@ -841,6 +908,15 @@ func (p *Core) createResources(initial bool) error {
 			i := &sysmetrics.Collector{
 				Interval:    time.Second,
 				RecordPaths: sysmetrics.RecordDirs(p.conf.PathDefaults.RecordPath, p.conf.Paths),
+				DiskHealth: func(path string) (bool, string) {
+					if p.storageReg == nil {
+						return true, ""
+					}
+					if reason, bad := p.storageReg.Unusable(path); bad {
+						return false, reason
+					}
+					return true, ""
+				},
 			}
 			err = i.Initialize()
 			if err != nil {
@@ -957,10 +1033,15 @@ func (p *Core) closeResources(newConf *conf.Conf, calledByAPI bool) {
 		closeLogger
 
 	closeRecorderCleaner := newConf == nil ||
-		atLeastOneRecordDeleteAfter(newConf.Paths) != atLeastOneRecordDeleteAfter(p.conf.Paths) ||
+		needsRecordCleaner(newConf.Paths, newConf.Storages) != needsRecordCleaner(p.conf.Paths, p.conf.Storages) ||
 		closeLogger
-	if !closeRecorderCleaner && p.recordCleaner != nil && !reflect.DeepEqual(newConf.Paths, p.conf.Paths) {
-		p.recordCleaner.ReloadPathConfs(newConf.Paths)
+	if !closeRecorderCleaner && p.recordCleaner != nil {
+		if !reflect.DeepEqual(newConf.Paths, p.conf.Paths) {
+			p.recordCleaner.ReloadPathConfs(newConf.Paths)
+		}
+		if !reflect.DeepEqual(newConf.Storages, p.conf.Storages) {
+			p.recordCleaner.ReloadStorages(newConf.Storages)
+		}
 	}
 
 	closePlaybackServer := newConf == nil ||
@@ -1119,6 +1200,7 @@ func (p *Core) closeResources(newConf *conf.Conf, calledByAPI bool) {
 		!slices.Equal(newConf.CompatAPIAllowOrigins, p.conf.CompatAPIAllowOrigins) ||
 		!reflect.DeepEqual(newConf.CompatAPITrustedProxies, p.conf.CompatAPITrustedProxies) ||
 		newConf.CompatAPITimeOffsetMinutes != p.conf.CompatAPITimeOffsetMinutes ||
+		newConf.CompatAPIIndexUpdateInterval != p.conf.CompatAPIIndexUpdateInterval ||
 		newConf.ReadTimeout != p.conf.ReadTimeout ||
 		newConf.WriteTimeout != p.conf.WriteTimeout ||
 		newConf.DumpPackets != p.conf.DumpPackets ||
@@ -1203,7 +1285,6 @@ func (p *Core) closeResources(newConf *conf.Conf, calledByAPI bool) {
 		closeRTMPServer ||
 		closeRTMPSServer ||
 		closeHLSServer ||
-		closeCompatServer ||
 		closeWebRTCServer ||
 		closeSRTServer ||
 		closeMoQServer ||
@@ -1246,11 +1327,15 @@ func (p *Core) closeResources(newConf *conf.Conf, calledByAPI bool) {
 	}
 
 	if closeCompatServer && p.compatServer != nil && newConf != nil {
+		if p.api != nil {
+			p.api.SetCompatServer(nil)
+		}
 		if p.pathManager != nil {
 			p.pathManager.SetRecordSegmentListener(nil)
 		}
 		p.compatServer.Close()
 		p.compatServer = nil
+		p.wireRecordCleanerLister()
 	}
 
 	if closeHLSServer && p.hlsServer != nil {
@@ -1289,6 +1374,7 @@ func (p *Core) closeResources(newConf *conf.Conf, calledByAPI bool) {
 	if newConf == nil && p.compatServer != nil {
 		p.compatServer.Close()
 		p.compatServer = nil
+		p.wireRecordCleanerLister()
 	}
 
 	if closePlaybackServer && p.playbackServer != nil {

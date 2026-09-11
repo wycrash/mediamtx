@@ -21,6 +21,9 @@ const (
 type Collector struct {
 	Interval    time.Duration
 	RecordPaths []string
+	// DiskHealth reports whether a recording root is writable.
+	// ok=false means the disk is in error and MediaMTX is not writing to it.
+	DiskHealth func(path string) (ok bool, reason string)
 
 	sample sampler
 	now    func() time.Time
@@ -152,7 +155,10 @@ func (c *Collector) collect() {
 
 	nextDisk := make(map[string]ioSample, len(recordPaths))
 	for _, dir := range recordPaths {
-		d := defs.APISystemMetricsDisk{Path: dir}
+		d := defs.APISystemMetricsDisk{
+			Path:   dir,
+			Status: defs.APIDiskStatusOK,
+		}
 		usagePath := existingAncestor(dir)
 		if u, err := c.sample.diskUsage(usagePath); err == nil {
 			d.TotalBytes = u.total
@@ -167,6 +173,13 @@ func (c *Collector) collect() {
 			if prev, found := prevDisk[d.Path]; found {
 				d.ReadBytesPerSec = perSec(prev.readBytes, io.readBytes, dt)
 				d.WriteBytesPerSec = perSec(prev.writeBytes, io.writeBytes, dt)
+			}
+		}
+
+		if c.DiskHealth != nil {
+			if ok, reason := c.DiskHealth(dir); !ok {
+				d.Status = defs.APIDiskStatusError
+				d.Error = reason
 			}
 		}
 

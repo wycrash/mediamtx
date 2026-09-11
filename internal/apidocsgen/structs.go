@@ -59,6 +59,14 @@ var structs = []struct {
 		typ:          reflect.TypeOf(defs.APIHLSSessionList{}),
 	},
 	{
+		externalName: "CompatIndexRebuild",
+		typ:          reflect.TypeOf(defs.APICompatIndexRebuild{}),
+	},
+	{
+		externalName: "CompatIndexStatus",
+		typ:          reflect.TypeOf(defs.APICompatIndexStatus{}),
+	},
+	{
 		externalName: "Info",
 		typ:          reflect.TypeOf(defs.APIInfo{}),
 	},
@@ -436,6 +444,9 @@ func isStructEnum(rt reflect.Type) bool {
 		return true
 
 	case reflect.TypeOf(defs.APIWebRTCSessionState("")):
+		return true
+
+	case reflect.TypeOf(defs.APICompatIndexStatusState("")):
 		return true
 
 	case reflect.TypeOf(defs.APIMoQSessionState("")):

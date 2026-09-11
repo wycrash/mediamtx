@@ -131,6 +131,7 @@ func TestCollectorSnapshot(t *testing.T) {
 	require.InDelta(t, 2000, snap.Network[0].SentBytesPerSec, 0.1)
 	require.InDelta(t, 100, snap.Network[1].RecvBytesPerSec, 0.1)
 	require.NotEmpty(t, snap.Disks)
+	require.Equal(t, "ok", snap.Disks[0].Status)
 	require.InDelta(t, 2000, snap.Disks[0].ReadBytesPerSec, 0.1)
 	require.InDelta(t, 4000, snap.Disks[0].WriteBytesPerSec, 0.1)
 	require.Len(t, snap.History, 2)
@@ -186,6 +187,27 @@ func TestCollectorHistoryRing(t *testing.T) {
 	require.Equal(t, 5.0, snap.History[0].CPUPercent)
 	require.Equal(t, float64(cap+4), snap.History[cap-1].CPUPercent)
 	require.Equal(t, clock, snap.History[cap-1].CollectedAt)
+}
+
+func TestCollectorDiskHealthError(t *testing.T) {
+	dir := t.TempDir()
+	fake := &fakeSampler{cores: 1, usage: diskUsage{total: 1, free: 1}}
+	c := &Collector{
+		Interval:    time.Hour,
+		RecordPaths: []string{dir},
+		sample:      fake,
+		DiskHealth: func(path string) (bool, string) {
+			return false, "A device which does not exist was specified."
+		},
+	}
+	err := c.Initialize()
+	require.NoError(t, err)
+	defer c.Close()
+
+	snap := c.Snapshot()
+	require.Len(t, snap.Disks, 1)
+	require.Equal(t, "error", snap.Disks[0].Status)
+	require.Contains(t, snap.Disks[0].Error, "device which does not exist")
 }
 
 func TestIsLoopback(t *testing.T) {

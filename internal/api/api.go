@@ -146,11 +146,12 @@ func (a *API) Initialize() error {
 		group.POST("/hlssessions/kick/:id", a.onHLSSessionsKick)
 	}
 
-	if !interfaceIsEmpty(a.CompatServer) {
-		group.GET("/compatsessions/list", a.onCompatSessionsList)
-		group.GET("/compatsessions/get/:id", a.onCompatSessionsGet)
-		group.POST("/compatsessions/kick/:id", a.onCompatSessionsKick)
-	}
+	group.GET("/compatsessions/list", a.onCompatSessionsList)
+	group.GET("/compatsessions/get/:id", a.onCompatSessionsGet)
+	group.POST("/compatsessions/kick/:id", a.onCompatSessionsKick)
+	group.GET("/compatindex/status", a.onCompatIndexStatus)
+	group.POST("/compatindex/rebuild", a.onCompatIndexRebuildAll)
+	group.POST("/compatindex/rebuild/*name", a.onCompatIndexRebuildPath)
 
 	if !interfaceIsEmpty(a.RTSPServer) {
 		group.GET("/rtspconns/list", a.onRTSPConnsList)
@@ -378,4 +379,15 @@ func (a *API) ReloadConf(conf *conf.Conf) {
 	a.mutex.Lock()
 	defer a.mutex.Unlock()
 	a.Conf = conf
+}
+
+// SetCompatServer attaches or clears the Compat API after it starts or stops.
+// The control API may already be listening while the DVR index is still loading.
+func (a *API) SetCompatServer(cs defs.APICompatServer) {
+	if a == nil {
+		return
+	}
+	a.mutex.Lock()
+	a.CompatServer = cs
+	a.mutex.Unlock()
 }

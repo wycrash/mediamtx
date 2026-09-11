@@ -209,6 +209,7 @@ func TestSystemMetrics(t *testing.T) {
 					UsedPercent:      25,
 					ReadBytesPerSec:  10,
 					WriteBytesPerSec: 20,
+					Status:           defs.APIDiskStatusOK,
 				}},
 				Network: []defs.APISystemMetricsNIC{{
 					Name:            "eth0",
@@ -266,6 +267,7 @@ func TestSystemMetrics(t *testing.T) {
 				"usedPercent":      float64(25),
 				"readBytesPerSec":  float64(10),
 				"writeBytesPerSec": float64(20),
+				"status":           "ok",
 			},
 		},
 		"network": []any{

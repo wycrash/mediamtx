@@ -1,0 +1,260 @@
+package compatapi
+
+import (
+	"os"
+	"path/filepath"
+	"testing"
+	"time"
+
+	"github.com/stretchr/testify/require"
+
+	"github.com/bluenviron/mediamtx/internal/conf"
+	"github.com/bluenviron/mediamtx/internal/defs"
+	"github.com/bluenviron/mediamtx/internal/test"
+)
+
+func TestMarkNeedsRebuildForcesDiskRescan(t *testing.T) {
+	dir := t.TempDir()
+	cam := filepath.Join(dir, "cam1")
+	require.NoError(t, os.MkdirAll(cam, 0o755))
+	a := filepath.Join(cam, "2020-01-01_00-00-00-000000.mp4")
+	b := filepath.Join(cam, "2020-01-01_00-00-05-000000.mp4")
+	writeNamedFMP4(t, a, 2)
+	writeNamedFMP4(t, b, 2)
+
+	pathConf := &conf.Path{
+		Name:                  "cam1",
+		RecordPath:            filepath.Join(dir, "%path/%Y-%m-%d_%H-%M-%S-%f"),
+		RecordFormat:          conf.RecordFormatFMP4,
+		RecordSegmentDuration: conf.Duration(5 * time.Second),
+	}
+	confs := map[string]*conf.Path{"cam1": pathConf}
+
+	idx := NewIndex()
+	require.Equal(t, 0, idx.LoadFromDisk(confs).Segments)
+	require.Equal(t, 2, idx.ReconcileAll(nil, false).Segments)
+	require.Equal(t, 0, idx.NeedsRebuildCount())
+
+	idx.MarkNeedsRebuild("cam1")
+	require.Equal(t, 1, idx.NeedsRebuildCount())
+	st := idx.ReconcileAll(nil, false)
+	require.Equal(t, 1, st.Built)
+	require.Equal(t, 2, st.Segments)
+	require.Equal(t, 0, idx.NeedsRebuildCount())
+	idx.ClosePersist()
+}
+
+func TestAPIIndexRebuildCoalescesPaths(t *testing.T) {
+	dir := t.TempDir()
+	for _, name := range []string{"cam1", "cam2", "cam3"} {
+		cam := filepath.Join(dir, name)
+		require.NoError(t, os.MkdirAll(cam, 0o755))
+		writeNamedFMP4(t, filepath.Join(cam, "2020-01-01_00-00-00-000000.mp4"), 2)
+	}
+
+	pathConfs := map[string]*conf.Path{}
+	for _, name := range []string{"cam1", "cam2", "cam3"} {
+		pathConfs[name] = &conf.Path{
+			Name:                  name,
+			RecordPath:            filepath.Join(dir, "%path/%Y-%m-%d_%H-%M-%S-%f"),
+			RecordFormat:          conf.RecordFormatFMP4,
+			RecordSegmentDuration: conf.Duration(5 * time.Second),
+		}
+	}
+
+	s := &Server{
+		Address:      "127.0.0.1:0",
+		ReadTimeout:  conf.Duration(10 * time.Second),
+		WriteTimeout: conf.Duration(10 * time.Second),
+		PathConfs:    pathConfs,
+		AuthManager:  test.NilAuthManager,
+		Parent:       test.NilLogger,
+	}
+	require.NoError(t, s.Initialize())
+	defer s.Close()
+
+	require.Eventually(t, func() bool {
+		st, err := s.APIIndexStatus()
+		return err == nil && st.State == defs.APICompatIndexStatusIdle
+	}, 5*time.Second, 20*time.Millisecond)
+
+	out1, err := s.APIIndexRebuild("cam1")
+	require.NoError(t, err)
+	require.Equal(t, defs.APIOKStatusOK, out1.Status)
+	require.Equal(t, "cam1", out1.Path)
+
+	out2, err := s.APIIndexRebuild("cam1")
+	require.NoError(t, err)
+	require.Equal(t, out1.Queued, out2.Queued, "duplicate cam1 must not grow the queue")
+
+	out3, err := s.APIIndexRebuild("cam2")
+	require.NoError(t, err)
+	require.GreaterOrEqual(t, out3.Queued, 2)
+
+	outAll, err := s.APIIndexRebuild("")
+	require.NoError(t, err)
+	require.True(t, outAll.All)
+	require.GreaterOrEqual(t, outAll.Queued, 3)
+
+	_, err = s.APIIndexRebuild("no-such-cam")
+	require.ErrorIs(t, err, ErrPathNotFound)
+
+	st, err := s.APIIndexStatus()
+	require.NoError(t, err)
+	require.Contains(t, []defs.APICompatIndexStatusState{
+		defs.APICompatIndexStatusIdle,
+		defs.APICompatIndexStatusRebuild,
+		defs.APICompatIndexStatusUpdate,
+	}, st.State)
+	require.NotNil(t, st.Queue)
+
+	// Worker must finish without leaving permanent incomplete marks.
+	require.Eventually(t, func() bool {
+		return s.Index.NeedsRebuildCount() == 0
+	}, 5*time.Second, 20*time.Millisecond)
+
+	st, err = s.APIIndexStatus()
+	require.NoError(t, err)
+	require.Equal(t, defs.APICompatIndexStatusIdle, st.State)
+	require.Empty(t, st.Current)
+	require.Empty(t, st.Queue)
+	require.Equal(t, 0, st.Queued)
+}
+
+// Live CompleteSegment during rebuild marks the day pinned with only the live
+// edge. pinDay must still merge the day snapshot or archive m3u8 stays empty.
+func TestPinDayMergesWhenAlreadyPinned(t *testing.T) {
+	dir := t.TempDir()
+	cam := filepath.Join(dir, "cam1")
+	require.NoError(t, os.MkdirAll(cam, 0o755))
+	a := filepath.Join(cam, "2020-01-01_00-00-00-000000.mp4")
+	b := filepath.Join(cam, "2020-01-01_00-00-05-000000.mp4")
+	writeNamedFMP4(t, a, 2)
+	writeNamedFMP4(t, b, 2)
+
+	pathConf := &conf.Path{
+		Name:                  "cam1",
+		RecordPath:            filepath.Join(dir, "%path/%Y-%m-%d_%H-%M-%S-%f"),
+		RecordFormat:          conf.RecordFormatFMP4,
+		RecordSegmentDuration: conf.Duration(5 * time.Second),
+	}
+	confs := map[string]*conf.Path{"cam1": pathConf}
+
+	idx := NewIndex()
+	require.Equal(t, 0, idx.LoadFromDisk(confs).Segments)
+	require.Equal(t, 2, idx.ReconcileAll(nil, false).Segments)
+
+	day := "2020-01-01"
+	start := time.Date(2020, 1, 1, 0, 0, 0, 0, time.Local)
+
+	// Simulate live bindPersist during rebuild: day pinned, only the newest seg in RAM.
+	idx.mutex.Lock()
+	pe := idx.paths["cam1"]
+	require.NotNil(t, pe)
+	var latest *IndexedSegment
+	for _, s := range pe.segments {
+		if latest == nil || s.Start.After(latest.Start) {
+			latest = s
+		}
+	}
+	require.NotNil(t, latest)
+	pe.segments = []*IndexedSegment{latest}
+	pe.byName = map[string]*IndexedSegment{latest.Name(): latest}
+	pe.pinnedDays = map[string]struct{}{day: {}}
+	idx.mutex.Unlock()
+
+	require.Len(t, idx.SegmentsInWindow("cam1", start, time.Minute), 1, "precondition: only live edge in memory")
+
+	idx.pinDay("cam1", day)
+	out := idx.SegmentsInWindow("cam1", start, time.Minute)
+	require.Len(t, out, 2, "pinDay must merge day snapshot into an already-pinned day")
+
+	body := GenerateArchiveM3U8Indexed(conf.RecordFormatFMP4, out, 5*time.Second, 0, 0, start)
+	require.Contains(t, body, filepath.Base(a))
+	require.Contains(t, body, filepath.Base(b))
+	require.NotContains(t, body, "#EXT-X-ENDLIST\n#EXTM3U") // not only header+end
+	idx.ClosePersist()
+}
+
+func TestRebuildOnlyDamagedDay(t *testing.T) {
+	dir := t.TempDir()
+	cam := filepath.Join(dir, "cam1")
+	require.NoError(t, os.MkdirAll(cam, 0o755))
+	d1 := time.Date(2020, 1, 1, 0, 0, 0, 0, time.Local)
+	d2 := time.Date(2020, 1, 2, 0, 0, 0, 0, time.Local)
+	a := filepath.Join(cam, d1.Format("2006-01-02_15-04-05")+"-000000.mp4")
+	b := filepath.Join(cam, d1.Add(5*time.Second).Format("2006-01-02_15-04-05")+"-000000.mp4")
+	c := filepath.Join(cam, d2.Format("2006-01-02_15-04-05")+"-000000.mp4")
+	writeNamedFMP4(t, a, 2)
+	writeNamedFMP4(t, b, 2)
+	writeNamedFMP4(t, c, 2)
+
+	pathConf := &conf.Path{
+		Name:                  "cam1",
+		RecordPath:            filepath.Join(dir, "%path/%Y-%m-%d_%H-%M-%S-%f"),
+		RecordFormat:          conf.RecordFormatFMP4,
+		RecordSegmentDuration: conf.Duration(5 * time.Second),
+	}
+	confs := map[string]*conf.Path{"cam1": pathConf}
+
+	idx := NewIndex()
+	require.Equal(t, 0, idx.LoadFromDisk(confs).Segments)
+	require.Equal(t, 3, idx.ReconcileAll(nil, false).Segments)
+	idx.ClosePersist()
+
+	layout := makeDvrLayout(pathConf, "cam1")
+	day1 := d1.Format("2006-01-02")
+	day2 := d2.Format("2006-01-02")
+	require.FileExists(t, layout.dayJournal(day1))
+	require.FileExists(t, layout.dayJournal(day2))
+	require.NoError(t, os.WriteFile(layout.dayJournal(day2), []byte("broken"), 0o644))
+
+	idx2 := NewIndex()
+	st := idx2.LoadFromDisk(confs)
+	require.Equal(t, 1, st.DiskPaths, "meta still healthy → path loads from disk")
+	require.False(t, idx2.pathNeedsRebuild("cam1"))
+	require.True(t, idx2.HasPendingDayRepairs())
+
+	st = idx2.ReconcileAll(nil, false)
+	require.Equal(t, 1, st.Built)
+	require.False(t, idx2.HasPendingDayRepairs())
+	require.FileExists(t, layout.dayJournal(day2))
+
+	out1 := idx2.SegmentsInWindow("cam1", d1, time.Minute)
+	require.Len(t, out1, 2)
+	out2 := idx2.SegmentsInWindow("cam1", d2, time.Minute)
+	require.Len(t, out2, 1)
+	idx2.ClosePersist()
+}
+
+func TestRebuildArchivePlaylistNotEmpty(t *testing.T) {
+	dir := t.TempDir()
+	cam := filepath.Join(dir, "cam1")
+	require.NoError(t, os.MkdirAll(cam, 0o755))
+	a := filepath.Join(cam, "2020-01-01_12-00-00-000000.mp4")
+	b := filepath.Join(cam, "2020-01-01_12-00-05-000000.mp4")
+	writeNamedFMP4(t, a, 2)
+	writeNamedFMP4(t, b, 2)
+
+	pathConf := &conf.Path{
+		Name:                  "cam1",
+		RecordPath:            filepath.Join(dir, "%path/%Y-%m-%d_%H-%M-%S-%f"),
+		RecordFormat:          conf.RecordFormatFMP4,
+		RecordSegmentDuration: conf.Duration(5 * time.Second),
+	}
+	confs := map[string]*conf.Path{"cam1": pathConf}
+
+	idx := NewIndex()
+	require.Equal(t, 0, idx.LoadFromDisk(confs).Segments)
+	require.Equal(t, 2, idx.ReconcileAll(nil, false).Segments)
+	idx.MarkNeedsRebuild("cam1")
+	require.Equal(t, 2, idx.ReconcileAll(nil, false).Segments)
+
+	start := time.Date(2020, 1, 1, 12, 0, 0, 0, time.Local)
+	out := idx.SegmentsInWindow("cam1", start, time.Minute)
+	require.Len(t, out, 2)
+	body := GenerateArchiveM3U8Indexed(conf.RecordFormatFMP4, out, 5*time.Second, 0, 0, start)
+	require.Contains(t, body, "#EXTINF:")
+	require.Contains(t, body, filepath.Base(a))
+	idx.ClosePersist()
+}

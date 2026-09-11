@@ -57,6 +57,7 @@ func TestConfFromFile(t *testing.T) {
 			RecordPartDuration:         Duration(1 * time.Second),
 			RecordMaxPartSize:          50 * 1024 * 1024,
 			RecordSegmentDuration:      3600000000000,
+			RecordHlsChunkDuration:     Duration(5 * time.Second),
 			RecordDeleteAfter:          86400000000000,
 			HLSVariant:                 HLSVariant(gohlslib.MuxerVariantLowLatency),
 			RTSPUDPSourcePortRange:     []uint{32768, 60999},
@@ -609,6 +610,13 @@ func TestConfErrors(t *testing.T) {
 				"    recordSegmentDuration: 30m\n" +
 				"    recordDeleteAfter: 20m\n",
 			`'recordDeleteAfter' cannot be lower than 'recordSegmentDuration'`,
+		},
+		{
+			"invalid record hls chunk duration",
+			"paths:\n" +
+				"  my_path:\n" +
+				"    recordHlsChunkDuration: -1s\n",
+			`'recordHlsChunkDuration' cannot be negative`,
 		},
 		{
 			"missing rtpAddress with UDP and no encryption",

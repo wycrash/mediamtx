@@ -319,14 +319,15 @@ type Conf struct {
 	PlaybackTrustedProxies IPNetworks `json:"playbackTrustedProxies"`
 
 	// Compat API (DVR endpoints on a single HTTP port)
-	CompatAPI                  bool       `json:"compatAPI"`
-	CompatAPIAddress           string     `json:"compatAPIAddress"`
-	CompatAPIEncryption        bool       `json:"compatAPIEncryption"`
-	CompatAPIServerKey         string     `json:"compatAPIServerKey"`
-	CompatAPIServerCert        string     `json:"compatAPIServerCert"`
-	CompatAPIAllowOrigins      []string   `json:"compatAPIAllowOrigins"`
-	CompatAPITrustedProxies    IPNetworks `json:"compatAPITrustedProxies"`
-	CompatAPITimeOffsetMinutes int        `json:"compatAPITimeOffsetMinutes"`
+	CompatAPI                     bool       `json:"compatAPI"`
+	CompatAPIAddress              string     `json:"compatAPIAddress"`
+	CompatAPIEncryption           bool       `json:"compatAPIEncryption"`
+	CompatAPIServerKey            string     `json:"compatAPIServerKey"`
+	CompatAPIServerCert           string     `json:"compatAPIServerCert"`
+	CompatAPIAllowOrigins         []string   `json:"compatAPIAllowOrigins"`
+	CompatAPITrustedProxies       IPNetworks `json:"compatAPITrustedProxies"`
+	CompatAPITimeOffsetMinutes    int        `json:"compatAPITimeOffsetMinutes"`
+	CompatAPIIndexUpdateInterval  Duration   `json:"compatAPIIndexUpdateInterval"`
 
 	// RTSP server
 	RTSP                  bool             `json:"rtsp"`
@@ -501,6 +502,7 @@ func (conf *Conf) setDefaults() {
 	conf.CompatAPIServerKey = "server.key"
 	conf.CompatAPIServerCert = "server.crt"
 	conf.CompatAPIAllowOrigins = []string{"*"}
+	conf.CompatAPIIndexUpdateInterval = 10 * Duration(time.Minute)
 
 	// RTSP server
 	conf.RTSP = true
@@ -856,6 +858,9 @@ func (conf *Conf) Validate(l logger.Writer) error {
 	if conf.CompatAPI {
 		if conf.CompatAPIAddress == "" {
 			return fmt.Errorf("'compatAPIAddress' must be set when compatAPI is enabled")
+		}
+		if conf.CompatAPIIndexUpdateInterval < 0 {
+			return fmt.Errorf("'compatAPIIndexUpdateInterval' must be >= 0 (0 disables the periodic index update)")
 		}
 		if !conf.HLS {
 			return fmt.Errorf("'hls' must be enabled when compatAPI is enabled (live playlists are served by the HLS muxer)")

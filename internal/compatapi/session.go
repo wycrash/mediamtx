@@ -20,8 +20,9 @@ import (
 )
 
 const (
-	sessionCookieName = "compatSession"
-	sessionGinKey     = "compatSession"
+	sessionCookieName     = "compatSession"
+	sessionQueryParamName = "session"
+	sessionGinKey         = "compatSession"
 )
 
 var (
@@ -38,6 +39,7 @@ type session struct {
 	secret     uuid.UUID
 	created    time.Time
 	remoteAddr string
+	ip         string
 	path       string
 	query      string
 	userAgent  string
@@ -161,6 +163,10 @@ func (s *Server) sessionForRequest(ctx *gin.Context) (*session, bool) {
 		sx.lastReq.Store(time.Now().UnixNano())
 		return sx, false
 	}
+	if sx := s.sessionFromQuery(ctx); sx != nil {
+		sx.lastReq.Store(time.Now().UnixNano())
+		return sx, false
+	}
 
 	creds := httpp.Credentials(ctx.Request)
 	pathName := requestPathName(ctx.Request.URL.Path)
@@ -169,6 +175,7 @@ func (s *Server) sessionForRequest(ctx *gin.Context) (*session, bool) {
 		secret:     uuid.New(),
 		created:    time.Now(),
 		remoteAddr: httpp.RemoteAddr(ctx),
+		ip:         ctx.ClientIP(),
 		path:       pathName,
 		query:      ctx.Request.URL.RawQuery,
 		userAgent:  ctx.Request.UserAgent(),
@@ -203,7 +210,18 @@ func (s *Server) sessionFromCookie(ctx *gin.Context) *session {
 	if err != nil || c.Value == "" {
 		return nil
 	}
-	secret, err := uuid.Parse(c.Value)
+	return s.sessionBySecret(c.Value, "")
+}
+
+func (s *Server) sessionFromQuery(ctx *gin.Context) *session {
+	return s.sessionBySecret(ctx.Request.URL.Query().Get(sessionQueryParamName), ctx.ClientIP())
+}
+
+func (s *Server) sessionBySecret(rawSecret, clientIP string) *session {
+	if rawSecret == "" {
+		return nil
+	}
+	secret, err := uuid.Parse(rawSecret)
 	if err != nil {
 		return nil
 	}
@@ -212,6 +230,10 @@ func (s *Server) sessionFromCookie(ctx *gin.Context) *session {
 	sx := s.sessionsBySecret[secret]
 	s.sessionsMu.RUnlock()
 	if sx == nil || sx.killed.Load() {
+		return nil
+	}
+	// Query-based lookup is easy to copy; bind to client IP like live HLS.
+	if clientIP != "" && sx.ip != "" && sx.ip != clientIP {
 		return nil
 	}
 	return sx

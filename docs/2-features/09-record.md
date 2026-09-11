@@ -40,18 +40,22 @@ pathDefaults:
   recordMaxPartSize: 50M
   # Minimum duration of each segment.
   recordSegmentDuration: 1h
+  # Target duration of archive/timeshift HLS media entries for fMP4.
+  # 0s = one playlist entry per file. Non-zero splits long files into IDR-aligned chunks.
+  recordHlsChunkDuration: 5s
   # Delete segments after this timespan.
   # Set to 0s to disable automatic deletion.
   recordDeleteAfter: 1d
 ```
 
-To spread recordings across several disks, define a named pool and point the path at it. `recordPath` stays a filename template; the pool owns disks, fill limit, and pick strategy.
+To spread recordings across several disks, define a named pool and point the path at it. `recordPath` stays a filename template; the pool owns disks, fill limit, and pick strategy. With `roundRobin`, **each path** alternates disks on its own (so one camera is not stuck on a single disk because other cameras share the pool). `fillFirst` fills disks in list order.
 
 ```yml
 storages:
   dvr:
     strategy: roundRobin
     maxUsedPercent: 90
+    deleteUntilPercent: 85
     disks:
       - /mnt/storage1/recordings
       - /mnt/storage2/recordings
@@ -62,7 +66,7 @@ pathDefaults:
   storage: dvr
 ```
 
-New segments are written with round-robin among disks that are under `maxUsedPercent` (0 means only skip a disk after ENOSPC). Playback, the recording API, and the DVR index read the union of all disks in the pool. Without `storage`, behavior is unchanged: `recordPath` is a single directory.
+With `deleteUntilPercent` set, reaching `maxUsedPercent` starts deleting the oldest recordings down to that target so **new segments keep being written**; disks are not refused at the max threshold. Without `deleteUntilPercent`, disks at/above `maxUsedPercent` are skipped (0 means only skip after ENOSPC). If a disk disappears or returns I/O errors, new segments go to the remaining disks: the failed disk is skipped for 3 minutes and retried, then skipped for 10 minutes if it fails again. Playback, the recording API, and the DVR index read the union of all disks in the pool. Without `storage`, behavior is unchanged: `recordPath` is a single directory.
 
 All available recording parameters are listed in the [configuration file](../5-references/1-configuration-file.md).
 

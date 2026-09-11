@@ -25,6 +25,7 @@ type recorderInstance struct {
 	onSegmentCreate   OnSegmentCreateFunc
 	onSegmentComplete OnSegmentCompleteFunc
 	pickRoot          PickRootFunc
+	noteRoot          NoteRootFunc
 	parent            logger.Writer
 
 	streamID    uuid.UUID
@@ -111,8 +112,10 @@ func (ri *recorderInstance) createSegmentFile(start time.Time) (*os.File, string
 	var skip []string
 	for {
 		format := ri.pathFormat2
+		root := ""
 		if ri.pickRoot != nil {
-			root, err := ri.pickRoot(skip)
+			var err error
+			root, err = ri.pickRoot(skip)
 			if err != nil {
 				return nil, "", err
 			}
@@ -120,20 +123,34 @@ func (ri *recorderInstance) createSegmentFile(start time.Time) (*os.File, string
 			skip = append(skip, root)
 		}
 		path := recordstore.Path{Start: start}.Encode(format)
-		err := os.MkdirAll(filepath.Dir(path), 0o755)
+		err := osMkdirAll(filepath.Dir(path), 0o755)
 		if err != nil {
-			if ri.pickRoot != nil && isNoSpace(err) {
+			if ri.failoverRoot(root, err) {
 				continue
 			}
 			return nil, "", err
 		}
-		fi, err := os.Create(path)
+		fi, err := osCreate(path)
 		if err != nil {
-			if ri.pickRoot != nil && isNoSpace(err) {
+			if ri.failoverRoot(root, err) {
 				continue
 			}
 			return nil, "", err
+		}
+		if ri.noteRoot != nil && root != "" {
+			ri.noteRoot(root, nil)
 		}
 		return fi, path, nil
 	}
+}
+
+func (ri *recorderInstance) failoverRoot(root string, err error) bool {
+	if ri.pickRoot == nil || root == "" || !shouldFailoverDisk(err) {
+		return false
+	}
+	if ri.noteRoot != nil && isDiskUnavailable(err) {
+		ri.noteRoot(root, err)
+	}
+	ri.Log(logger.Warn, "storage disk %s unusable (%v), trying another", root, err)
+	return true
 }

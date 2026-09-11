@@ -20,8 +20,12 @@ type OnSegmentCreateFunc = func(path string)
 type OnSegmentCompleteFunc = func(path string, duration time.Duration)
 
 // PickRootFunc selects a storage disk for a new segment.
-// skip lists roots already tried in this attempt (ENOSPC).
+// skip lists roots already tried in this attempt (ENOSPC / dead disk).
 type PickRootFunc = func(skip []string) (string, error)
+
+// NoteRootFunc reports whether a picked storage root accepted a new segment.
+// err is nil on success; non-nil means the disk should be cooled down.
+type NoteRootFunc = func(root string, err error)
 
 // Recorder writes recordings to disk.
 type Recorder struct {
@@ -35,6 +39,7 @@ type Recorder struct {
 	OnSegmentCreate   OnSegmentCreateFunc
 	OnSegmentComplete OnSegmentCompleteFunc
 	PickRoot          PickRootFunc
+	NoteRoot          NoteRootFunc
 	Parent            logger.Writer
 
 	restartPause time.Duration
@@ -73,6 +78,7 @@ func (r *Recorder) Initialize() {
 		onSegmentCreate:   r.OnSegmentCreate,
 		onSegmentComplete: r.OnSegmentComplete,
 		pickRoot:          r.PickRoot,
+		noteRoot:          r.NoteRoot,
 		parent:            r,
 	}
 	r.currentInstance.initialize()
@@ -121,6 +127,7 @@ func (r *Recorder) run() {
 			onSegmentCreate:   r.OnSegmentCreate,
 			onSegmentComplete: r.OnSegmentComplete,
 			pickRoot:          r.PickRoot,
+			noteRoot:          r.NoteRoot,
 			parent:            r,
 		}
 		r.currentInstance.initialize()

@@ -3,6 +3,7 @@ package compatapi
 import (
 	"os"
 	"path/filepath"
+	"strconv"
 	"testing"
 	"time"
 
@@ -114,6 +115,84 @@ func TestDvrJournalTruncatedStops(t *testing.T) {
 	require.Equal(t, "a.mp4", ops[0].Seg.Rel)
 }
 
+func TestDvrJournalReadWholeFile(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, ".mtx-dvr-index.journal")
+	hash := uint64(7)
+	const n = 200
+	data := journalHeader(hash)
+	for i := 0; i < n; i++ {
+		op, err := encodeJournalOp(dvrJournalOp{
+			Op: dvrOpUpsert,
+			Seg: dvrSegRec{
+				Rel:      filepath.ToSlash(filepath.Join("2026-09-10", "seg-"+strconv.Itoa(i)+".mp4")),
+				Start:    time.Unix(int64(1000+i), 0).UTC(),
+				Duration: time.Second,
+				Ready:    true,
+			},
+		})
+		require.NoError(t, err)
+		data = append(data, op...)
+	}
+	require.NoError(t, os.WriteFile(path, data, 0o644))
+
+	ops, err := readJournalFile(path, hash)
+	require.NoError(t, err)
+	require.Len(t, ops, n)
+	require.Equal(t, "2026-09-10/seg-0.mp4", ops[0].Seg.Rel)
+	require.Equal(t, "2026-09-10/seg-199.mp4", ops[n-1].Seg.Rel)
+}
+
+func TestPresentDayIndexesFromDayDirs(t *testing.T) {
+	dir := t.TempDir()
+	l := dvrPathLayout{common: dir, dateDir: true}
+	day := "2026-09-10"
+	require.NoError(t, os.Mkdir(filepath.Join(dir, day), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, day, "cam.mp4"), []byte("mp4"), 0o644))
+	require.NoError(t, os.WriteFile(l.dayJournal(day), []byte("x"), 0o644))
+	require.NoError(t, os.Mkdir(filepath.Join(dir, "2026-06-01"), 0o755))
+
+	got := presentDayIndexes(l)
+	require.Equal(t, map[string]struct{}{day: {}}, got)
+}
+
+func TestPresentDayIndexesFromFlatJournalNames(t *testing.T) {
+	dir := t.TempDir()
+	l := dvrPathLayout{common: dir}
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "cam.mp4"), []byte("mp4"), 0o644))
+	require.NoError(t, os.WriteFile(l.dayJournal("2026-09-10"), []byte("x"), 0o644))
+	got := presentDayIndexes(l)
+	require.Equal(t, map[string]struct{}{"2026-09-10": {}}, got)
+}
+
+func TestLoadOneDaySnapshotMergesSnapshotAndJournal(t *testing.T) {
+	dir := t.TempDir()
+	l := dvrPathLayout{common: dir}
+	hash := uint64(3)
+	base := time.Unix(1000, 0).UTC()
+	require.NoError(t, writeSnapshotFile(l.daySnap("2020-01-01"), dvrSnapshot{
+		Hash: hash,
+		Segs: []dvrSegRec{{
+			Rel: "a.mp4", Start: base, Duration: time.Second, Ready: true,
+		}},
+	}))
+	op, err := encodeJournalOp(dvrJournalOp{
+		Op: dvrOpUpsert,
+		Seg: dvrSegRec{
+			Rel: "b.mp4", Start: base.Add(time.Second), Duration: time.Second, Ready: true,
+		},
+	})
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(l.dayJournal("2020-01-01"), append(journalHeader(hash), op...), 0o644))
+
+	snap, ops, ok := loadOneDaySnapshot(l, "2020-01-01", hash)
+	require.True(t, ok)
+	require.Len(t, ops, 1)
+	require.Len(t, snap.Segs, 2)
+	require.Equal(t, "a.mp4", snap.Segs[0].Rel)
+	require.Equal(t, "b.mp4", snap.Segs[1].Rel)
+}
+
 func TestIndexLoadFromDiskUsesSnapshot(t *testing.T) {
 	dir := t.TempDir()
 	cam := filepath.Join(dir, "cam1")
@@ -142,7 +221,7 @@ func TestIndexLoadFromDiskUsesSnapshot(t *testing.T) {
 
 	layout := makeDvrLayout(pathConf, "cam1")
 	require.FileExists(t, layout.meta)
-	require.FileExists(t, layout.daySnap("2020-01-01"))
+	require.FileExists(t, layout.dayJournal("2020-01-01"))
 
 	idx2 := NewIndex()
 	st2 := idx2.LoadFromDisk(confs)
@@ -183,8 +262,8 @@ func TestIndexRebuildsWhenSnapshotDeleted(t *testing.T) {
 
 	layout := makeDvrLayout(pathConf, "cam1")
 	require.NoError(t, os.Remove(layout.meta))
-	require.NoError(t, os.Remove(layout.daySnap("2020-01-01")))
-	_ = os.Remove(layout.dayJournal("2020-01-01"))
+	_ = os.Remove(layout.daySnap("2020-01-01"))
+	require.NoError(t, os.Remove(layout.dayJournal("2020-01-01")))
 
 	idx = NewIndex()
 	st := idx.LoadFromDisk(confs)
@@ -301,7 +380,7 @@ func TestIndexPersistUpsertReplayedFromJournal(t *testing.T) {
 	idx2.ClosePersist()
 }
 
-func TestClosePersistFlushesJournalIntoSnapshot(t *testing.T) {
+func TestClosePersistSyncsJournal(t *testing.T) {
 	dir := t.TempDir()
 	cam := filepath.Join(dir, "cam1")
 	a := filepath.Join(cam, "2020-01-01_00-00-00-000000.mp4")
@@ -326,11 +405,15 @@ func TestClosePersistFlushesJournalIntoSnapshot(t *testing.T) {
 	require.NoError(t, err)
 	idx.SetFMP4Meta("cam1", b, meta, tracks)
 	idx.PersistUpsert("cam1", b)
-	require.Equal(t, 1, idx.ClosePersist())
+	st := idx.ClosePersist()
+	require.Equal(t, 1, st.Paths)
+	require.Equal(t, 1, st.Dirty)
 
+	// ClosePersist only fsyncs the journal; snapshot compact is deferred.
+	// Next start must still see the upsert via journal replay.
 	idx2 := NewIndex()
-	st := idx2.LoadFromDisk(confs)
-	require.Equal(t, 2, st.Segments)
+	load := idx2.LoadFromDisk(confs)
+	require.Equal(t, 2, load.Segments)
 	out := idx2.SegmentsInWindow("cam1", time.Date(2020, 1, 1, 0, 0, 0, 0, time.Local), time.Minute)
 	require.Len(t, out, 2)
 	require.Equal(t, uint32(3), out[1].fmp4.MoofCount)
@@ -434,6 +517,59 @@ func TestIndexRebuildsOtherPathsWhenLiveSegmentsArriveFirst(t *testing.T) {
 	idx.ClosePersist()
 }
 
+func TestLoadFromDiskKeepsLiveSegments(t *testing.T) {
+	dir := t.TempDir()
+	hist := time.Date(2020, 1, 1, 0, 0, 0, 0, time.Local)
+	datedFMP4(t, dir, "cam1", hist, 2)
+	datedFMP4(t, dir, "cam1", hist.Add(5*time.Second), 2)
+
+	confs := map[string]*conf.Path{"cam1": testRecordPathConf(dir, "cam1")}
+
+	idx1 := NewIndex()
+	require.Equal(t, 0, idx1.LoadFromDisk(confs).Segments)
+	require.Equal(t, 2, idx1.ReconcileAll(nil, false).Segments)
+	idx1.ClosePersist()
+
+	idx := NewIndex()
+	idx.EnablePersist(confs)
+	liveStart := time.Now().Truncate(time.Second)
+	live := datedFMP4(t, dir, "cam1", liveStart, 2)
+	idx.CompleteSegment("cam1", live, 5*time.Second)
+	_, ok := idx.FindByName("cam1", filepath.Base(live))
+	require.True(t, ok)
+
+	st := idx.LoadFromDisk(confs)
+	require.Equal(t, 1, st.DiskPaths)
+	_, ok = idx.FindByName("cam1", filepath.Base(live))
+	require.True(t, ok, "live segment must survive disk load")
+
+	histSegs := idx.SegmentsInWindow("cam1", hist, time.Minute)
+	require.Len(t, histSegs, 2)
+
+	liveSegs := idx.SegmentsInWindow("cam1", liveStart.Add(-time.Second), time.Minute)
+	foundLive := false
+	for _, s := range liveSegs {
+		if s.Name() == filepath.Base(live) {
+			foundLive = true
+			break
+		}
+	}
+	require.True(t, foundLive)
+
+	ranges := idx.Ranges("cam1")
+	require.NotEmpty(t, ranges)
+	liveUnix := liveStart.Unix()
+	coversLive := false
+	for _, r := range ranges {
+		if r.From <= liveUnix && r.From+r.Duration >= liveUnix {
+			coversLive = true
+			break
+		}
+	}
+	require.True(t, coversLive, "ranges.json must include the live tail")
+	idx.ClosePersist()
+}
+
 func TestIndexRebuildsWhenSnapshotCorruptAndLiveSegmentsExist(t *testing.T) {
 	dir := t.TempDir()
 	hist := time.Date(2020, 1, 1, 0, 0, 0, 0, time.Local)
@@ -533,7 +669,7 @@ func TestIndexCompleteSegmentMPEGTSPersistsForPlaylist(t *testing.T) {
 	require.True(t, out[0].fmp4.Ready)
 	require.Equal(t, 5*time.Second, out[0].fmp4.Duration)
 
-	body := GenerateArchiveM3U8Indexed(conf.RecordFormatMPEGTS, out, 5*time.Second, 0, start)
+	body := GenerateArchiveM3U8Indexed(conf.RecordFormatMPEGTS, out, 5*time.Second, 0, 0, start)
 	require.Contains(t, body, filepath.Base(a))
 	require.Contains(t, body, filepath.Base(b))
 	require.NotEqual(t, "#EXTM3U\n#EXT-X-PLAYLIST-TYPE:VOD\n#EXT-X-VERSION:10\n#EXT-X-TARGETDURATION:5\n#EXT-X-MEDIA-SEQUENCE:0\n#EXT-X-ENDLIST\n", body)
@@ -549,7 +685,7 @@ func TestIndexCompleteSegmentMPEGTSPersistsForPlaylist(t *testing.T) {
 	require.GreaterOrEqual(t, st.Segments, 2)
 	out2 := idx2.SegmentsInWindow("cam1", start, time.Minute)
 	require.Len(t, out2, 2)
-	body2 := GenerateArchiveM3U8Indexed(conf.RecordFormatMPEGTS, out2, 5*time.Second, 0, start)
+	body2 := GenerateArchiveM3U8Indexed(conf.RecordFormatMPEGTS, out2, 5*time.Second, 0, 0, start)
 	require.Contains(t, body2, filepath.Base(a))
 	idx2.ClosePersist()
 }
@@ -580,8 +716,9 @@ func TestIndexDateDirStoresShardInDayFolder(t *testing.T) {
 	layout := makeDvrLayout(pathConf, "cam1")
 	require.True(t, layout.dateDir)
 	require.FileExists(t, layout.meta)
-	require.FileExists(t, filepath.Join(dir, "cam1", day, ".mtx-dvr-index"))
+	require.FileExists(t, layout.dayJournal(day))
 	require.Equal(t, filepath.Join(dir, "cam1", day, ".mtx-dvr-index"), layout.daySnap(day))
+	require.Equal(t, layout.daySnap(day)+".journal", layout.dayJournal(day))
 
 	idx = NewIndex()
 	st := idx.LoadFromDisk(confs)
@@ -658,8 +795,8 @@ func TestIndexLoadFromDiskTwoDisks(t *testing.T) {
 	require.Len(t, layouts, 2)
 	require.FileExists(t, layouts[0].meta)
 	require.FileExists(t, layouts[1].meta)
-	require.FileExists(t, layouts[0].daySnap("2020-01-01"))
-	require.FileExists(t, layouts[1].daySnap("2020-01-01"))
+	require.FileExists(t, layouts[0].dayJournal("2020-01-01"))
+	require.FileExists(t, layouts[1].dayJournal("2020-01-01"))
 
 	idx2 := NewIndex()
 	st2 := idx2.LoadFromDisk(confs)
@@ -698,8 +835,8 @@ func TestIndexRebuildsWhenOneStorageDiskIndexDeleted(t *testing.T) {
 
 	layouts := makeDvrLayouts(pathConf, "cam1")
 	require.NoError(t, os.Remove(layouts[0].meta))
-	require.NoError(t, os.Remove(layouts[0].daySnap("2020-01-01")))
-	_ = os.Remove(layouts[0].dayJournal("2020-01-01"))
+	_ = os.Remove(layouts[0].daySnap("2020-01-01"))
+	require.NoError(t, os.Remove(layouts[0].dayJournal("2020-01-01")))
 
 	idx = NewIndex()
 	st := idx.LoadFromDisk(confs)
@@ -710,7 +847,7 @@ func TestIndexRebuildsWhenOneStorageDiskIndexDeleted(t *testing.T) {
 	require.Equal(t, 1, st.Built)
 	require.Equal(t, 2, st.Segments)
 	require.FileExists(t, layouts[0].meta)
-	require.FileExists(t, layouts[0].daySnap("2020-01-01"))
+	require.FileExists(t, layouts[0].dayJournal("2020-01-01"))
 	out := idx.SegmentsInWindow("cam1", time.Date(2020, 1, 1, 0, 0, 0, 0, time.Local), time.Minute)
 	require.Len(t, out, 2)
 	idx.ClosePersist()
@@ -740,8 +877,8 @@ func TestIndexRebuildsWhenOneStorageDiskSnapshotsDeleted(t *testing.T) {
 	idx.ClosePersist()
 
 	layouts := makeDvrLayouts(pathConf, "cam1")
-	require.NoError(t, os.Remove(layouts[0].daySnap("2020-01-01")))
-	_ = os.Remove(layouts[0].dayJournal("2020-01-01"))
+	require.NoError(t, os.Remove(layouts[0].dayJournal("2020-01-01")))
+	_ = os.Remove(layouts[0].daySnap("2020-01-01"))
 	require.FileExists(t, layouts[0].meta)
 
 	idx = NewIndex()
@@ -750,7 +887,7 @@ func TestIndexRebuildsWhenOneStorageDiskSnapshotsDeleted(t *testing.T) {
 	require.True(t, idx.pathNeedsRebuild("cam1"))
 	st = idx.ReconcileAll(nil, true)
 	require.Equal(t, 1, st.Built)
-	require.FileExists(t, layouts[0].daySnap("2020-01-01"))
+	require.FileExists(t, layouts[0].dayJournal("2020-01-01"))
 	out := idx.SegmentsInWindow("cam1", time.Date(2020, 1, 1, 0, 0, 0, 0, time.Local), time.Minute)
 	require.Len(t, out, 2)
 	idx.ClosePersist()
@@ -786,8 +923,8 @@ func TestIndexRecordingStatusMergesRoundRobinDisks(t *testing.T) {
 
 	layouts := makeDvrLayouts(pathConf, "cam1")
 	require.NoError(t, os.Remove(layouts[1].meta))
-	require.NoError(t, os.Remove(layouts[1].daySnap("2020-01-01")))
-	_ = os.Remove(layouts[1].dayJournal("2020-01-01"))
+	_ = os.Remove(layouts[1].daySnap("2020-01-01"))
+	require.NoError(t, os.Remove(layouts[1].dayJournal("2020-01-01")))
 	idx.ClosePersist()
 
 	idx = NewIndex()

@@ -1098,3 +1098,48 @@ func TestCreateSegmentFilePickRoot(t *testing.T) {
 	require.NoError(t, f2.Close())
 	require.True(t, strings.HasPrefix(p2, d2))
 }
+
+func TestCreateSegmentFileFailOverDeadDisk(t *testing.T) {
+	defer func() {
+		osMkdirAll = os.MkdirAll
+		osCreate = os.Create
+	}()
+
+	ok := t.TempDir()
+	dead := `F:\records`
+	var tried []string
+	var noted []string
+	osMkdirAll = func(path string, perm os.FileMode) error {
+		if strings.HasPrefix(path, dead) {
+			return fmt.Errorf("mkdir %s: A device which does not exist was specified.", path)
+		}
+		return os.MkdirAll(path, perm)
+	}
+
+	ri := &recorderInstance{
+		pathFormat2: "cam/%Y-%m-%d_%H-%M-%S-%f.mp4",
+		parent:      test.NilLogger,
+		pickRoot: func(skip []string) (string, error) {
+			if len(skip) == 0 {
+				tried = append(tried, dead)
+				return dead, nil
+			}
+			tried = append(tried, ok)
+			return ok, nil
+		},
+		noteRoot: func(root string, err error) {
+			if err != nil {
+				noted = append(noted, "fail:"+root)
+				return
+			}
+			noted = append(noted, "ok:"+root)
+		},
+	}
+
+	f, p, err := ri.createSegmentFile(time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC))
+	require.NoError(t, err)
+	require.NoError(t, f.Close())
+	require.True(t, strings.HasPrefix(p, ok))
+	require.Equal(t, []string{dead, ok}, tried)
+	require.Equal(t, []string{"fail:" + dead, "ok:" + ok}, noted)
+}

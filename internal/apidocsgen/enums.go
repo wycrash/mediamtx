@@ -117,6 +117,11 @@ var enums = []struct {
 		internalName: "APIWebRTCSessionState",
 		File:         filepath.Join("internal", "defs", "api_webrtc.go"),
 	},
+	{
+		externalName: "CompatIndexStatusState",
+		internalName: "APICompatIndexStatusState",
+		File:         filepath.Join("internal", "defs", "api_compat.go"),
+	},
 }
 
 func extractEnumValues(name, file string) ([]string, error) {

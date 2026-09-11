@@ -1,6 +1,7 @@
 package compatapi
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -269,7 +270,7 @@ func TestGenerateArchiveM3U8FMP4(t *testing.T) {
 	body := GenerateArchiveM3U8(conf.RecordFormatFMP4, []*recordstore.Segment{
 		{Fpath: a, Start: base},
 		{Fpath: b, Start: base.Add(12 * time.Second)},
-	}, 10*time.Second, 0)
+	}, 10*time.Second, 0, 0)
 
 	require.Equal(t, 1, strings.Count(body, "#EXT-X-MAP:"))
 	require.Contains(t, body, `#EXT-X-MAP:URI="a.mp4?hls=init"`)
@@ -332,7 +333,7 @@ func TestGenerateArchiveM3U8FMP4DiscontinuityOnGap(t *testing.T) {
 	body := GenerateArchiveM3U8(conf.RecordFormatFMP4, []*recordstore.Segment{
 		{Fpath: a, Start: base},
 		{Fpath: b, Start: base.Add(60 * time.Second)},
-	}, 10*time.Second, 0)
+	}, 10*time.Second, 0, 0)
 	require.Contains(t, body, "#EXT-X-DISCONTINUITY")
 	require.Equal(t, 2, strings.Count(body, "#EXT-X-MAP:"))
 	require.Contains(t, body, `#EXT-X-MAP:URI="a.mp4?hls=init"`)
@@ -355,13 +356,105 @@ func TestGenerateArchiveM3U8IndexedMPEGTS(t *testing.T) {
 		{Rel: "b.ts", Start: base.Add(10 * time.Second)},
 		{Rel: "c.ts", Start: base.Add(40 * time.Second)},
 		{Rel: "", Start: base.Add(50 * time.Second)},
-	}, 10*time.Second, 180, time.Time{})
+	}, 10*time.Second, 0, 180, time.Time{})
 	require.Contains(t, body, "#EXTINF:10.0,")
 	require.Contains(t, body, "a.ts")
 	require.NotContains(t, body, "other.ts")
 	require.NotContains(t, body, "skip.ts")
 	require.Contains(t, body, "#EXT-X-DISCONTINUITY")
 	require.Contains(t, body, "#EXT-X-ENDLIST")
+}
+
+func TestGenerateTimeshiftM3U8IndexedSlidingLive(t *testing.T) {
+	base := time.Unix(1758456000, 0).UTC()
+	edge := base.Add(25 * time.Second)
+	segs := []*IndexedSegment{
+		{Rel: "a.ts", Start: base},
+		{Rel: "b.ts", Start: base.Add(5 * time.Second)},
+		{Rel: "c.ts", Start: base.Add(10 * time.Second)},
+		{Rel: "d.ts", Start: base.Add(15 * time.Second)},
+		{Rel: "e.ts", Start: base.Add(20 * time.Second)},
+	}
+	body := GenerateTimeshiftM3U8Indexed(conf.RecordFormatMPEGTS, segs, 5*time.Second, 0, 0, edge)
+	require.NotContains(t, body, "#EXT-X-PLAYLIST-TYPE:VOD")
+	require.NotContains(t, body, "#EXT-X-ENDLIST")
+	require.Contains(t, body, "#EXT-X-VERSION:3")
+	require.Contains(t, body, "#EXT-X-TARGETDURATION:5")
+	require.Contains(t, body, fmt.Sprintf("#EXT-X-MEDIA-SEQUENCE:%d", base.Unix()/5))
+	// Single leading PDT (Flussonic-style), not per-segment.
+	require.Equal(t, 1, strings.Count(body, "#EXT-X-PROGRAM-DATE-TIME:"))
+	require.Contains(t, body, "#EXTINF:5.000,")
+	require.Contains(t, body, "a.ts")
+	require.Contains(t, body, "e.ts")
+	// PDT appears before first EXTINF.
+	require.Less(t, strings.Index(body, "#EXT-X-PROGRAM-DATE-TIME:"), strings.Index(body, "#EXTINF:"))
+
+	body2 := GenerateTimeshiftM3U8Indexed(conf.RecordFormatMPEGTS, segs[1:], 5*time.Second, 0, 0, edge)
+	require.Contains(t, body2, fmt.Sprintf("#EXT-X-MEDIA-SEQUENCE:%d", base.Add(5*time.Second).Unix()/5))
+	require.NotContains(t, body2, "a.ts")
+	require.Contains(t, body2, "b.ts")
+
+	empty := GenerateTimeshiftM3U8Indexed(conf.RecordFormatMPEGTS, nil, 5*time.Second, 0, 0, edge)
+	require.NotContains(t, empty, "#EXT-X-ENDLIST")
+	require.Contains(t, empty, "#EXT-X-MEDIA-SEQUENCE:0")
+}
+
+func TestGenerateTimeshiftM3U8IndexedFMP4(t *testing.T) {
+	base := time.Unix(1000, 0).UTC()
+	edge := base.Add(20 * time.Second)
+	body := GenerateTimeshiftM3U8Indexed(conf.RecordFormatFMP4, []*IndexedSegment{
+		{
+			Rel:   "a.mp4",
+			Start: base,
+			fmp4:  fmp4SegMeta{Duration: 10 * time.Second, MoofCount: 2, Ready: true},
+		},
+		{
+			Rel:   "b.mp4",
+			Start: base.Add(10 * time.Second),
+			fmp4:  fmp4SegMeta{Duration: 10 * time.Second, MoofCount: 2, Ready: true},
+		},
+	}, 10*time.Second, 0, 0, edge)
+	require.NotContains(t, body, "#EXT-X-PLAYLIST-TYPE:VOD")
+	require.NotContains(t, body, "#EXT-X-ENDLIST")
+	require.Contains(t, body, fmt.Sprintf("#EXT-X-MEDIA-SEQUENCE:%d", base.Unix()/10))
+	require.Contains(t, body, `#EXT-X-MAP:URI="a.mp4?hls=init"`)
+	require.Contains(t, body, "b.mp4?hls=media")
+	require.Equal(t, 1, strings.Count(body, "#EXT-X-PROGRAM-DATE-TIME:"))
+}
+
+func TestTimeshiftLookback(t *testing.T) {
+	require.Equal(t, 20*time.Second, timeshiftLookback(5*time.Second))
+	require.Equal(t, 4*time.Hour, timeshiftLookback(time.Hour))
+	require.Equal(t, 6*time.Hour, timeshiftLookback(2*time.Hour))
+}
+
+func TestTimeshiftTrimsShortTrailingSegment(t *testing.T) {
+	base := time.Unix(1000, 0).UTC()
+	edge := base.Add(10*time.Second + 200*time.Millisecond)
+	segs := []*IndexedSegment{
+		{Rel: "a.ts", Start: base},
+		{Rel: "b.ts", Start: base.Add(5 * time.Second)},
+		{Rel: "c.ts", Start: base.Add(10 * time.Second)}, // only 200ms at delayed edge
+	}
+	body := GenerateTimeshiftM3U8Indexed(conf.RecordFormatMPEGTS, segs, 5*time.Second, 0, 0, edge)
+	require.Contains(t, body, "a.ts")
+	require.Contains(t, body, "b.ts")
+	require.NotContains(t, body, "c.ts")
+}
+
+func TestTimeshiftRelRegexp(t *testing.T) {
+	m := timeshiftRelRegexp.FindStringSubmatch("F1/mono-timeshift_rel-3582.m3u8")
+	require.Equal(t, []string{
+		"F1/mono-timeshift_rel-3582.m3u8",
+		"F1",
+		"3582",
+	}, m)
+	m = timeshiftRelRegexp.FindStringSubmatch("cam1/timeshift_rel-3600.fmp4.m3u8")
+	require.Equal(t, "cam1", m[1])
+	require.Equal(t, "3600", m[2])
+	m = timeshiftAbsRegexp.FindStringSubmatch("cam1/mono-timeshift_abs-1788675000.m3u8")
+	require.Equal(t, "cam1", m[1])
+	require.Equal(t, "1788675000", m[2])
 }
 
 func TestGenerateArchiveM3U8IndexedFMP4NoDisk(t *testing.T) {
@@ -382,7 +475,7 @@ func TestGenerateArchiveM3U8IndexedFMP4NoDisk(t *testing.T) {
 			Start: base.Add(22 * time.Second),
 			fmp4:  fmp4SegMeta{Duration: 10 * time.Second, MoofCount: 1, Ready: true},
 		},
-	}, 10*time.Second, 0, time.Time{})
+	}, 10*time.Second, 0, 0, time.Time{})
 
 	require.Equal(t, 1, strings.Count(body, "#EXT-X-MAP:"))
 	require.Contains(t, body, `#EXT-X-MAP:URI="from-memory.mp4?hls=init"`)
@@ -410,7 +503,7 @@ func TestGenerateArchiveM3U8IndexedFMP4UsesExactDuration(t *testing.T) {
 			Rel:   "b.mp4",
 			fmp4:  fmp4SegMeta{Duration: 3990 * time.Millisecond, MoofCount: 4, Ready: true},
 		},
-	}, 10*time.Second, 0, time.Time{})
+	}, 10*time.Second, 0, 0, time.Time{})
 
 	require.Contains(t, body, "#EXTINF:4.010,")
 	require.Contains(t, body, "#EXTINF:3.990,")
@@ -432,7 +525,7 @@ func TestGenerateArchiveM3U8IndexedStartOffsetAndMonotonicPDT(t *testing.T) {
 			Start: base.Add(8 * time.Second), // overlap: Start goes backwards vs EXTINF
 			fmp4:  fmp4SegMeta{Duration: 10 * time.Second, MoofCount: 2, Ready: true},
 		},
-	}, 10*time.Second, 0, base.Add(4*time.Second))
+	}, 10*time.Second, 0, 0, base.Add(4*time.Second))
 
 	require.Contains(t, body, "#EXT-X-START:TIME-OFFSET=4.000")
 	require.Contains(t, body, "#EXT-X-PROGRAM-DATE-TIME:1970-01-01T00:16:40.000+00:00")
@@ -489,7 +582,7 @@ func TestGenerateArchiveM3U8IndexedMatchesDisk(t *testing.T) {
 	fromDisk := GenerateArchiveM3U8(conf.RecordFormatFMP4, []*recordstore.Segment{
 		{Fpath: a, Start: base},
 		{Fpath: b, Start: base.Add(12 * time.Second)},
-	}, 10*time.Second, 0)
+	}, 10*time.Second, 0, 0)
 
 	idx := NewIndex()
 	idx.Add("cam1", a, base)
@@ -505,6 +598,7 @@ func TestGenerateArchiveM3U8IndexedMatchesDisk(t *testing.T) {
 		conf.RecordFormatFMP4,
 		idx.SegmentsInWindow("cam1", base, time.Minute),
 		10*time.Second,
+		0,
 		0,
 		time.Time{},
 	)

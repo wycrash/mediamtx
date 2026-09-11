@@ -233,6 +233,13 @@ components:
         - read
         - publish
 
+    CompatIndexStatusState:
+      type: string
+      enum:
+        - idle
+        - rebuild
+        - update
+
     AlwaysAvailableTrack:
       type: object
       properties:
@@ -355,6 +362,8 @@ components:
             type: string
         compatAPIEncryption:
           type: boolean
+        compatAPIIndexUpdateInterval:
+          type: string
         compatAPIServerCert:
           type: string
         compatAPIServerKey:
@@ -839,6 +848,103 @@ components:
           type: integer
           format: int64
 
+    CompatIndexRebuild:
+      type: object
+      properties:
+        all:
+          type: boolean
+          description: All is true when every recording path was queued.
+        queued:
+          type: integer
+          format: int64
+          description: Queued is how many paths are marked for rebuild after this request (deduplicated; concurrent requests coalesce into one worker).
+        status:
+          $ref: "#/components/schemas/OKStatus"
+          description: Status is always "ok" when the request was accepted.
+
+    CompatIndexStatus:
+      type: object
+      properties:
+        current:
+          type: string
+          description: Current is the path currently being processed. Empty when idle.
+        debug:
+          $ref: "#/components/schemas/CompatIndexDebug"
+          description: Debug holds hot-path counters for load diagnosis.
+        goroutines:
+          type: integer
+          format: int64
+          description: Goroutines is runtime.NumGoroutine().
+        heapAlloc:
+          type: integer
+          format: uint64
+          description: HeapAlloc is Go heap allocated bytes (runtime.MemStats.HeapAlloc).
+        pendingDayRepairs:
+          type: integer
+          format: int64
+          description: PendingDayRepairs is how many damaged day journals still need rebuild.
+        queue:
+          type: array
+          description: Queue is paths waiting for a forced rebuild (incomplete), excluding Current.
+          items:
+            type: string
+        queued:
+          type: integer
+          format: int64
+          description: Queued is len(Queue) plus 1 when Current is a forced rebuild target.
+        segments:
+          type: integer
+          format: int64
+          description: Segments is the number of in-memory index segments.
+        started:
+          type: string
+          description: Started is when the current worker pass began. Null when idle.
+          nullable: true
+        state:
+          $ref: "#/components/schemas/CompatIndexStatusState"
+          description: State is idle, rebuild (forced disk rebuild), or update (periodic edge scan).
+
+    CompatIndexDebug:
+      type: object
+      properties:
+        inspectFmp4:
+          type: integer
+          format: uint64
+        inspectFmp4AvgMs:
+          type: number
+          format: double
+        lastCompleteAgo:
+          type: string
+        lastWriteMetaAgo:
+          type: string
+        persistUpsert:
+          type: integer
+          format: uint64
+        reconcilePath:
+          type: integer
+          format: uint64
+        reconcilePathAvgMs:
+          type: number
+          format: double
+        segmentComplete:
+          type: integer
+          format: uint64
+        segmentCreate:
+          type: integer
+          format: uint64
+        segmentRemove:
+          type: integer
+          format: uint64
+        slowOps:
+          type: integer
+          format: uint64
+        writeMeta:
+          type: integer
+          format: uint64
+        writeMetaAvgMs:
+          type: number
+          format: double
+
     Info:
       type: object
       properties:
@@ -1066,6 +1172,8 @@ components:
           type: string
         recordFormat:
           $ref: "#/components/schemas/RecordFormat"
+        recordHlsChunkDuration:
+          type: string
         recordMaxPartSize:
           type: string
         recordPartDuration:
@@ -1346,6 +1454,11 @@ components:
     Storage:
       type: object
       properties:
+        deleteUntilPercent:
+          type: number
+          format: double
+          description: When > 0, reclaim disk space by deleting oldest recordings until used space is <= this percent. Must be lower than maxUsedPercent. Recording continues at maxUsedPercent while this is set. 0 or unset keeps refuse-only behavior.
+          nullable: true
         disks:
           type: array
           description: Recording roots. Order is used by roundRobin / fillFirst.
@@ -1354,7 +1467,7 @@ components:
         maxUsedPercent:
           type: number
           format: double
-          description: Skip a disk when used space is >= this percent. 0 disables the check (ENOSPC only).
+          description: Threshold for disk used space (%). Without deleteUntilPercent, skip the disk when used >= this (0 = ENOSPC only). With deleteUntilPercent > 0, do not refuse writes; start deleting oldest segments so new recordings can continue.
           nullable: true
         strategy:
           $ref: "#/components/schemas/StorageStrategy"
@@ -2213,6 +2326,16 @@ components:
         writeBytesPerSec:
           type: number
           format: double
+        status:
+          type: string
+          description: ok when the disk is writable, error when it is missing or MediaMTX
+            cannot write to it.
+          enum:
+            - ok
+            - error
+        error:
+          type: string
+          description: Set when status is error.
 
     SystemMetricsMemory:
       type: object
@@ -3146,6 +3269,91 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/Error"
+        "500":
+          description: server error.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
+  /v3/compatindex/rebuild:
+    post:
+      operationId: compatindexRebuildAll
+      tags: [Compat API]
+      summary: queues a forced rebuild of the Compat DVR index for all recording paths.
+      description: |
+        Requests coalesce into a single background worker that rebuilds paths
+        one at a time. Concurrent calls are safe and do not start parallel walks.
+      responses:
+        "200":
+          description: the rebuild was queued.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CompatIndexRebuild"
+        "500":
+          description: server error.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
+  /v3/compatindex/rebuild/{name}:
+    post:
+      operationId: compatindexRebuildPath
+      tags: [Compat API]
+      summary: queues a forced rebuild of the Compat DVR index for one path.
+      description: |
+        Multiple path rebuilds are deduplicated and processed serially by the
+        same worker as the full rebuild endpoint.
+      parameters:
+        - name: name
+          in: path
+          required: true
+          description: the name of the path.
+          schema:
+            type: string
+      responses:
+        "200":
+          description: the rebuild was queued.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CompatIndexRebuild"
+        "400":
+          description: invalid request.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "404":
+          description: path not found.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "500":
+          description: server error.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
+  /v3/compatindex/status:
+    get:
+      operationId: compatindexStatus
+      tags: [Compat API]
+      summary: returns Compat DVR index worker status (current path and rebuild queue).
+      description: |
+        State is idle, rebuild (forced disk rebuild), or update (periodic edge scan).
+        Queue lists paths waiting for a forced rebuild; current is the path being processed.
+      responses:
+        "200":
+          description: the request was successful.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CompatIndexStatus"
         "500":
           description: server error.
           content:

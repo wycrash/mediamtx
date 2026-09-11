@@ -36,6 +36,7 @@ func pathConfCanBeUpdated(oldPathConf *conf.Path, newPathConf *conf.Path) bool {
 	clone.RecordPartDuration = newPathConf.RecordPartDuration
 	clone.RecordMaxPartSize = newPathConf.RecordMaxPartSize
 	clone.RecordSegmentDuration = newPathConf.RecordSegmentDuration
+	clone.RecordHlsChunkDuration = newPathConf.RecordHlsChunkDuration
 	clone.RecordDeleteAfter = newPathConf.RecordDeleteAfter
 
 	clone.RPICameraBrightness = newPathConf.RPICameraBrightness
@@ -109,6 +110,8 @@ type pathManager struct {
 
 	recordSegMu           sync.RWMutex
 	recordSegmentListener recordSegmentListener
+	activeRecordSegments  map[string]struct{}
+	kickRecordCleanerFn   func()
 
 	// in
 	chReloadConf         chan map[string]*conf.Path
@@ -703,18 +706,23 @@ func (pm *pathManager) SetRecordSegmentListener(l recordSegmentListener) {
 }
 
 func (pm *pathManager) onRecordSegmentCreate(pathName, segmentPath string) {
-	pm.recordSegMu.RLock()
+	pm.recordSegMu.Lock()
+	if pm.activeRecordSegments == nil {
+		pm.activeRecordSegments = make(map[string]struct{})
+	}
+	pm.activeRecordSegments[segmentPath] = struct{}{}
 	l := pm.recordSegmentListener
-	pm.recordSegMu.RUnlock()
+	pm.recordSegMu.Unlock()
 	if l != nil {
 		l.OnSegmentCreate(pathName, segmentPath)
 	}
 }
 
 func (pm *pathManager) onRecordSegmentComplete(pathName, segmentPath string, duration time.Duration) {
-	pm.recordSegMu.RLock()
+	pm.recordSegMu.Lock()
+	delete(pm.activeRecordSegments, segmentPath)
 	l := pm.recordSegmentListener
-	pm.recordSegMu.RUnlock()
+	pm.recordSegMu.Unlock()
 	if l != nil {
 		l.OnSegmentComplete(pathName, segmentPath, duration)
 	}
@@ -727,6 +735,19 @@ func (pm *pathManager) onRecordSegmentRemove(segmentPath string) {
 	if l != nil {
 		l.OnSegmentRemove(segmentPath)
 	}
+}
+
+func (pm *pathManager) kickRecordCleaner() {
+	if pm.kickRecordCleanerFn != nil {
+		pm.kickRecordCleanerFn()
+	}
+}
+
+func (pm *pathManager) isActiveRecordSegment(segmentPath string) bool {
+	pm.recordSegMu.RLock()
+	defer pm.recordSegMu.RUnlock()
+	_, ok := pm.activeRecordSegments[segmentPath]
+	return ok
 }
 
 // APIPathsList implements defs.APIPathManager.

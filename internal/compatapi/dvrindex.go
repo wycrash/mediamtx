@@ -32,8 +32,11 @@ const (
 	dvrOpDelete      = uint8(2)
 	dvrOpCodec       = uint8(3)
 	dvrSegReady      = uint8(1)
-	dvrCompactEvery  = 512
-	dayCacheLimit    = 8
+	// How often to fsync the open day journal and refresh meta while recording.
+	// No full snapshot rewrite: the journal is the durable day index.
+	dvrJournalSyncEvery = 32
+	dvrMetaEvery        = 64
+	dayCacheLimit       = 8
 )
 
 var errDvrIndexBadMagic = errors.New("dvr index: bad magic")
@@ -261,6 +264,60 @@ func (l dvrPathLayout) daySnap(day string) string {
 
 func (l dvrPathLayout) dayJournal(day string) string {
 	return l.daySnap(day) + dvrJournalSuffix
+}
+
+func dayIndexExists(l dvrPathLayout, day string) bool {
+	if day == "" || l.common == "" {
+		return false
+	}
+	if _, err := os.Stat(l.dayJournal(day)); err == nil {
+		return true
+	}
+	if _, err := os.Stat(l.daySnap(day)); err == nil {
+		return true
+	}
+	return false
+}
+
+// presentDayIndexes finds days that have an index by listing the days folder,
+// then checking the constant journal/snapshot name. It never lists mp4 files
+// inside a day directory.
+func presentDayIndexes(l dvrPathLayout) map[string]struct{} {
+	out := make(map[string]struct{})
+	if l.common == "" {
+		return out
+	}
+	ents, err := os.ReadDir(l.common)
+	if err != nil {
+		return out
+	}
+	if l.dateDir {
+		for _, e := range ents {
+			day := e.Name()
+			if !e.IsDir() || !isDayDirName(day) {
+				continue
+			}
+			if dayIndexExists(l, day) {
+				out[day] = struct{}{}
+			}
+		}
+		return out
+	}
+	prefix := dvrSnapName + l.fileTag + "."
+	for _, e := range ents {
+		name := e.Name()
+		if !strings.HasPrefix(name, prefix) {
+			continue
+		}
+		rest := strings.TrimPrefix(name, prefix)
+		if strings.HasSuffix(rest, dvrJournalSuffix) {
+			rest = strings.TrimSuffix(rest, dvrJournalSuffix)
+		}
+		if isDayDirName(rest) {
+			out[rest] = struct{}{}
+		}
+	}
+	return out
 }
 
 func (l dvrPathLayout) removeLegacyMonolith() {
@@ -518,6 +575,30 @@ func writeSnapshotFile(path string, s dvrSnapshot) error {
 	return writeFileAtomic(path, data)
 }
 
+// writeDayJournalFile writes a sealed day index as an append-log (codecs + upserts).
+// This replaces full MTXI snapshots for rebuild / migration paths.
+func writeDayJournalFile(path string, hash uint64, s dvrSnapshot) error {
+	out := journalHeader(hash)
+	if len(s.Codecs) > 255 {
+		s.Codecs = s.Codecs[:255]
+	}
+	for i, tracks := range s.Codecs {
+		raw, err := encodeJournalOp(dvrJournalOp{Op: dvrOpCodec, CodecID: uint8(i + 1), Tracks: tracks})
+		if err != nil {
+			return err
+		}
+		out = append(out, raw...)
+	}
+	for _, rec := range s.Segs {
+		raw, err := encodeJournalOp(dvrJournalOp{Op: dvrOpUpsert, Seg: rec})
+		if err != nil {
+			return err
+		}
+		out = append(out, raw...)
+	}
+	return writeFileAtomic(path, out)
+}
+
 func encodeMeta(m dvrMeta) []byte {
 	out := append([]byte(dvrMetaMagic), 0, 0)
 	binary.LittleEndian.PutUint16(out[4:], dvrIndexVersion)
@@ -687,60 +768,45 @@ func journalHeader(hash uint64) []byte {
 }
 
 func readJournalFile(path string, wantHash uint64) ([]dvrJournalOp, error) {
-	f, err := os.Open(path)
+	data, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil, nil
 		}
 		return nil, err
 	}
-	defer f.Close()
+	return decodeJournalBytes(data, wantHash)
+}
 
-	hdr := make([]byte, 4+2+8)
-	_, err = io.ReadFull(f, hdr)
-	if err != nil {
-		if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
-			return nil, nil
-		}
-		return nil, err
+func decodeJournalBytes(data []byte, wantHash uint64) ([]dvrJournalOp, error) {
+	const hdrLen = 4 + 2 + 8
+	if len(data) == 0 {
+		return nil, nil
 	}
-	if string(hdr[:4]) != dvrJournalMagic {
+	if len(data) < hdrLen || string(data[:4]) != dvrJournalMagic {
 		return nil, errDvrIndexBadMagic
 	}
-	ver := binary.LittleEndian.Uint16(hdr[4:6])
+	ver := binary.LittleEndian.Uint16(data[4:6])
 	if ver != dvrIndexVersion {
 		return nil, errors.New("dvr index: unsupported journal version")
 	}
-	hash := binary.LittleEndian.Uint64(hdr[6:14])
+	hash := binary.LittleEndian.Uint64(data[6:14])
 	if hash != wantHash {
 		return nil, errors.New("dvr index: journal hash mismatch")
 	}
 
+	rest := data[hdrLen:]
 	var ops []dvrJournalOp
-	lenBuf := make([]byte, 4)
-	for {
-		_, err = io.ReadFull(f, lenBuf)
-		if err == io.EOF {
+	for len(rest) >= 4 {
+		n := int(binary.LittleEndian.Uint32(rest[:4]))
+		rest = rest[4:]
+		if n <= 0 || n > 16<<20 || len(rest) < n+4 {
 			break
 		}
-		if err != nil {
-			break
-		}
-		n := int(binary.LittleEndian.Uint32(lenBuf))
-		if n <= 0 || n > 16<<20 {
-			break
-		}
-		payload := make([]byte, n)
-		_, err = io.ReadFull(f, payload)
-		if err != nil {
-			break
-		}
-		crcBuf := make([]byte, 4)
-		_, err = io.ReadFull(f, crcBuf)
-		if err != nil {
-			break
-		}
-		if crc32.ChecksumIEEE(payload) != binary.LittleEndian.Uint32(crcBuf) {
+		payload := rest[:n]
+		crc := binary.LittleEndian.Uint32(rest[n : n+4])
+		rest = rest[n+4:]
+		if crc32.ChecksumIEEE(payload) != crc {
 			break
 		}
 		op, err := decodeJournalOp(payload)
@@ -753,11 +819,26 @@ func readJournalFile(path string, wantHash uint64) ([]dvrJournalOp, error) {
 }
 
 func (p *dvrPersist) closeJournal() {
-	if p != nil && p.journal != nil {
-		_ = p.journal.Sync()
-		_ = p.journal.Close()
-		p.journal = nil
+	f, sync := p.takeJournal()
+	if f == nil {
+		return
 	}
+	if sync {
+		_ = f.Sync()
+	}
+	_ = f.Close()
+}
+
+// takeJournal detaches the journal fd so Sync/Close can run without holding
+// the index mutex (fsync on HDD/NAS can take hundreds of ms).
+func (p *dvrPersist) takeJournal() (f *os.File, needSync bool) {
+	if p == nil || p.journal == nil {
+		return nil, false
+	}
+	f = p.journal
+	needSync = p.journalOps > 0
+	p.journal = nil
+	return f, needSync
 }
 
 func (p *dvrPersist) openJournalAppend() error {
@@ -815,6 +896,35 @@ func (p *dvrPersist) truncateJournal() error {
 	return nil
 }
 
+func appendJournalOpFile(path string, hash uint64, op dvrJournalOp) error {
+	if path == "" {
+		return nil
+	}
+	raw, err := encodeJournalOp(op)
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return err
+	}
+	fi, err := os.Stat(path)
+	createHdr := err != nil || fi.Size() == 0
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	if createHdr {
+		if _, err = f.Write(journalHeader(hash)); err != nil {
+			return err
+		}
+	}
+	if _, err = f.Write(raw); err != nil {
+		return err
+	}
+	return f.Sync()
+}
+
 func (p *dvrPersist) writeOp(op dvrJournalOp) error {
 	if p == nil || p.journal == nil {
 		return nil
@@ -828,6 +938,9 @@ func (p *dvrPersist) writeOp(op dvrJournalOp) error {
 		return err
 	}
 	p.journalOps++
+	if dvrJournalSyncEvery > 0 && p.journalOps%dvrJournalSyncEvery == 0 {
+		_ = p.journal.Sync()
+	}
 	return nil
 }
 

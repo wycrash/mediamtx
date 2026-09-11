@@ -44,6 +44,49 @@ func TestStorageDefaults(t *testing.T) {
 	require.Equal(t, StorageStrategyRoundRobin, s.Strategy)
 	require.NotNil(t, s.MaxUsedPercent)
 	require.Equal(t, float64(90), *s.MaxUsedPercent)
+	require.Nil(t, s.DeleteUntilPercent)
 	require.Equal(t, "dvr", conf.Paths["cam1"].Storage)
 	require.Equal(t, []string{"/mnt/a", "/mnt/b"}, conf.Paths["cam1"].StorageDisks)
+}
+
+func TestStorageDeleteUntilPercent(t *testing.T) {
+	t.Run("ok", func(t *testing.T) {
+		tmpf := createTempFile(t, []byte(
+			"storages:\n"+
+				"  dvr:\n"+
+				"    maxUsedPercent: 90\n"+
+				"    deleteUntilPercent: 85\n"+
+				"    disks: [/mnt/a]\n"+
+				"paths:\n"+
+				"  cam1:\n"+
+				"    storage: dvr\n"+
+				"    recordPath: '%path/%Y-%m-%d_%H-%M-%S-%f'\n"))
+		conf, _, err := Load(tmpf, nil, nil)
+		require.NoError(t, err)
+		require.Equal(t, float64(85), *conf.Storages["dvr"].DeleteUntilPercent)
+	})
+
+	t.Run("must be lower than max", func(t *testing.T) {
+		tmpf := createTempFile(t, []byte(
+			"storages:\n"+
+				"  dvr:\n"+
+				"    maxUsedPercent: 90\n"+
+				"    deleteUntilPercent: 90\n"+
+				"    disks: [/mnt/a]\n"))
+		_, _, err := Load(tmpf, nil, nil)
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "deleteUntilPercent")
+	})
+
+	t.Run("requires maxUsedPercent", func(t *testing.T) {
+		tmpf := createTempFile(t, []byte(
+			"storages:\n"+
+				"  dvr:\n"+
+				"    maxUsedPercent: 0\n"+
+				"    deleteUntilPercent: 50\n"+
+				"    disks: [/mnt/a]\n"))
+		_, _, err := Load(tmpf, nil, nil)
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "requires 'maxUsedPercent'")
+	})
 }

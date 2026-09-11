@@ -1,6 +1,7 @@
 package compatapi
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
@@ -58,6 +59,9 @@ func segsFromSnapshot(common string, snap dvrSnapshot) []*IndexedSegment {
 		}
 		if !seg.fmp4.Ready && (seg.fmp4.Duration > 0 || seg.fmp4.MoofCount > 0 || seg.fmp4.codecID > 0) {
 			seg.fmp4.Ready = true
+		}
+		if seg.fmp4.Ready {
+			seg.countedInMeta = true
 		}
 		out = append(out, seg)
 	}
@@ -221,7 +225,7 @@ func (idx *Index) rangesNeedRepair(pathName string) bool {
 	return len(pe.ranges) == 0
 }
 
-func (idx *Index) rebuildRangesFromDayFiles(pathName string) {
+func (idx *Index) rebuildRangesFromDayFiles(pathName string, persist bool) {
 	idx.mutex.RLock()
 	pe := idx.paths[pathName]
 	if pe == nil || len(pe.days) == 0 {
@@ -258,7 +262,9 @@ func (idx *Index) rebuildRangesFromDayFiles(pathName string) {
 		pe.diskRanges = diskRanges
 	}
 	idx.mutex.Unlock()
-	idx.writeMeta(pathName)
+	if persist {
+		idx.writeMeta(pathName)
+	}
 }
 
 func (pe *pathIndex) setDayNSeg(day string, n int) {
@@ -270,9 +276,16 @@ func (pe *pathIndex) setDayNSeg(day string, n int) {
 	}
 	for i := range pe.days {
 		if pe.days[i].Date == day {
+			if n == 0 {
+				pe.days = append(pe.days[:i], pe.days[i+1:]...)
+				return
+			}
 			pe.days[i].NSeg = uint32(n)
 			return
 		}
+	}
+	if n == 0 {
+		return
 	}
 	pe.days = append(pe.days, dvrDayInfo{Date: day, NSeg: uint32(n)})
 	sort.Slice(pe.days, func(i, j int) bool { return pe.days[i].Date < pe.days[j].Date })
@@ -333,6 +346,16 @@ func (pe *pathIndex) dayIsPinned(day string) bool {
 }
 
 func (idx *Index) writeMeta(pathName string) {
+	t0 := time.Now()
+	nSeg := 0
+	nLayouts := 0
+	defer func() {
+		d := time.Since(t0)
+		idx.debug.noteWriteMeta(d)
+		idx.logSlow("writeMeta", pathName, d,
+			fmt.Sprintf("segments=%d layouts=%d", nSeg, nLayouts))
+	}()
+
 	idx.mutex.Lock()
 	pe := idx.paths[pathName]
 	if pe == nil {
@@ -340,6 +363,8 @@ func (idx *Index) writeMeta(pathName string) {
 		return
 	}
 	layouts := append([]dvrPathLayout(nil), pe.allLayouts()...)
+	nLayouts = len(layouts)
+	nSeg = len(pe.segments)
 	if len(layouts) == 0 {
 		idx.mutex.Unlock()
 		return
@@ -347,42 +372,6 @@ func (idx *Index) writeMeta(pathName string) {
 	hash := uint64(0)
 	if pe.persist != nil {
 		hash = pe.persist.hash
-	}
-	type acc struct {
-		days map[string]int
-	}
-	byDisk := make(map[string]*acc, len(layouts))
-	for _, l := range layouts {
-		byDisk[l.common] = &acc{days: make(map[string]int)}
-	}
-	liveDay := make(map[string]map[string]struct{}, len(layouts))
-	for _, s := range pe.segments {
-		c := s.common
-		if c == "" {
-			c = pe.commonPath
-		}
-		a := byDisk[c]
-		if a == nil {
-			continue
-		}
-		day := dvrDayDate(s.Start)
-		a.days[day]++
-		if liveDay[c] == nil {
-			liveDay[c] = make(map[string]struct{})
-		}
-		liveDay[c][day] = struct{}{}
-	}
-	for common, stored := range pe.diskDays {
-		a := byDisk[common]
-		if a == nil {
-			continue
-		}
-		for day, n := range stored {
-			if _, live := liveDay[common][day]; live {
-				continue
-			}
-			a.days[day] = n
-		}
 	}
 	items := make([]struct {
 		path string
@@ -392,26 +381,23 @@ func (idx *Index) writeMeta(pathName string) {
 		if l.meta == "" {
 			continue
 		}
-		a := byDisk[l.common]
-		m := dvrMeta{Hash: hash}
-		if a != nil {
-			m.Ranges = append([]RecordingRange(nil), pe.diskRanges[l.common]...)
-			for _, s := range pe.segments {
-				c := s.common
-				if c == "" {
-					c = pe.commonPath
-				}
-				if c != l.common {
-					continue
-				}
-				m.Ranges = appendRecordingRange(m.Ranges, s.Start, trustedSegDuration(s.fmp4.Duration, 0, pe.segmentDuration), pe.segmentDuration)
-			}
-			for day, n := range a.days {
+		// diskRanges / diskDays are maintained incrementally (appendDiskRange,
+		// setDiskDayNSeg, rebuildRangesFromDayFiles). Re-merging every live
+		// segment here was O(N²): each older Start triggered mergeRecordingRanges
+		// against an already-complete diskRanges tail (see pprof CompleteSegment).
+		m := dvrMeta{
+			Hash:   hash,
+			Ranges: append([]RecordingRange(nil), pe.diskRanges[l.common]...),
+		}
+		if days := pe.diskDays[l.common]; len(days) > 0 {
+			m.Days = make([]dvrDayInfo, 0, len(days))
+			for day, n := range days {
 				m.Days = append(m.Days, dvrDayInfo{Date: day, NSeg: uint32(n)})
 			}
 			sort.Slice(m.Days, func(i, j int) bool { return m.Days[i].Date < m.Days[j].Date })
-			pe.loadDiskDays(l.common, m.Days)
-			pe.storeDiskRanges(l.common, m.Ranges)
+		} else if len(pe.days) > 0 && (l.common == pe.commonPath || pe.commonPath == "") {
+			// Single-disk / unset common: fall back to path-level day counters.
+			m.Days = append([]dvrDayInfo(nil), pe.days...)
 		}
 		items = append(items, struct {
 			path string
@@ -424,14 +410,9 @@ func (idx *Index) writeMeta(pathName string) {
 	}
 }
 
-type compactJob struct {
-	snapPath     string
-	journalPath  string
-	snap         dvrSnapshot
-	boundPersist bool
-}
-
-func (idx *Index) compactOpenDay(pathName string) {
+// sealOpenDay closes the open-day journal (fsync) without rewriting a snapshot.
+// The journal file is the durable day index; next startup replays it.
+func (idx *Index) sealOpenDay(pathName string) {
 	idx.mutex.Lock()
 	pe := idx.paths[pathName]
 	if pe == nil || pe.persist == nil || pe.openDay == "" {
@@ -439,59 +420,19 @@ func (idx *Index) compactOpenDay(pathName string) {
 		return
 	}
 	day := pe.openDay
-	layouts := append([]dvrPathLayout(nil), pe.allLayouts()...)
-	if len(layouts) == 0 {
-		idx.mutex.Unlock()
-		return
-	}
-	hash := pe.persist.hash
-	boundSnap := pe.persist.snapPath
-	var jobs []compactJob
-	total := 0
-	for _, l := range layouts {
-		var segs []*IndexedSegment
-		for _, seg := range pe.segments {
-			if dvrDayDate(seg.Start) != day {
-				continue
-			}
-			if l.common != "" && seg.common != "" && seg.common != l.common {
-				continue
-			}
-			segs = append(segs, seg)
+	n := 0
+	for _, seg := range pe.segments {
+		if dvrDayDate(seg.Start) == day && seg.fmp4.Ready {
+			n++
 		}
-		if len(segs) == 0 {
-			continue
-		}
-		snap := snapshotFromSegs(hash, l.common, segs, pe.internedTracks)
-		total += len(snap.Segs)
-		jobs = append(jobs, compactJob{
-			snapPath:     l.daySnap(day),
-			journalPath:  l.dayJournal(day),
-			snap:         snap,
-			boundPersist: boundSnap != "" && l.daySnap(day) == boundSnap,
-		})
 	}
-	if len(jobs) == 0 {
-		idx.mutex.Unlock()
-		return
+	if n > 0 {
+		pe.setDayNSeg(day, n)
 	}
 	p := pe.persist
-	pe.setDayNSeg(day, total)
 	idx.mutex.Unlock()
 
-	var boundFailed bool
-	for _, j := range jobs {
-		err := writeSnapshotFile(j.snapPath, j.snap)
-		if err != nil {
-			if j.boundPersist {
-				boundFailed = true
-			}
-			continue
-		}
-		if !j.boundPersist {
-			_ = writeEmptyJournal(j.journalPath, hash)
-		}
-	}
+	p.closeJournal()
 
 	idx.mutex.Lock()
 	defer idx.mutex.Unlock()
@@ -499,21 +440,25 @@ func (idx *Index) compactOpenDay(pathName string) {
 	if pe == nil || pe.persist != p {
 		return
 	}
-	if boundFailed {
-		_ = p.openJournalAppend()
-		return
-	}
-	_ = p.truncateJournal()
-	for i := range pe.internedTracks {
-		p.savedCodec[uint8(i+1)] = struct{}{}
-	}
+	p.ready = false
 }
 
-func writeEmptyJournal(path string, hash uint64) error {
-	return writeFileAtomic(path, journalHeader(hash))
+// compactOpenDay is kept as a name used at day-change call sites; it seals the
+// journal only (no MTXI snapshot dump).
+func (idx *Index) compactOpenDay(pathName string) {
+	idx.sealOpenDay(pathName)
 }
 
 func applyJournalOps(snap dvrSnapshot, ops []dvrJournalOp) dvrSnapshot {
+	if len(ops) == 0 {
+		return snap
+	}
+	byRel := make(map[string]int, len(snap.Segs)+len(ops))
+	for i, rec := range snap.Segs {
+		if rec.Rel != "" {
+			byRel[rec.Rel] = i
+		}
+	}
 	for _, op := range ops {
 		switch op.Op {
 		case dvrOpCodec:
@@ -526,53 +471,111 @@ func applyJournalOps(snap dvrSnapshot, ops []dvrJournalOp) dvrSnapshot {
 			}
 			snap.Codecs[id-1] = op.Tracks
 		case dvrOpUpsert:
-			replaced := false
-			for i := range snap.Segs {
-				if snap.Segs[i].Rel == op.Seg.Rel {
-					snap.Segs[i] = op.Seg
-					replaced = true
-					break
-				}
+			if op.Seg.Rel == "" {
+				continue
 			}
-			if !replaced {
-				snap.Segs = append(snap.Segs, op.Seg)
+			if i, ok := byRel[op.Seg.Rel]; ok {
+				snap.Segs[i] = op.Seg
+				continue
 			}
+			byRel[op.Seg.Rel] = len(snap.Segs)
+			snap.Segs = append(snap.Segs, op.Seg)
 		case dvrOpDelete:
-			filtered := snap.Segs[:0]
-			for _, rec := range snap.Segs {
-				if rec.Rel != op.Seg.Rel {
-					filtered = append(filtered, rec)
+			i, ok := byRel[op.Seg.Rel]
+			if !ok {
+				continue
+			}
+			snap.Segs = append(snap.Segs[:i], snap.Segs[i+1:]...)
+			delete(byRel, op.Seg.Rel)
+			for j := i; j < len(snap.Segs); j++ {
+				if snap.Segs[j].Rel != "" {
+					byRel[snap.Segs[j].Rel] = j
 				}
 			}
-			snap.Segs = filtered
 		}
 	}
 	return snap
 }
 
-func loadOneDaySnapshot(l dvrPathLayout, day string, hash uint64) (dvrSnapshot, bool) {
+func cloneDaySnapshot(s dvrSnapshot) dvrSnapshot {
+	out := dvrSnapshot{Hash: s.Hash}
+	if len(s.Codecs) > 0 {
+		out.Codecs = append([][]*fmp4.InitTrack(nil), s.Codecs...)
+	}
+	if len(s.Segs) > 0 {
+		out.Segs = append([]dvrSegRec(nil), s.Segs...)
+	}
+	return out
+}
+
+func loadOneDaySnapshot(l dvrPathLayout, day string, hash uint64) (dvrSnapshot, []dvrJournalOp, bool) {
+	snap, ops, ok, _ := loadOneDayIndex(l, day, hash)
+	return snap, ops, ok
+}
+
+func loadOneDayIndex(l dvrPathLayout, day string, hash uint64) (dvrSnapshot, []dvrJournalOp, bool, bool) {
+	snap, ops, ok, corrupt, _ := loadOneDayIndexDetail(l, day, hash)
+	return snap, ops, ok, corrupt
+}
+
+func loadOneDayIndexDetail(l dvrPathLayout, day string, hash uint64) (dvrSnapshot, []dvrJournalOp, bool, bool, loadDayOp) {
+	info := loadDayOp{day: day}
 	if l.common == "" || day == "" {
-		return dvrSnapshot{}, false
+		return dvrSnapshot{}, nil, false, false, info
 	}
-	snapPath := l.daySnap(day)
-	journalPath := l.dayJournal(day)
-	snap, err := readSnapshotFile(snapPath)
-	if err != nil || (hash != 0 && snap.Hash != hash) {
-		snap = dvrSnapshot{}
-		if hash != 0 {
-			ops, _ := readJournalFile(journalPath, hash)
-			if len(ops) == 0 {
-				return dvrSnapshot{}, false
-			}
-		} else {
-			return dvrSnapshot{}, false
-		}
+
+	tRead := time.Now()
+	snapData, snapErr := os.ReadFile(l.daySnap(day))
+	if snapErr == nil {
+		info.snapB = int64(len(snapData))
 	}
-	if hash != 0 {
-		ops, _ := readJournalFile(journalPath, hash)
+	jourData, jErr := os.ReadFile(l.dayJournal(day))
+	if os.IsNotExist(jErr) {
+		jourData, jErr = nil, nil
+	}
+	if jErr == nil {
+		info.journalB = int64(len(jourData))
+	}
+	info.read = time.Since(tRead)
+
+	tParse := time.Now()
+	var snap dvrSnapshot
+	if snapErr == nil {
+		snap, snapErr = decodeSnapshot(snapData)
+	}
+	if snapErr != nil || (hash != 0 && snap.Hash != hash) {
+		snap = dvrSnapshot{Hash: hash}
+	}
+	if jErr != nil {
+		info.parse = time.Since(tParse)
+		info.d = info.read + info.parse
+		info.corrupt = true
+		return dvrSnapshot{Hash: hash}, nil, false, true, info
+	}
+	ops, jErr := decodeJournalBytes(jourData, hash)
+	if jErr != nil {
+		info.parse = time.Since(tParse)
+		info.d = info.read + info.parse
+		info.corrupt = true
+		return dvrSnapshot{Hash: hash}, nil, false, true, info
+	}
+	if len(snap.Segs) == 0 && len(ops) == 0 {
+		info.parse = time.Since(tParse)
+		info.d = info.read + info.parse
+		return dvrSnapshot{}, ops, false, false, info
+	}
+	if len(ops) > 0 {
 		snap = applyJournalOps(snap, ops)
 	}
-	return snap, true
+	if snap.Hash == 0 {
+		snap.Hash = hash
+	}
+	info.parse = time.Since(tParse)
+	info.d = info.read + info.parse
+	info.segs = len(snap.Segs)
+	info.ops = len(ops)
+	info.ok = true
+	return snap, ops, true, false, info
 }
 
 func (idx *Index) loadDaySegs(pathName, day string) []*IndexedSegment {
@@ -591,7 +594,7 @@ func (idx *Index) loadDaySegs(pathName, day string) []*IndexedSegment {
 
 	var segs []*IndexedSegment
 	for _, l := range layouts {
-		snap, ok := loadOneDaySnapshot(l, day, hash)
+		snap, ok := idx.loadCachedDaySnapshot(l, day, hash)
 		if !ok {
 			continue
 		}
@@ -618,7 +621,7 @@ func (idx *Index) loadDaySnapshot(pathName, day string) (dvrSnapshot, bool) {
 	var merged dvrSnapshot
 	ok := false
 	for _, l := range layouts {
-		snap, loaded := loadOneDaySnapshot(l, day, hash)
+		snap, loaded := idx.loadCachedDaySnapshot(l, day, hash)
 		if !loaded {
 			continue
 		}
@@ -632,29 +635,155 @@ func (idx *Index) loadDaySnapshot(pathName, day string) (dvrSnapshot, bool) {
 	return merged, ok
 }
 
-// diskIndexHealthy is true when this disk's meta matches hash and, if it lists
-// days, at least one day snapshot or journal can be loaded. Meta alone is not
-// enough: a copied/stale meta with deleted .mtx-dvr-index* must rebuild.
-func diskIndexHealthy(l dvrPathLayout, hash uint64) (dvrMeta, bool) {
-	if l.meta == "" {
-		return dvrMeta{}, false
+func (idx *Index) beginSnapMemo() {
+	if idx == nil {
+		return
 	}
+	idx.snapMemoMu.Lock()
+	idx.snapMemo = make(map[string]snapMemoEntry)
+	idx.snapMemoMu.Unlock()
+}
+
+func (idx *Index) endSnapMemo() {
+	if idx == nil {
+		return
+	}
+	idx.snapMemoMu.Lock()
+	idx.snapMemo = nil
+	idx.snapMemoMu.Unlock()
+}
+
+func snapMemoKey(l dvrPathLayout, day string) string {
+	return l.dayJournal(day)
+}
+
+func (idx *Index) loadCachedDaySnapshot(l dvrPathLayout, day string, hash uint64) (dvrSnapshot, bool) {
+	key := snapMemoKey(l, day)
+	if idx != nil && key != "" {
+		idx.snapMemoMu.Lock()
+		if idx.snapMemo != nil {
+			if e, ok := idx.snapMemo[key]; ok {
+				idx.snapMemoMu.Unlock()
+				return cloneDaySnapshot(e.snap), e.ok
+			}
+		}
+		idx.snapMemoMu.Unlock()
+	}
+	snap, ops, ok, corrupt := loadOneDayIndex(l, day, hash)
+	if idx != nil && key != "" {
+		idx.snapMemoMu.Lock()
+		if idx.snapMemo != nil {
+			idx.snapMemo[key] = snapMemoEntry{
+				snap: cloneDaySnapshot(snap), ops: ops, ok: ok, corrupt: corrupt,
+			}
+		}
+		idx.snapMemoMu.Unlock()
+	}
+	return snap, ok
+}
+
+func (idx *Index) cachedJournalOps(l dvrPathLayout, day string) ([]dvrJournalOp, bool) {
+	if idx == nil {
+		return nil, false
+	}
+	key := snapMemoKey(l, day)
+	idx.snapMemoMu.Lock()
+	defer idx.snapMemoMu.Unlock()
+	if idx.snapMemo == nil {
+		return nil, false
+	}
+	e, ok := idx.snapMemo[key]
+	if !ok {
+		return nil, false
+	}
+	return e.ops, true
+}
+
+// loadDiskMeta reads meta (list of day indexes) then each named day journal.
+// A missing day file is skipped. A present but unreadable journal is queued
+// for rebuild. Walk of recordings is not used here.
+func (idx *Index) loadDiskMeta(l dvrPathLayout, hash uint64, tr *loadPathOps) (dvrMeta, []repairDay, []dvrDayInfo, bool) {
+	if l.meta == "" {
+		return dvrMeta{}, nil, nil, false
+	}
+	tMeta := time.Now()
 	meta, err := readMetaFile(l.meta)
+	if tr != nil {
+		tr.meta += time.Since(tMeta)
+	}
 	if err != nil || meta.Hash != hash {
-		return dvrMeta{}, false
+		return dvrMeta{}, nil, nil, false
 	}
 	if len(meta.Days) == 0 {
-		return meta, true
+		return meta, nil, nil, true
 	}
+	var repairs []repairDay
+	loaded := make([]dvrDayInfo, 0, len(meta.Days))
+	tDays := time.Now()
 	for _, d := range meta.Days {
 		if d.Date == "" {
 			continue
 		}
-		if _, ok := loadOneDaySnapshot(l, d.Date, hash); ok {
-			return meta, true
+		snap, _, ok, corrupt := idx.memoLoadDay(l, d.Date, hash, tr)
+		if ok {
+			d.NSeg = uint32(len(snap.Segs))
+			loaded = append(loaded, d)
+			continue
+		}
+		if corrupt {
+			repairs = append(repairs, repairDay{common: l.common, day: d.Date})
 		}
 	}
-	return dvrMeta{}, false
+	if tr != nil {
+		tr.days += time.Since(tDays)
+	}
+	if len(loaded) == 0 && len(repairs) == 0 {
+		return dvrMeta{}, nil, nil, false
+	}
+	if len(loaded) == 0 {
+		return dvrMeta{}, nil, nil, false
+	}
+	return meta, repairs, loaded, true
+}
+
+func (idx *Index) memoLoadDay(l dvrPathLayout, day string, hash uint64, tr *loadPathOps) (dvrSnapshot, []dvrJournalOp, bool, bool) {
+	key := snapMemoKey(l, day)
+	if idx != nil && key != "" {
+		idx.snapMemoMu.Lock()
+		if idx.snapMemo != nil {
+			if e, hit := idx.snapMemo[key]; hit {
+				idx.snapMemoMu.Unlock()
+				return cloneDaySnapshot(e.snap), e.ops, e.ok, e.corrupt
+			}
+		}
+		idx.snapMemoMu.Unlock()
+	}
+	snap, ops, ok, corrupt, info := loadOneDayIndexDetail(l, day, hash)
+	if tr != nil {
+		tr.dayOps = append(tr.dayOps, info)
+	}
+	if idx != nil && key != "" {
+		idx.snapMemoMu.Lock()
+		if idx.snapMemo != nil {
+			idx.snapMemo[key] = snapMemoEntry{
+				snap: cloneDaySnapshot(snap), ops: ops, ok: ok, corrupt: corrupt,
+			}
+		}
+		idx.snapMemoMu.Unlock()
+	}
+	return snap, ops, ok, corrupt
+}
+
+func (idx *Index) diskIndexHealthy(l dvrPathLayout, hash uint64) (dvrMeta, map[string]struct{}, bool) {
+	meta, _, loaded, ok := idx.loadDiskMeta(l, hash, nil)
+	if !ok {
+		return dvrMeta{}, nil, false
+	}
+	present := make(map[string]struct{}, len(loaded))
+	for _, d := range loaded {
+		present[d.Date] = struct{}{}
+	}
+	return meta, present, true
 }
 
 func (idx *Index) loadDayToCache(pathName, day string) *loadedDay {
@@ -751,9 +880,9 @@ func (idx *Index) pinDay(pathName, day string) {
 	if pe.pinnedDays == nil {
 		pe.pinnedDays = make(map[string]struct{})
 	}
-	if _, ok := pe.pinnedDays[day]; ok {
-		return
-	}
+	// Always merge disk segs even when already pinned. Live CompleteSegment
+	// during rebuild calls bindPersist and marks the day pinned with only the
+	// live edge; skipping here left archive windows empty after rebuild.
 	for _, seg := range segs {
 		if tr := seg.tracks(); len(tr) > 0 && len(pe.internedTracks) == 0 {
 			pe.internedTracks = append(pe.internedTracks, tr)
@@ -820,19 +949,21 @@ func (idx *Index) segsForDay(pathName, day string) []*IndexedSegment {
 	idx.mutex.RUnlock()
 	if pinned {
 		idx.mutex.RLock()
-		defer idx.mutex.RUnlock()
 		pe = idx.paths[pathName]
-		if pe == nil {
-			return nil
-		}
 		var out []*IndexedSegment
-		for _, s := range pe.segments {
-			if dvrDayDate(s.Start) == day {
-				cp := *s
-				out = append(out, &cp)
+		if pe != nil {
+			for _, s := range pe.segments {
+				if dvrDayDate(s.Start) == day {
+					cp := *s
+					out = append(out, &cp)
+				}
 			}
 		}
-		return out
+		idx.mutex.RUnlock()
+		if len(out) > 0 {
+			return out
+		}
+		// Pinned but empty: fall through to disk (bindPersist without pinDay).
 	}
 	ld := idx.loadDayToCache(pathName, day)
 	if ld == nil {

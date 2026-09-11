@@ -254,6 +254,9 @@ playbackTrustedProxies: []
 # - GET /{path}/index-{start}-{duration}.fmp4.m3u8  (alias of index-*.m3u8)
 # - GET /{path}/archive-{start}-{duration}.m3u8  (DVR player alias of index-*.m3u8)
 # - GET /{path}/timeshift_abs-{start}.m3u8     (archive from timestamp until now)
+# - GET /{path}/mono-timeshift_abs-{start}.m3u8 (alias)
+# - GET /{path}/timeshift_rel-{ago}.m3u8       (continuous delayed-live: edge = now-ago)
+# - GET /{path}/mono-timeshift_rel-{ago}.m3u8  (alias)
 # - GET /{path}/{segment}.ts                  (archive segments)
 # - GET|HEAD /{path}/{Y}/{m}/{d}/{h}/{M}/{s}.mp4 (1-frame preview MP4, no ffmpeg)
 # - GET|HEAD /{path}/{Y}/{m}/{d}/{h}/{M}/{s}-preview.mp4 (same)
@@ -275,6 +278,9 @@ compatAPIAllowOrigins: ["*"]
 compatAPITrustedProxies: []
 # Timezone offset in minutes for #EXT-X-PROGRAM-DATE-TIME (e.g. 180 for +03:00).
 compatAPITimeOffsetMinutes: 0
+# Interval for the Compat DVR index background edge update.
+# 0 disables the periodic update (manual rebuild via Control API still works).
+compatAPIIndexUpdateInterval: 10m
 
 ###############################################
 # Global settings -> RTSP server
@@ -504,9 +510,17 @@ moqTrustedProxies: []
 # storages:
 #   dvr:
 #     # How to pick a disk for a new segment: roundRobin, fillFirst.
+#     # roundRobin alternates disks per path (each camera is spread evenly).
 #     strategy: roundRobin
-#     # Skip a disk when used space is >= this percent. 0 = only ENOSPC.
+#     # Used-space threshold (%).
+#     # Without deleteUntilPercent: skip the disk when used >= this (0 = ENOSPC only).
+#     # With deleteUntilPercent: do not refuse writes; start deleting oldest
+#     # segments so new recordings can continue.
 #     maxUsedPercent: 90
+#     # Optional. When > 0 and lower than maxUsedPercent, free disk space by
+#     # deleting oldest recording segments until usage falls to this value.
+#     # Recording is not blocked at maxUsedPercent while this is set.
+#     deleteUntilPercent: 85
 #     disks:
 #       - /mnt/storage1/recordings
 #       - /mnt/storage2/recordings
@@ -629,6 +643,11 @@ pathDefaults:
   recordMaxPartSize: 50M
   # Minimum duration of each segment.
   recordSegmentDuration: 1h
+  # Target duration of archive/timeshift HLS media entries for fMP4.
+  # 0s = one playlist entry per file (legacy).
+  # 5s = split files longer than max(15s, 2x this value) into ~5s IDR-aligned chunks.
+  # Short files (typical 5s recordings) stay one entry. MPEG-TS is never split.
+  recordHlsChunkDuration: 5s
   # Delete segments after this timespan.
   # Set to 0s to disable automatic deletion.
   recordDeleteAfter: 1d

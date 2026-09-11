@@ -237,13 +237,14 @@ type Path struct {
 	Playback   *bool  `json:"playback,omitempty" deprecated:"true"`
 	RecordPath string `json:"recordPath"`
 	// Named storage pool. Empty keeps recordPath as a single directory.
-	Storage               string       `json:"storage"`
-	StorageDisks          []string     `json:"-"` // filled by Validate()
-	RecordFormat          RecordFormat `json:"recordFormat"`
-	RecordPartDuration    Duration     `json:"recordPartDuration"`
-	RecordMaxPartSize     StringSize   `json:"recordMaxPartSize"`
-	RecordSegmentDuration Duration     `json:"recordSegmentDuration"`
-	RecordDeleteAfter     Duration     `json:"recordDeleteAfter"`
+	Storage                string       `json:"storage"`
+	StorageDisks           []string     `json:"-"` // filled by Validate()
+	RecordFormat           RecordFormat `json:"recordFormat"`
+	RecordPartDuration     Duration     `json:"recordPartDuration"`
+	RecordMaxPartSize      StringSize   `json:"recordMaxPartSize"`
+	RecordSegmentDuration  Duration     `json:"recordSegmentDuration"`
+	RecordHlsChunkDuration Duration     `json:"recordHlsChunkDuration"`
+	RecordDeleteAfter      Duration     `json:"recordDeleteAfter"`
 
 	// HLS
 	HLSVariant HLSVariant `json:"hlsVariant"`
@@ -381,6 +382,7 @@ func (pconf *Path) setDefaults() {
 	pconf.RecordPartDuration = Duration(1 * time.Second)
 	pconf.RecordMaxPartSize = 50 * 1024 * 1024
 	pconf.RecordSegmentDuration = 3600 * Duration(time.Second)
+	pconf.RecordHlsChunkDuration = Duration(5 * time.Second)
 	pconf.RecordDeleteAfter = 24 * 3600 * Duration(time.Second)
 
 	// HLS
@@ -888,6 +890,10 @@ func (pconf *Path) validate(
 
 	if pconf.RecordSegmentDuration > Duration(24*time.Hour) { // avoid overflowing DurationV0 of mvhd
 		return fmt.Errorf("maximum segment duration is 1 day")
+	}
+
+	if pconf.RecordHlsChunkDuration < 0 {
+		return fmt.Errorf("'recordHlsChunkDuration' cannot be negative")
 	}
 
 	if pconf.RecordDeleteAfter != 0 && pconf.RecordDeleteAfter < pconf.RecordSegmentDuration {

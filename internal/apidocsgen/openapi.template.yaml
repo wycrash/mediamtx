@@ -904,6 +904,91 @@ paths:
               schema:
                 $ref: "#/components/schemas/Error"
 
+  /v3/compatindex/rebuild:
+    post:
+      operationId: compatindexRebuildAll
+      tags: [Compat API]
+      summary: queues a forced rebuild of the Compat DVR index for all recording paths.
+      description: |
+        Requests coalesce into a single background worker that rebuilds paths
+        one at a time. Concurrent calls are safe and do not start parallel walks.
+      responses:
+        "200":
+          description: the rebuild was queued.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CompatIndexRebuild"
+        "500":
+          description: server error.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
+  /v3/compatindex/rebuild/{name}:
+    post:
+      operationId: compatindexRebuildPath
+      tags: [Compat API]
+      summary: queues a forced rebuild of the Compat DVR index for one path.
+      description: |
+        Multiple path rebuilds are deduplicated and processed serially by the
+        same worker as the full rebuild endpoint.
+      parameters:
+        - name: name
+          in: path
+          required: true
+          description: the name of the path.
+          schema:
+            type: string
+      responses:
+        "200":
+          description: the rebuild was queued.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CompatIndexRebuild"
+        "400":
+          description: invalid request.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "404":
+          description: path not found.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "500":
+          description: server error.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
+  /v3/compatindex/status:
+    get:
+      operationId: compatindexStatus
+      tags: [Compat API]
+      summary: returns Compat DVR index worker status (current path and rebuild queue).
+      description: |
+        State is idle, rebuild (forced disk rebuild), or update (periodic edge scan).
+        Queue lists paths waiting for a forced rebuild; current is the path being processed.
+      responses:
+        "200":
+          description: the request was successful.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CompatIndexStatus"
+        "500":
+          description: server error.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
   /v3/paths/list:
     get:
       operationId: pathsList
