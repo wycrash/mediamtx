@@ -93,6 +93,31 @@ func TestGroupHLSChunksIDRAligned(t *testing.T) {
 	}
 }
 
+// Parts are cut by partDuration only, so a long GOP can leave a whole file
+// without a single IDR-aligned split candidate. Chunk duration must stay
+// bounded anyway: one chunk spanning the file makes players stall.
+func TestGroupHLSChunksBoundsDurationWithoutIDRCandidates(t *testing.T) {
+	parts := make([]fmp4MediaPart, 60)
+	for i := range parts {
+		parts[i] = fmp4MediaPart{
+			Off:      int64(1000 + i*100),
+			Len:      100,
+			Duration: time.Second,
+			HasIDR:   i == 0,
+		}
+	}
+
+	chunks := groupHLSChunks(parts, 5*time.Second)
+	require.Greater(t, len(chunks), 1)
+
+	var total time.Duration
+	for i, ch := range chunks {
+		require.LessOrEqual(t, ch.Duration, hlsChunkMaxOvershoot*5*time.Second, "chunk %d", i)
+		total += ch.Duration
+	}
+	require.Equal(t, 60*time.Second, total)
+}
+
 func TestGenerateArchiveM3U8SlicesLongFMP4(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "long.mp4")
 	writeFMP4Parts(t, path, 20, 2)

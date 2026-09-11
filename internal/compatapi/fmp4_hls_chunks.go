@@ -16,6 +16,12 @@ import (
 const (
 	hlsChunkWholeFileFloor = 15 * time.Second
 	maxHLSSliceParts       = 8192
+	// hlsChunkMaxOvershoot caps how far past the target a chunk may grow while
+	// waiting for an IDR-carrying part. The recorder cuts parts by
+	// partDuration only, so a stream whose keyframes never land on a part
+	// boundary offers no split candidate and would collapse into one chunk
+	// spanning the whole file.
+	hlsChunkMaxOvershoot   = 3
 	trunSampleFlagsPresent = 0x000400
 	trunFirstSampleFlags   = 0x000004
 )
@@ -314,6 +320,8 @@ func groupHLSChunks(parts []fmp4MediaPart, target time.Duration) []hlsMediaChunk
 		}
 	}
 
+	hardLimit := hlsChunkMaxOvershoot * target
+
 	var out []hlsMediaChunk
 	start := 0
 	var dur time.Duration
@@ -323,7 +331,7 @@ func groupHLSChunks(parts []fmp4MediaPart, target time.Duration) []hlsMediaChunk
 			continue
 		}
 		split := dur >= target
-		if split && anyIDR && !p.HasIDR {
+		if split && anyIDR && !p.HasIDR && dur < hardLimit {
 			split = false
 		}
 		if split {

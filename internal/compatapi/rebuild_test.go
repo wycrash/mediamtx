@@ -3,6 +3,7 @@ package compatapi
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -10,8 +11,73 @@ import (
 
 	"github.com/bluenviron/mediamtx/internal/conf"
 	"github.com/bluenviron/mediamtx/internal/defs"
+	"github.com/bluenviron/mediamtx/internal/recordstore"
 	"github.com/bluenviron/mediamtx/internal/test"
 )
+
+// Segments are cut on keyframes, so a real file name carries arbitrary
+// microseconds in %f. The edge scan has to find it by listing the directory:
+// stepping timestamps by segment duration, as the old probe did, produces a
+// name that no file ever has.
+func TestReconcileAdoptsOffGridSegment(t *testing.T) {
+	for _, ca := range []struct {
+		name     string
+		template string
+	}{
+		{"flat", "%path/%Y-%m-%d_%H-%M-%S-%f"},
+		{"dateDir", "%path/%Y-%m-%d/%H-%M-%S-%f"},
+	} {
+		t.Run(ca.name, func(t *testing.T) {
+			dir := t.TempDir()
+			pathConf := &conf.Path{
+				Name:                  "cam1",
+				RecordPath:            filepath.Join(dir, ca.template),
+				RecordFormat:          conf.RecordFormatFMP4,
+				RecordSegmentDuration: conf.Duration(5 * time.Second),
+				RecordPartDuration:    conf.Duration(time.Second),
+			}
+			format := recordstore.PathAddExtension(
+				strings.ReplaceAll(pathConf.RecordPath, "%path", "cam1"),
+				pathConf.RecordFormat,
+			)
+			write := func(at time.Time) string {
+				fpath := recordstore.Path{Start: at}.Encode(format)
+				writeNamedFMP4(t, fpath, 2)
+				return filepath.Base(fpath)
+			}
+
+			base := time.Date(2020, 1, 1, 0, 0, 0, 0, time.Local)
+			write(base)
+			write(base.Add(5 * time.Second))
+
+			idx := NewIndex()
+			confs := map[string]*conf.Path{"cam1": pathConf}
+			idx.LoadFromDisk(confs)
+			require.Equal(t, 2, idx.ReconcileAll(nil, false).Segments)
+
+			odd := write(base.Add(10*time.Second + 123456*time.Microsecond))
+			// The 24 h edge window straddles midnight, so the scan must cover
+			// the next day too: its own directory, or its own name prefix.
+			nextDay := write(base.Add(24*time.Hour + 2*time.Second + 7*time.Microsecond))
+			idx.ReconcileAll(nil, false)
+
+			// Two queries: SegmentsInWindow clamps to maxArchiveDuration, so
+			// one window cannot span both the first minute and past midnight.
+			found := map[string]bool{}
+			for _, w := range [][2]time.Time{
+				{base, base.Add(time.Minute)},
+				{base.Add(23 * time.Hour), base.Add(25 * time.Hour)},
+			} {
+				for _, s := range idx.SegmentsInWindow("cam1", w[0], w[1].Sub(w[0])) {
+					found[s.Name()] = true
+				}
+			}
+			require.True(t, found[odd], "off-grid segment must be adopted by the directory scan")
+			require.True(t, found[nextDay], "segment past midnight must be adopted by the directory scan")
+			idx.ClosePersist()
+		})
+	}
+}
 
 func TestMarkNeedsRebuildForcesDiskRescan(t *testing.T) {
 	dir := t.TempDir()

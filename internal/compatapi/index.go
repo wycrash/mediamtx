@@ -24,6 +24,7 @@ const (
 	reconcileWalkPause    = 20 * time.Millisecond
 	reconcileInspectPause = 40 * time.Millisecond
 	reconcileEdgeWindow   = 24 * time.Hour
+	reconcileReadDirBatch = 512
 )
 
 var errReconcileStop = errors.New("dvr index reconcile stopped")
@@ -1675,45 +1676,199 @@ func (idx *Index) adoptNewEdge(
 		windows = append(windows, [2]time.Time{now.Add(-reconcileEdgeWindow), now})
 	}
 
-	nProbe := 0
-	for _, w := range windows {
-		from, to := w[0], w[1]
-		if from.IsZero() || to.IsZero() || from.After(to) {
+	added += idx.adoptWindowsFromDirs(pathName, pathConf, windows, nominal, part, stop, slow)
+	return added, inspected, removed
+}
+
+// adoptWindowsFromDirs picks up segments the index does not know yet, by
+// listing directories: one readdir per disk and day instead of a stat per
+// possible segment start. Probing by timestamp cost 17280 stats per camera for
+// a 24 h window of 5 s segments, which is what made startup on dozens of
+// cameras take minutes of pure metadata I/O. It also could not find much:
+// recordPath must contain %f, and real starts are cut on keyframes, so a
+// timestamp stepped by segment duration almost never matches a file name.
+func (idx *Index) adoptWindowsFromDirs(
+	pathName string,
+	pathConf *conf.Path,
+	windows [][2]time.Time,
+	nominal, part time.Duration,
+	stop <-chan struct{},
+	slow bool,
+) int {
+	if len(windows) == 0 || pathConf == nil {
+		return 0
+	}
+	ext := ".mp4"
+	if pathConf.RecordFormat == conf.RecordFormatMPEGTS {
+		ext = ".ts"
+	}
+
+	days := windowDays(windows)
+	added := 0
+	formats := pathConf.RecordPathFormats()
+	for i, layout := range makeDvrLayouts(pathConf, pathName) {
+		root := layout.walkRoot(pathName)
+		if layout.common == "" || root == "" {
 			continue
 		}
-		for t := from; !t.After(to); t = t.Add(nominal) {
-			if nominal <= 0 {
+		raw := pathConf.RecordPath
+		if i < len(formats) {
+			raw = formats[i]
+		}
+		format := recordstore.PathAddExtension(
+			strings.ReplaceAll(raw, "%path", pathName),
+			pathConf.RecordFormat,
+		)
+		format, _ = filepath.Abs(format)
+
+		sc := edgeScan{
+			pathName: pathName,
+			pathConf: pathConf,
+			format:   format,
+			ext:      ext,
+			windows:  windows,
+			nominal:  nominal,
+			part:     part,
+		}
+
+		if layout.dateDir {
+			for _, day := range days {
+				if stopped(stop) {
+					return added
+				}
+				added += idx.adoptDirSegments(sc, filepath.Join(root, dvrDayDate(day)), stop, slow)
+			}
+			continue
+		}
+		// One flat directory holds the whole retention window, so narrow by
+		// name before paying for a decode. A template whose basename does not
+		// start with the date yields no prefix for some day, and then the
+		// whole filter has to be dropped rather than applied partially.
+		for _, day := range days {
+			p := dayNamePrefix(format, day)
+			if p == "" {
+				sc.prefixes = nil
 				break
 			}
+			sc.prefixes = append(sc.prefixes, p)
+		}
+		added += idx.adoptDirSegments(sc, root, stop, slow)
+	}
+	return added
+}
+
+type edgeScan struct {
+	pathName string
+	pathConf *conf.Path
+	format   string
+	ext      string
+	// prefixes limits which basenames are worth decoding. Empty accepts all.
+	prefixes []string
+	windows  [][2]time.Time
+	nominal  time.Duration
+	part     time.Duration
+}
+
+// windowDays returns local midnights of every day the windows touch.
+func windowDays(windows [][2]time.Time) []time.Time {
+	seen := make(map[string]struct{})
+	var out []time.Time
+	for _, w := range windows {
+		if w[0].IsZero() || w[1].IsZero() || w[0].After(w[1]) {
+			continue
+		}
+		from := w[0].In(time.Local)
+		day := time.Date(from.Year(), from.Month(), from.Day(), 0, 0, 0, 0, time.Local)
+		for ; !day.After(w[1]) && len(out) <= 32; day = day.AddDate(0, 0, 1) {
+			date := dvrDayDate(day)
+			if _, ok := seen[date]; ok {
+				continue
+			}
+			seen[date] = struct{}{}
+			out = append(out, day)
+		}
+	}
+	return out
+}
+
+// dayNamePrefix is the basename prefix every segment recorded on day shares.
+// Found by encoding the first and last instant of the day and keeping the
+// common head, so it works for any template including %s.
+func dayNamePrefix(format string, day time.Time) string {
+	lo := filepath.Base(recordstore.Path{Start: day}.Encode(format))
+	hi := filepath.Base(recordstore.Path{
+		Start: day.AddDate(0, 0, 1).Add(-time.Microsecond),
+	}.Encode(format))
+	n := 0
+	for n < len(lo) && n < len(hi) && lo[n] == hi[n] {
+		n++
+	}
+	return lo[:n]
+}
+
+func (idx *Index) adoptDirSegments(sc edgeScan, dir string, stop <-chan struct{}, slow bool) int {
+	f, err := os.Open(dir)
+	if err != nil {
+		return 0
+	}
+	defer f.Close()
+
+	added, work := 0, 0
+	for {
+		// Streamed rather than os.ReadDir: a flat camera directory holds the
+		// whole retention window and must not be sorted into memory to look at
+		// a 24 h edge. Throttling counts adoptions, not directory entries:
+		// pausing per entry would take hours on such a directory.
+		ents, readErr := f.ReadDir(reconcileReadDirBatch)
+		for _, e := range ents {
 			if stopped(stop) {
-				return added, inspected, removed
+				return added
 			}
-			nProbe++
-			if slow && nProbe%reconcileWalkBatch == 0 {
-				if !sleepOrStop(stop, reconcileWalkPause) {
-					return added, inspected, removed
-				}
-			}
-			fpath := encodeRecordFile(pathConf, pathName, t)
-			if fpath == "" {
+			name := e.Name()
+			if e.IsDir() || !strings.HasSuffix(name, sc.ext) || !nameHasPrefix(name, sc.prefixes) {
 				continue
 			}
-			if err := fileExists(fpath); err != nil {
+			fpath := filepath.Join(dir, name)
+			var pa recordstore.Path
+			if !pa.Decode(sc.format, fpath) || !timeInWindows(pa.Start, sc.windows) {
 				continue
 			}
-			if _, ok := idx.FindByName(pathName, filepath.Base(fpath)); ok {
+			if _, ok := idx.FindByName(sc.pathName, name); ok {
 				continue
 			}
-			start, ok := idx.decodeStart(pathName, fpath)
-			if !ok {
-				start = t
+			work++
+			if slow && work%reconcileWalkBatch == 0 && !sleepOrStop(stop, reconcileWalkPause) {
+				return added
 			}
-			if idx.adoptDiskSegment(pathName, pathConf, fpath, start, nominal, part) {
+			if idx.adoptDiskSegment(sc.pathName, sc.pathConf, fpath, pa.Start, sc.nominal, sc.part) {
 				added++
 			}
 		}
+		if readErr != nil || len(ents) == 0 {
+			return added
+		}
 	}
-	return added, inspected, removed
+}
+
+func nameHasPrefix(name string, prefixes []string) bool {
+	if len(prefixes) == 0 {
+		return true
+	}
+	for _, p := range prefixes {
+		if strings.HasPrefix(name, p) {
+			return true
+		}
+	}
+	return false
+}
+
+func timeInWindows(t time.Time, windows [][2]time.Time) bool {
+	for _, w := range windows {
+		if !t.Before(w[0]) && !t.After(w[1]) {
+			return true
+		}
+	}
+	return false
 }
 
 func (idx *Index) adoptDiskSegment(
@@ -1810,22 +1965,6 @@ func estimateMoofCount(duration, part, nominal time.Duration) uint32 {
 		n = 1
 	}
 	return n
-}
-
-func encodeRecordFile(pathConf *conf.Path, pathName string, start time.Time) string {
-	if pathConf == nil || start.IsZero() {
-		return ""
-	}
-	cands := recordstore.PossibleSegmentFiles(pathConf, pathName, start)
-	for _, p := range cands {
-		if _, err := os.Stat(p); err == nil {
-			return p
-		}
-	}
-	if len(cands) > 0 {
-		return cands[0]
-	}
-	return ""
 }
 
 func fileExists(fpath string) error {
