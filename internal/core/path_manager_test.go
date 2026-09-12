@@ -42,9 +42,10 @@ func TestPathManagerDynamicPathAutoDeletion(t *testing.T) {
 		t.Run(ca, func(t *testing.T) {
 			pathConfs := map[string]*conf.Path{
 				"all_others": {
-					Regexp: regexp.MustCompile("^.*$"),
-					Name:   "all_others",
-					Source: "publisher",
+					Regexp:  regexp.MustCompile("^.*$"),
+					Name:    "all_others",
+					Enabled: true,
+					Source:  "publisher",
 				},
 			}
 
@@ -88,9 +89,10 @@ func TestPathManagerDynamicPathAutoDeletion(t *testing.T) {
 func TestPathManagerDynamicPathDescribeAndPublish(t *testing.T) {
 	pathConfs := map[string]*conf.Path{
 		"all_others": {
-			Regexp: regexp.MustCompile("^.*$"),
-			Name:   "all_others",
-			Source: "publisher",
+			Regexp:  regexp.MustCompile("^.*$"),
+			Name:    "all_others",
+			Enabled: true,
+			Source:  "publisher",
 		},
 	}
 
@@ -120,6 +122,65 @@ func TestPathManagerDynamicPathDescribeAndPublish(t *testing.T) {
 		},
 	})
 	require.NoError(t, err)
+}
+
+func TestPathManagerDisabledPath(t *testing.T) {
+	pathConfs := map[string]*conf.Path{
+		"cam1": {
+			Name:    "cam1",
+			Enabled: false,
+			Source:  "publisher",
+		},
+	}
+
+	pm := &pathManager{
+		authManager: test.NilAuthManager,
+		pathConfs:   pathConfs,
+		parent:      test.NilLogger,
+	}
+	pm.initialize()
+	defer pm.close()
+
+	data, err := pm.APIPathsList()
+	require.NoError(t, err)
+	require.Empty(t, data.Items)
+
+	_, err = pm.Describe(defs.PathDescribeReq{
+		AccessRequest: defs.PathAccessRequest{Name: "cam1"},
+	})
+	require.EqualError(t, err, "path 'cam1' is disabled")
+
+	_, err = pm.AddPublisher(defs.PathAddPublisherReq{
+		Author:        &dummyPublisher{},
+		Desc:          &description.Session{},
+		AccessRequest: defs.PathAccessRequest{Name: "cam1"},
+	})
+	require.EqualError(t, err, "path 'cam1' is disabled")
+
+	_, err = pm.AddReader(defs.PathAddReaderReq{
+		Author:        &dummyReader{},
+		AccessRequest: defs.PathAccessRequest{Name: "cam1"},
+	})
+	require.EqualError(t, err, "path 'cam1' is disabled")
+
+	_, err = pm.FindPathConf(defs.PathFindPathConfReq{
+		AccessRequest: defs.PathAccessRequest{Name: "cam1"},
+	})
+	require.EqualError(t, err, "path 'cam1' is disabled")
+
+	pm.ReloadPathConfs(map[string]*conf.Path{
+		"cam1": {
+			Name:    "cam1",
+			Enabled: true,
+			Source:  "publisher",
+		},
+	})
+	time.Sleep(50 * time.Millisecond)
+
+	data, err = pm.APIPathsList()
+	require.NoError(t, err)
+	require.Len(t, data.Items, 1)
+	require.Equal(t, "cam1", data.Items[0].Name)
 }
 
 func TestPathManagerConfigHotReload(t *testing.T) {

@@ -46,6 +46,7 @@ func TestConfFromFile(t *testing.T) {
 		require.Equal(t, true, ok)
 		require.Equal(t, &Path{
 			Name:                       "cam1",
+			Enabled:                    true,
 			Source:                     "publisher",
 			SourceOnDemandStartTimeout: 10 * Duration(time.Second),
 			SourceOnDemandCloseAfter:   10 * Duration(time.Second),
@@ -924,6 +925,35 @@ func TestPathTitle(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, "Front door", conf.Paths["cam1"].Title)
 	require.Equal(t, "", conf.Paths["cam2"].Title)
+}
+
+func TestPathEnabled(t *testing.T) {
+	t.Run("default true", func(t *testing.T) {
+		tmpf := createTempFile(t, []byte(
+			"paths:\n"+
+				"  cam1:\n"))
+
+		conf, _, err := Load(tmpf, nil, nil)
+		require.NoError(t, err)
+		require.Equal(t, true, conf.PathDefaults.Enabled)
+		require.Equal(t, true, conf.Paths["cam1"].Enabled)
+	})
+
+	t.Run("path defaults and per-path override", func(t *testing.T) {
+		tmpf := createTempFile(t, []byte(
+			"pathDefaults:\n"+
+				"  enabled: false\n"+
+				"paths:\n"+
+				"  cam1:\n"+
+				"  cam2:\n"+
+				"    enabled: true\n"))
+
+		conf, _, err := Load(tmpf, nil, nil)
+		require.NoError(t, err)
+		require.Equal(t, false, conf.PathDefaults.Enabled)
+		require.Equal(t, false, conf.Paths["cam1"].Enabled)
+		require.Equal(t, true, conf.Paths["cam2"].Enabled)
+	})
 }
 
 func TestHLSVariant(t *testing.T) {

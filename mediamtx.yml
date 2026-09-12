@@ -534,6 +534,9 @@ pathDefaults:
   ###############################################
   # Default path settings -> General
 
+  # Enable this path. When false, the path is not started
+  # and does not accept publishers or readers.
+  enabled: true
   # Source of the stream. This can be:
   # * publisher -> the stream is provided by a RTSP, RTMP, WebRTC or SRT client
   # * rtsp://user:pass@host:port/path -> the stream is pulled from another RTSP server / camera
@@ -944,6 +947,7 @@ paths:
   # my_camera:
   #   source: rtsp://my_camera
   #   title: Front door
+  #   enabled: true
   #   hlsVariant: fmp4
 
   # Settings under path "all_others" are applied to all paths that

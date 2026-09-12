@@ -22,6 +22,10 @@ import (
 	"github.com/bluenviron/mediamtx/internal/storage"
 )
 
+func errPathDisabled(name string) error {
+	return fmt.Errorf("path '%s' is disabled", name)
+}
+
 func pathConfCanBeUpdated(oldPathConf *conf.Path, newPathConf *conf.Path) bool {
 	clone := oldPathConf.Clone()
 
@@ -153,7 +157,7 @@ func (pm *pathManager) initialize() {
 	pm.chAPIForwardDestGet = make(chan pathAPIForwardDestGetReq)
 
 	for _, pathConf := range pm.pathConfs {
-		if pathConf.Regexp == nil {
+		if pathConf.Regexp == nil && pathConf.Enabled {
 			pm.createPath(pathConf, pathConf.Name, nil)
 		}
 	}
@@ -301,7 +305,7 @@ func (pm *pathManager) doReloadConf(newPaths map[string]*conf.Path) {
 
 	// create new static paths
 	for pathConfName, pathConf := range newPaths {
-		if pathConf.Regexp == nil {
+		if pathConf.Regexp == nil && pathConf.Enabled {
 			if _, ok := pm.paths[pathConfName]; !ok {
 				pm.createPath(pathConf, pathConfName, nil)
 			}
@@ -359,6 +363,10 @@ func (pm *pathManager) doFindPathConf(req defs.PathFindPathConfReq) {
 		req.Res <- defs.PathFindPathConfRes{Err: err}
 		return
 	}
+	if !pathConf.Enabled {
+		req.Res <- defs.PathFindPathConfRes{Err: errPathDisabled(req.AccessRequest.Name)}
+		return
+	}
 
 	user, err2 := pm.authManager.Authenticate(req.AccessRequest.ToAuthRequest())
 	if err2 != nil {
@@ -376,6 +384,10 @@ func (pm *pathManager) doDescribe(req defs.PathDescribeReq) {
 	pathConf, pathMatches, err := conf.FindPathConf(pm.pathConfs, req.AccessRequest.Name)
 	if err != nil {
 		req.Res <- defs.PathDescribeRes{Err: err}
+		return
+	}
+	if !pathConf.Enabled {
+		req.Res <- defs.PathDescribeRes{Err: errPathDisabled(req.AccessRequest.Name)}
 		return
 	}
 
@@ -403,6 +415,10 @@ func (pm *pathManager) doAddReader(req defs.PathAddReaderReq) {
 	pathConf, pathMatches, err := conf.FindPathConf(pm.pathConfs, req.AccessRequest.Name)
 	if err != nil {
 		req.Res <- defs.PathAddReaderRes{Err: err}
+		return
+	}
+	if !pathConf.Enabled {
+		req.Res <- defs.PathAddReaderRes{Err: errPathDisabled(req.AccessRequest.Name)}
 		return
 	}
 
@@ -436,6 +452,10 @@ func (pm *pathManager) doAddPublisher(req defs.PathAddPublisherReq) {
 	pathConf, pathMatches, err := conf.FindPathConf(pm.pathConfs, req.AccessRequest.Name)
 	if err != nil {
 		req.Res <- defs.PathAddPublisherRes{Err: err}
+		return
+	}
+	if !pathConf.Enabled {
+		req.Res <- defs.PathAddPublisherRes{Err: errPathDisabled(req.AccessRequest.Name)}
 		return
 	}
 

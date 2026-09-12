@@ -463,7 +463,7 @@ func (s *Server) onPreviewAt(ctx *gin.Context, pathName string, ts time.Time) {
 
 	seg, ok := s.Index.FindNearest(pathName, ts)
 	if !ok {
-		s.writeError(ctx, http.StatusNotFound, fmt.Errorf("no recording segment found"))
+		s.writeError(ctx, http.StatusNotFound, fmt.Errorf("no recording segment found path=%s", pathName))
 		return
 	}
 
@@ -486,7 +486,7 @@ func (s *Server) onLatestPreview(ctx *gin.Context, pathName, contentType, filena
 
 	seg, ok := s.Index.FindLatest(pathName)
 	if !ok {
-		s.writeError(ctx, http.StatusNotFound, fmt.Errorf("no recording segment found"))
+		s.writeError(ctx, http.StatusNotFound, fmt.Errorf("no recording segment found path=%s", pathName))
 		return
 	}
 

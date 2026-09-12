@@ -1105,6 +1105,9 @@ components:
           type: boolean
           nullable: true
           deprecated: true
+        enabled:
+          type: boolean
+          description: Enable this path. When false, the path is not started.
         fallback:
           type: string
           nullable: true

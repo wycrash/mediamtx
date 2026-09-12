@@ -212,6 +212,8 @@ type Path struct {
 	Regexp *regexp.Regexp `json:"-"`    // filled by Validate()
 	Name   string         `json:"name"` // filled by Validate()
 
+	Enabled bool `json:"enabled"` // Enable this path. When false, the path is not started.
+
 	// General
 	Source                     string   `json:"source"`
 	SourceFingerprint          string   `json:"sourceFingerprint"`
@@ -372,6 +374,7 @@ type Path struct {
 
 func (pconf *Path) setDefaults() {
 	// General
+	pconf.Enabled = true
 	pconf.Source = "publisher"
 	pconf.SourceOnDemandStartTimeout = 10 * Duration(time.Second)
 	pconf.SourceOnDemandCloseAfter = 10 * Duration(time.Second)
