@@ -32,6 +32,7 @@ func pathConfCanBeUpdated(oldPathConf *conf.Path, newPathConf *conf.Path) bool {
 	clone.Name = newPathConf.Name
 	clone.Regexp = newPathConf.Regexp
 	clone.Forward = newPathConf.Forward
+	clone.Enabled = newPathConf.Enabled
 
 	clone.Record = newPathConf.Record
 	clone.RecordPath = newPathConf.RecordPath
@@ -87,6 +88,8 @@ type recordSegmentListener interface {
 	OnSegmentCreate(pathName, segmentPath string)
 	OnSegmentComplete(pathName, segmentPath string, duration time.Duration, parts []recorder.SegmentPart)
 	OnSegmentRemove(segmentPath string)
+	OnPathDisabled(pathName string)
+	OnPathEnabled(pathName string)
 }
 
 type pathManager struct {
@@ -250,10 +253,11 @@ outer:
 }
 
 func (pm *pathManager) doReloadConf(newPaths map[string]*conf.Path) {
+	oldConfs := pm.pathConfs
 	confsToRecreate := make(map[string]struct{})
 	confsToReload := make(map[string]struct{})
 
-	for confName, pathConf := range pm.pathConfs {
+	for confName, pathConf := range oldConfs {
 		if newPath, ok := newPaths[confName]; ok {
 			if !newPath.Equal(pathConf) {
 				if pathConfCanBeUpdated(pathConf, newPath) {
@@ -271,6 +275,12 @@ func (pm *pathManager) doReloadConf(newPaths map[string]*conf.Path) {
 		// path does not have a config anymore: delete it
 		if err != nil {
 			pm.doClosePath(pa)
+			continue
+		}
+
+		if !newPathConf.Enabled {
+			pm.doClosePath(pa)
+			pm.notifyPathDisabled(pathName)
 			continue
 		}
 
@@ -308,6 +318,9 @@ func (pm *pathManager) doReloadConf(newPaths map[string]*conf.Path) {
 		if pathConf.Regexp == nil && pathConf.Enabled {
 			if _, ok := pm.paths[pathConfName]; !ok {
 				pm.createPath(pathConf, pathConfName, nil)
+				if old, exists := oldConfs[pathConfName]; exists && !old.Enabled {
+					pm.notifyPathEnabled(pathConfName)
+				}
 			}
 		}
 	}
@@ -755,6 +768,24 @@ func (pm *pathManager) onRecordSegmentRemove(segmentPath string) {
 	pm.recordSegMu.RUnlock()
 	if l != nil {
 		l.OnSegmentRemove(segmentPath)
+	}
+}
+
+func (pm *pathManager) notifyPathDisabled(pathName string) {
+	pm.recordSegMu.RLock()
+	l := pm.recordSegmentListener
+	pm.recordSegMu.RUnlock()
+	if l != nil {
+		l.OnPathDisabled(pathName)
+	}
+}
+
+func (pm *pathManager) notifyPathEnabled(pathName string) {
+	pm.recordSegMu.RLock()
+	l := pm.recordSegmentListener
+	pm.recordSegMu.RUnlock()
+	if l != nil {
+		l.OnPathEnabled(pathName)
 	}
 }
 

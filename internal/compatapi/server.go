@@ -158,6 +158,22 @@ func (s *Server) OnSegmentRemove(segmentPath string) {
 	s.Index.Remove(segmentPath)
 }
 
+// OnPathDisabled is called after a path is stopped because enabled=false.
+func (s *Server) OnPathDisabled(pathName string) {
+	if s.Index == nil {
+		return
+	}
+	s.Index.OnPathDisabled(pathName)
+}
+
+// OnPathEnabled is called after a path is started because enabled=true.
+func (s *Server) OnPathEnabled(pathName string) {
+	if s.Index == nil {
+		return
+	}
+	s.Index.OnPathEnabled(pathName)
+}
+
 // Close closes Server.
 func (s *Server) Close() {
 	s.Log(logger.Info, "closing")

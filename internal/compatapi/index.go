@@ -156,6 +156,10 @@ type pathIndex struct {
 	// those must not appear in the rebuild queue or the UI lists every
 	// camera that started streaming during startup.
 	checkedDisk bool
+	// reinspectNext is set when the path is re-enabled. The next completed
+	// fMP4 file is inspected once so a new stream init is interned; later
+	// segments keep the existing skip-inspect hot path.
+	reinspectNext bool
 }
 
 // repairDay identifies a per-disk day index that must be rebuilt from media files.
@@ -484,6 +488,64 @@ func (idx *Index) ReloadPathConfs(pathConfs map[string]*conf.Path) IndexLoadStat
 	}
 	st.Segments = idx.SegmentCount() - before
 	return st
+}
+
+// OnPathDisabled closes the live day journal without rewriting packs or
+// walking recordings. Call after the recorder has flushed its last segment.
+func (idx *Index) OnPathDisabled(pathName string) {
+	if idx == nil || pathName == "" {
+		return
+	}
+	idx.mutex.Lock()
+	pe := idx.paths[pathName]
+	if pe == nil || pe.persist == nil {
+		idx.mutex.Unlock()
+		return
+	}
+	p := pe.persist
+	idx.mutex.Unlock()
+	p.closeJournal()
+	idx.mutex.Lock()
+	if pe := idx.paths[pathName]; pe != nil && pe.persist == p {
+		p.ready = false
+	}
+	idx.mutex.Unlock()
+}
+
+// OnPathEnabled prepares a re-enabled path so the next completed file is
+// inspected once. If today's pinned RAM is missing journal segments, pinDay
+// merges them. Startup load is not involved.
+func (idx *Index) OnPathEnabled(pathName string) {
+	if idx == nil || pathName == "" {
+		return
+	}
+	idx.mutex.Lock()
+	pe := idx.paths[pathName]
+	if pe == nil {
+		idx.mutex.Unlock()
+		return
+	}
+	pe.reinspectNext = true
+	day := pe.openDay
+	if day == "" {
+		day = dvrDayDate(time.Now())
+	}
+	needPin := false
+	if day != "" && pe.dayIsPinned(day) {
+		nRAM := 0
+		for _, s := range pe.segments {
+			if dvrDayDate(s.Start) == day {
+				nRAM++
+			}
+		}
+		if n := pe.dayNSeg(day); n > 0 && nRAM < n {
+			needPin = true
+		}
+	}
+	idx.mutex.Unlock()
+	if needPin {
+		idx.pinDay(pathName, day)
+	}
 }
 
 // LoadFromDisk loads snapshot+journal if present. It never walks recordings:
@@ -2414,8 +2476,9 @@ type ClosePersistResult struct {
 	Dirty int // paths whose journal had pending ops (fsynced)
 }
 
-// ClosePersist fsyncs and closes per-path journals. Day indexes are append-only
-// journals; snapshots are not rewritten on shutdown. Next start replays journals.
+// ClosePersist fsyncs and closes per-path journals and writes the existing
+// .mtx-dvr-meta (ranges / day counts) for paths that recorded since last
+// meta flush. Snapshots are not rewritten. Next start replays journals.
 func (idx *Index) ClosePersist() ClosePersistResult {
 	idx.flushDirtyPacks()
 	idx.mutex.Lock()
@@ -2451,6 +2514,7 @@ func (idx *Index) ClosePersist() ClosePersistResult {
 			for j := range ch {
 				if j.dirty {
 					dirtyN.Add(1)
+					idx.writeMeta(j.name)
 				}
 				idx.mutex.Lock()
 				var f *os.File
@@ -2520,8 +2584,12 @@ func (idx *Index) CompleteSegment(pathName, fpath string, duration time.Duration
 	day := dvrDayDate(start)
 	idx.mutex.RLock()
 	prev := ""
-	if pe := idx.paths[pathName]; pe != nil && pe.openDay != "" && pe.openDay != day {
-		prev = pe.openDay
+	reinspect := false
+	if pe := idx.paths[pathName]; pe != nil {
+		if pe.openDay != "" && pe.openDay != day {
+			prev = pe.openDay
+		}
+		reinspect = pe.reinspectNext
 	}
 	idx.mutex.RUnlock()
 	if prev != "" {
@@ -2562,7 +2630,14 @@ func (idx *Index) CompleteSegment(pathName, fpath string, duration time.Duration
 	if pathConf.RecordFormat == conf.RecordFormatFMP4 {
 		meta.MoofCount = estimateMoofCount(duration, part, nominal)
 		tracks = idx.internedTracksOf(pathName)
-		if len(tracks) == 0 {
+		if len(tracks) == 0 || reinspect {
+			if reinspect {
+				idx.mutex.Lock()
+				if pe := idx.paths[pathName]; pe != nil {
+					pe.reinspectNext = false
+				}
+				idx.mutex.Unlock()
+			}
 			tIns := time.Now()
 			ins, tr, ierr := inspectFMP4Segment(fpath)
 			idx.debug.noteInspect(time.Since(tIns))

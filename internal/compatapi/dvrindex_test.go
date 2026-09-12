@@ -30,11 +30,31 @@ func testH264Track() *fmp4.InitTrack {
 
 func writeNamedFMP4(t *testing.T, path string, moofs int) {
 	t.Helper()
+	writeNamedFMP4WithTrack(t, path, moofs, testH264Track())
+}
+
+func testH264TrackAlt() *fmp4.InitTrack {
+	src := testH264Track()
+	h264 := src.Codec.(*mcodecs.H264)
+	sps := append([]byte(nil), h264.SPS...)
+	sps[len(sps)-1] ^= 0x01
+	return &fmp4.InitTrack{
+		ID:        1,
+		TimeScale: 1000,
+		Codec: &mcodecs.H264{
+			SPS: sps,
+			PPS: append([]byte(nil), h264.PPS...),
+		},
+	}
+}
+
+func writeNamedFMP4WithTrack(t *testing.T, path string, moofs int, track *fmp4.InitTrack) {
+	t.Helper()
 	require.NoError(t, os.MkdirAll(filepath.Dir(path), 0o755))
 	f, err := os.Create(path)
 	require.NoError(t, err)
 	defer f.Close()
-	init := fmp4.Init{Tracks: []*fmp4.InitTrack{testH264Track()}}
+	init := fmp4.Init{Tracks: []*fmp4.InitTrack{track}}
 	require.NoError(t, init.Marshal(f))
 	for i := 0; i < moofs; i++ {
 		part := fmp4.Part{
@@ -384,6 +404,7 @@ func TestClosePersistSyncsJournal(t *testing.T) {
 	cam := filepath.Join(dir, "cam1")
 	a := filepath.Join(cam, "2020-01-01_00-00-00-000000.mp4")
 	b := filepath.Join(cam, "2020-01-01_00-00-05-000000.mp4")
+	c := filepath.Join(cam, "2020-01-01_00-00-10-000000.mp4")
 	writeNamedFMP4(t, a, 2)
 
 	pathConf := &conf.Path{
@@ -398,24 +419,41 @@ func TestClosePersistSyncsJournal(t *testing.T) {
 	require.Equal(t, 0, idx.LoadFromDisk(confs).Segments)
 	require.Equal(t, 1, idx.ReconcileAll(nil, false).Segments)
 	writeNamedFMP4(t, b, 3)
-	start := time.Date(2020, 1, 1, 0, 0, 5, 0, time.Local)
-	idx.Add("cam1", b, start)
+	writeNamedFMP4(t, c, 3)
+	startB := time.Date(2020, 1, 1, 0, 0, 5, 0, time.Local)
+	startC := time.Date(2020, 1, 1, 0, 0, 10, 0, time.Local)
+	idx.Add("cam1", b, startB)
 	meta, tracks, err := inspectFMP4Segment(b)
 	require.NoError(t, err)
 	idx.SetFMP4Meta("cam1", b, meta, tracks)
 	idx.PersistUpsert("cam1", b)
+	idx.Add("cam1", c, startC)
+	meta, tracks, err = inspectFMP4Segment(c)
+	require.NoError(t, err)
+	idx.SetFMP4Meta("cam1", c, meta, tracks)
+	idx.PersistUpsert("cam1", c)
 	st := idx.ClosePersist()
 	require.Equal(t, 1, st.Paths)
 	require.Equal(t, 1, st.Dirty)
 
-	// ClosePersist only fsyncs the journal; snapshot compact is deferred.
-	// Next start must still see the upsert via journal replay.
+	layout := makeDvrLayout(pathConf, "cam1")
+	raw, err := os.ReadFile(layout.meta)
+	require.NoError(t, err)
+	onDisk, err := decodeMeta(raw)
+	require.NoError(t, err)
+	require.NotEmpty(t, onDisk.Days)
+	require.Equal(t, uint32(3), onDisk.Days[0].NSeg, "ClosePersist must flush existing .mtx-dvr-meta")
+
 	idx2 := NewIndex()
 	load := idx2.LoadFromDisk(confs)
 	require.Equal(t, 1, load.DiskPaths)
 	out := idx2.SegmentsInWindow("cam1", time.Date(2020, 1, 1, 0, 0, 0, 0, time.Local), time.Minute)
-	require.Len(t, out, 2, "second segment is only in the journal; load must not need to pin it")
+	require.Len(t, out, 3)
 	require.Equal(t, uint32(3), out[1].fmp4.MoofCount)
+	ranges := idx2.Ranges("cam1")
+	require.NotEmpty(t, ranges)
+	end := ranges[len(ranges)-1].From + ranges[len(ranges)-1].Duration
+	require.GreaterOrEqual(t, end, startC.Unix())
 	idx2.ClosePersist()
 }
 

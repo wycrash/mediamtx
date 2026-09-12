@@ -245,6 +245,68 @@ func TestPinDayMergesWhenAlreadyPinned(t *testing.T) {
 	idx.ClosePersist()
 }
 
+func TestIndexPathDisableEnableKeepsArchive(t *testing.T) {
+	dir := t.TempDir()
+	cam := filepath.Join(dir, "cam1")
+	require.NoError(t, os.MkdirAll(cam, 0o755))
+	a := filepath.Join(cam, "2020-01-01_00-00-00-000000.mp4")
+	b := filepath.Join(cam, "2020-01-01_00-00-05-000000.mp4")
+	c := filepath.Join(cam, "2020-01-01_00-00-10-000000.mp4")
+	writeNamedFMP4(t, a, 2)
+	writeNamedFMP4(t, b, 2)
+	writeNamedFMP4WithTrack(t, c, 2, testH264TrackAlt())
+
+	pathConf := &conf.Path{
+		Name:                  "cam1",
+		RecordPath:            filepath.Join(dir, "%path/%Y-%m-%d_%H-%M-%S-%f"),
+		RecordFormat:          conf.RecordFormatFMP4,
+		RecordSegmentDuration: conf.Duration(5 * time.Second),
+		RecordPartDuration:    conf.Duration(time.Second),
+	}
+	confs := map[string]*conf.Path{"cam1": pathConf}
+
+	idx := NewIndex()
+	require.Equal(t, 0, idx.LoadFromDisk(confs).Segments)
+	idx.CompleteSegment("cam1", a, 5*time.Second, nil)
+	idx.CompleteSegment("cam1", b, 5*time.Second, nil)
+	require.Equal(t, 1, idx.MemStats().UniqueTrackPtrs)
+
+	day := "2020-01-01"
+	idx.pinDay("cam1", day)
+	idx.mutex.Lock()
+	pe := idx.paths["cam1"]
+	require.NotNil(t, pe)
+	var latest *IndexedSegment
+	for _, s := range pe.segments {
+		if latest == nil || s.Start.After(latest.Start) {
+			latest = s
+		}
+	}
+	require.NotNil(t, latest)
+	pe.segments = []*IndexedSegment{latest}
+	pe.byName = map[string]*IndexedSegment{latest.Name(): latest}
+	pe.pinnedDays = map[string]struct{}{day: {}}
+	idx.mutex.Unlock()
+
+	idx.OnPathDisabled("cam1")
+	idx.mutex.RLock()
+	require.False(t, idx.paths["cam1"].persist.ready)
+	idx.mutex.RUnlock()
+
+	idx.OnPathEnabled("cam1")
+	idx.mutex.RLock()
+	nRAM := len(idx.paths["cam1"].segments)
+	idx.mutex.RUnlock()
+	require.Equal(t, 2, nRAM, "re-enable must merge the pinned day, not leave only the live edge")
+
+	idx.CompleteSegment("cam1", c, 5*time.Second, nil)
+	start := time.Date(2020, 1, 1, 0, 0, 0, 0, time.Local)
+	out := idx.SegmentsInWindow("cam1", start, time.Minute)
+	require.Len(t, out, 3)
+	require.GreaterOrEqual(t, idx.MemStats().UniqueTrackPtrs, 2, "new stream init after enable must be interned")
+	idx.ClosePersist()
+}
+
 func TestRebuildOnlyDamagedDay(t *testing.T) {
 	dir := t.TempDir()
 	cam := filepath.Join(dir, "cam1")

@@ -14,6 +14,7 @@ import (
 	"github.com/bluenviron/mediamtx/internal/conf"
 	"github.com/bluenviron/mediamtx/internal/defs"
 	"github.com/bluenviron/mediamtx/internal/logger"
+	"github.com/bluenviron/mediamtx/internal/recorder"
 	"github.com/bluenviron/mediamtx/internal/test"
 )
 
@@ -35,6 +36,22 @@ func (d *dummyReader) Log(_ logger.Level, _ string, _ ...any) {}
 
 func (d *dummyReader) APIReaderDescribe() *defs.APIPathReader {
 	return nil
+}
+
+type pathEnableListener struct {
+	disabled []string
+	enabled  []string
+}
+
+func (l *pathEnableListener) OnSegmentCreate(string, string) {}
+func (l *pathEnableListener) OnSegmentComplete(string, string, time.Duration, []recorder.SegmentPart) {
+}
+func (l *pathEnableListener) OnSegmentRemove(string) {}
+func (l *pathEnableListener) OnPathDisabled(name string) {
+	l.disabled = append(l.disabled, name)
+}
+func (l *pathEnableListener) OnPathEnabled(name string) {
+	l.enabled = append(l.enabled, name)
 }
 
 func TestPathManagerDynamicPathAutoDeletion(t *testing.T) {
@@ -181,6 +198,53 @@ func TestPathManagerDisabledPath(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, data.Items, 1)
 	require.Equal(t, "cam1", data.Items[0].Name)
+}
+
+func TestPathManagerEnableDisableNotifiesIndex(t *testing.T) {
+	pathConfs := map[string]*conf.Path{
+		"cam1": {
+			Name:    "cam1",
+			Enabled: true,
+			Source:  "publisher",
+		},
+	}
+
+	listener := &pathEnableListener{}
+	pm := &pathManager{
+		authManager: test.NilAuthManager,
+		pathConfs:   pathConfs,
+		parent:      test.NilLogger,
+	}
+	pm.initialize()
+	defer pm.close()
+	pm.SetRecordSegmentListener(listener)
+
+	pm.ReloadPathConfs(map[string]*conf.Path{
+		"cam1": {
+			Name:    "cam1",
+			Enabled: false,
+			Source:  "publisher",
+		},
+	})
+	require.Eventually(t, func() bool {
+		data, err := pm.APIPathsList()
+		return err == nil && len(data.Items) == 0
+	}, time.Second, 10*time.Millisecond)
+	require.Equal(t, []string{"cam1"}, listener.disabled)
+	require.Empty(t, listener.enabled)
+
+	pm.ReloadPathConfs(map[string]*conf.Path{
+		"cam1": {
+			Name:    "cam1",
+			Enabled: true,
+			Source:  "publisher",
+		},
+	})
+	require.Eventually(t, func() bool {
+		data, err := pm.APIPathsList()
+		return err == nil && len(data.Items) == 1
+	}, time.Second, 10*time.Millisecond)
+	require.Equal(t, []string{"cam1"}, listener.enabled)
 }
 
 func TestPathManagerConfigHotReload(t *testing.T) {
