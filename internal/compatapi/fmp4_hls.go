@@ -75,9 +75,8 @@ func rewriteFMP4MediaForHLS(
 		return nil, err
 	}
 	seq := startSeq
+	keptParts := parts[:0]
 	for _, p := range parts {
-		p.SequenceNumber = seq
-		seq++
 		kept := p.Tracks[:0]
 		for _, tr := range p.Tracks {
 			if _, skip := drop[uint32(tr.ID)]; skip {
@@ -89,10 +88,19 @@ func rewriteFMP4MediaForHLS(
 			kept = append(kept, tr)
 		}
 		p.Tracks = kept
+		// Recorder parts are often audio-only (G.711/LPCM). MSE cannot play
+		// those tracks, so skip the moof instead of failing the whole HLS slice.
 		if len(p.Tracks) == 0 {
-			return nil, fmt.Errorf("no HLS-compatible tracks in fragment")
+			continue
 		}
+		p.SequenceNumber = seq
+		seq++
+		keptParts = append(keptParts, p)
 	}
+	if len(keptParts) == 0 {
+		return nil, fmt.Errorf("no HLS-compatible tracks in fragment")
+	}
+	parts = keptParts
 	var buf seekablebuffer.Buffer
 	if err := parts.Marshal(&buf); err != nil {
 		return nil, err

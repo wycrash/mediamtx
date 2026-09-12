@@ -151,6 +151,68 @@ func TestHLSPartsKeepAAC(t *testing.T) {
 	require.Len(t, parts[0].Tracks, 2)
 }
 
+func TestHLSPartsSkipLPCMOnlyFragment(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "seg.mp4")
+	f, err := os.Create(path)
+	require.NoError(t, err)
+
+	init := fmp4.Init{
+		Tracks: []*fmp4.InitTrack{
+			{
+				ID:        1,
+				TimeScale: 90000,
+				Codec: &mcodecs.H264{
+					SPS: test.FormatH264.SPS,
+					PPS: test.FormatH264.PPS,
+				},
+			},
+			{
+				ID:        2,
+				TimeScale: 8000,
+				Codec: &mcodecs.LPCM{
+					BitDepth:     16,
+					SampleRate:   8000,
+					ChannelCount: 1,
+				},
+			},
+		},
+	}
+	require.NoError(t, init.Marshal(f))
+	require.NoError(t, (fmp4.Part{
+		SequenceNumber: 0,
+		Tracks: []*fmp4.PartTrack{{
+			ID:       2,
+			BaseTime: 0,
+			Samples:  []*fmp4.Sample{{Duration: 160, Payload: bytes.Repeat([]byte{0}, 320)}},
+		}},
+	}).Marshal(f))
+	require.NoError(t, (fmp4.Part{
+		SequenceNumber: 1,
+		Tracks: []*fmp4.PartTrack{
+			{
+				ID:       1,
+				BaseTime: 0,
+				Samples:  []*fmp4.Sample{{Duration: 90000, Payload: []byte{0, 0, 0, 1, 9, 0xf0}}},
+			},
+			{
+				ID:       2,
+				BaseTime: 160,
+				Samples:  []*fmp4.Sample{{Duration: 160, Payload: bytes.Repeat([]byte{0}, 320)}},
+			},
+		},
+	}).Marshal(f))
+	require.NoError(t, f.Close())
+
+	mediaW := serveHLSPart(t, path, "hls=media&sn=912&td=62360")
+	require.Equal(t, http.StatusOK, mediaW.Code)
+	var parts fmp4.Parts
+	require.NoError(t, parts.Unmarshal(mediaW.Body.Bytes()))
+	require.Len(t, parts, 1)
+	require.Equal(t, uint32(912), parts[0].SequenceNumber)
+	require.Len(t, parts[0].Tracks, 1)
+	require.Equal(t, 1, parts[0].Tracks[0].ID)
+}
+
 func TestRewriteFMP4MediaForHLSAppliesTimeline(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "seg.mp4")
 	writeH264LPCMSegment(t, path)
