@@ -105,7 +105,7 @@ func (d *Dest) Run(ctx context.Context) error {
 
 	r := &stream.Reader{Parent: d}
 
-	cat, setupTracks, err := protomoq.FromStream(d.Stream.OrigDesc)
+	cat, setupTracks, err := protomoq.FromStream(d.Stream.OrigDesc, d.Stream.OutDescCopy())
 	if err != nil {
 		return err
 	}

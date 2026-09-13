@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/bluenviron/gohlslib/v2"
 	"github.com/bluenviron/gortsplib/v5"
 	"github.com/bluenviron/gortsplib/v5/pkg/auth"
 
@@ -1011,7 +1012,7 @@ func (conf *Conf) Validate(l logger.Writer) error {
 
 		// gohlslib enforces these minimums when the muxer is started:
 		// https://github.com/bluenviron/gohlslib/blob/0df41de8f33f2e1f2231e4c4bec9a9331bc6449b/muxer.go#L316-L326
-		switch conf.HLSVariant {
+		switch conf.PathDefaults.HLSVariant {
 		case HLSVariant(gohlslib.MuxerVariantLowLatency):
 			if conf.HLSSegmentCount < 7 {
 				return fmt.Errorf("'hlsSegmentCount' must be at least 7 when 'hlsVariant' is 'lowLatency'")
