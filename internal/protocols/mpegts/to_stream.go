@@ -105,7 +105,7 @@ func ToStream(
 				}},
 			}
 
-			r.OnDataMPEGxVideo(track, func(pts int64, frame []byte) error {
+			r.OnDataMPEG4Video(track, func(pts int64, frame []byte) error {
 				pts = td.Decode(pts)
 
 				(*subStream).WriteUnit(medi, medi.Formats[0], &unit.Unit{
@@ -121,7 +121,7 @@ func ToStream(
 				Formats: []format.Format{&format.MPEG1Video{}},
 			}
 
-			r.OnDataMPEGxVideo(track, func(pts int64, frame []byte) error {
+			r.OnDataMPEG1Video(track, func(pts int64, frame []byte) error {
 				pts = td.Decode(pts)
 
 				(*subStream).WriteUnit(medi, medi.Formats[0], &unit.Unit{

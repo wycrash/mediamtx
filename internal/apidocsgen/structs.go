@@ -171,6 +171,26 @@ var structs = []struct {
 		typ:          reflect.TypeOf(defs.APIForwardDestList{}),
 	},
 	{
+		externalName: "ForwardDestTypeSpecificRTMP",
+		typ:          reflect.TypeOf(defs.APIForwardDestTypeSpecificRTMP{}),
+	},
+	{
+		externalName: "ForwardDestTypeSpecificMoQ",
+		typ:          reflect.TypeOf(defs.APIForwardDestTypeSpecificMoQ{}),
+	},
+	{
+		externalName: "ForwardDestTypeSpecificRTSP",
+		typ:          reflect.TypeOf(defs.APIForwardDestTypeSpecificRTSP{}),
+	},
+	{
+		externalName: "ForwardDestTypeSpecificSRT",
+		typ:          reflect.TypeOf(defs.APIForwardDestTypeSpecificSRT{}),
+	},
+	{
+		externalName: "ForwardDestTypeSpecificWebRTC",
+		typ:          reflect.TypeOf(defs.APIForwardDestTypeSpecificWebRTC{}),
+	},
+	{
 		externalName: "Recording",
 		typ:          reflect.TypeOf(defs.APIRecording{}),
 	},
@@ -213,6 +233,30 @@ var structs = []struct {
 	{
 		externalName: "SRTConnList",
 		typ:          reflect.TypeOf(defs.APISRTConnList{}),
+	},
+	{
+		externalName: "StaticSource",
+		typ:          reflect.TypeOf(defs.APIStaticSource{}),
+	},
+	{
+		externalName: "StaticSourceTypeSpecificRTMP",
+		typ:          reflect.TypeOf(defs.APIStaticSourceTypeSpecificRTMP{}),
+	},
+	{
+		externalName: "StaticSourceTypeSpecificMoQ",
+		typ:          reflect.TypeOf(defs.APIStaticSourceTypeSpecificMoQ{}),
+	},
+	{
+		externalName: "StaticSourceTypeSpecificRTSP",
+		typ:          reflect.TypeOf(defs.APIStaticSourceTypeSpecificRTSP{}),
+	},
+	{
+		externalName: "StaticSourceTypeSpecificSRT",
+		typ:          reflect.TypeOf(defs.APIStaticSourceTypeSpecificSRT{}),
+	},
+	{
+		externalName: "StaticSourceTypeSpecificWebRTC",
+		typ:          reflect.TypeOf(defs.APIStaticSourceTypeSpecificWebRTC{}),
 	},
 	{
 		externalName: "WebRTCICEServer",
@@ -297,6 +341,20 @@ func goTypeToOpenAPI(rt reflect.Type) (openAPIProperty, error) {
 			Nullable: true,
 		}, nil
 	}
+	if rt == reflect.TypeOf((*defs.APIForwardDestTypeSpecific)(nil)).Elem() {
+		return openAPIProperty{
+			Type:     "object",
+			AllOf:    []openAPIProperty{{Ref: "#/components/schemas/" + schemaName(rt)}},
+			Nullable: true,
+		}, nil
+	}
+	if rt == reflect.TypeOf((*defs.APIStaticSourceTypeSpecific)(nil)).Elem() {
+		return openAPIProperty{
+			Type:     "object",
+			AllOf:    []openAPIProperty{{Ref: "#/components/schemas/" + schemaName(rt)}},
+			Nullable: true,
+		}, nil
+	}
 
 	switch {
 	case rt == reflect.TypeOf(uuid.UUID{}):
@@ -366,13 +424,17 @@ func schemaName(rt reflect.Type) string {
 	if rt == reflect.TypeOf(conf.ForwardDest{}) {
 		return "PathConfForwardDest"
 	}
-
 	if rt == reflect.TypeOf(defs.APIPathTrackCodec("")) {
 		return "PathTrackCodec"
 	}
-
 	if rt == reflect.TypeOf((*defs.APIPathTrackCodecProps)(nil)).Elem() {
 		return "PathTrackCodecProps"
+	}
+	if rt == reflect.TypeOf((*defs.APIForwardDestTypeSpecific)(nil)).Elem() {
+		return "ForwardDestTypeSpecific"
+	}
+	if rt == reflect.TypeOf((*defs.APIStaticSourceTypeSpecific)(nil)).Elem() {
+		return "StaticSourceTypeSpecific"
 	}
 
 	return strings.TrimPrefix(rt.Name(), "API")
@@ -428,7 +490,10 @@ func isStructEnum(rt reflect.Type) bool {
 	case reflect.TypeOf(defs.APIPathReaderType("")):
 		return true
 
-	case reflect.TypeOf(defs.APIForwardDestProtocol("")):
+	case reflect.TypeOf(defs.APIForwardDestType("")):
+		return true
+
+	case reflect.TypeOf(defs.APIForwardDestProtocol("")): //nolint:staticcheck
 		return true
 
 	case reflect.TypeOf(defs.APIForwardDestState("")):
@@ -456,6 +521,9 @@ func isStructEnum(rt reflect.Type) bool {
 		return true
 
 	case reflect.TypeOf(defs.APISRTConnState("")):
+		return true
+
+	case reflect.TypeOf(defs.APIStaticSourceState("")):
 		return true
 	}
 

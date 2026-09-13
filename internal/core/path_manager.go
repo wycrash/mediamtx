@@ -122,20 +122,21 @@ type pathManager struct {
 	kickRecordCleanerFn   func()
 
 	// in
-	chReloadConf         chan map[string]*conf.Path
-	chSetHLSServer       chan pathSetHLSServerReq
-	chRemovePath         chan *path
-	chClosePathIfIdle    chan *path
-	chSetPathReady       chan *path
-	chSetPathNotReady    chan *path
-	chFindPathConf       chan defs.PathFindPathConfReq
-	chDescribe           chan defs.PathDescribeReq
-	chAddReader          chan defs.PathAddReaderReq
-	chAddPublisher       chan defs.PathAddPublisherReq
-	chAPIPathsList       chan pathAPIPathsListReq
-	chAPIPathsGet        chan pathAPIPathsGetReq
-	chAPIForwardDestList chan pathAPIForwardDestListReq
-	chAPIForwardDestGet  chan pathAPIForwardDestGetReq
+	chReloadConf          chan map[string]*conf.Path
+	chSetHLSServer        chan pathSetHLSServerReq
+	chRemovePath          chan *path
+	chClosePathIfIdle     chan *path
+	chSetPathReady        chan *path
+	chSetPathNotReady     chan *path
+	chFindPathConf        chan defs.PathFindPathConfReq
+	chDescribe            chan defs.PathDescribeReq
+	chAddReader           chan defs.PathAddReaderReq
+	chAddPublisher        chan defs.PathAddPublisherReq
+	chAPIPathsList        chan pathAPIPathsListReq
+	chAPIPathsGet         chan pathAPIPathsGetReq
+	chAPIForwardDestsList chan pathAPIForwardDestsListReq
+	chAPIForwardDestsGet  chan pathAPIForwardDestsGetReq
+	chAPIStaticSourcesGet chan pathAPIStaticSourcesGetReq
 }
 
 func (pm *pathManager) initialize() {
@@ -156,8 +157,9 @@ func (pm *pathManager) initialize() {
 	pm.chAddPublisher = make(chan defs.PathAddPublisherReq)
 	pm.chAPIPathsList = make(chan pathAPIPathsListReq)
 	pm.chAPIPathsGet = make(chan pathAPIPathsGetReq)
-	pm.chAPIForwardDestList = make(chan pathAPIForwardDestListReq)
-	pm.chAPIForwardDestGet = make(chan pathAPIForwardDestGetReq)
+	pm.chAPIForwardDestsList = make(chan pathAPIForwardDestsListReq)
+	pm.chAPIForwardDestsGet = make(chan pathAPIForwardDestsGetReq)
+	pm.chAPIStaticSourcesGet = make(chan pathAPIStaticSourcesGetReq)
 
 	for _, pathConf := range pm.pathConfs {
 		if pathConf.Regexp == nil && pathConf.Enabled {
@@ -238,11 +240,14 @@ outer:
 		case req := <-pm.chAPIPathsGet:
 			pm.doAPIPathsGet(req)
 
-		case req := <-pm.chAPIForwardDestList:
-			pm.doAPIForwardDestList(req)
+		case req := <-pm.chAPIForwardDestsList:
+			pm.doAPIForwardDestsList(req)
 
-		case req := <-pm.chAPIForwardDestGet:
-			pm.doAPIForwardDestGet(req)
+		case req := <-pm.chAPIForwardDestsGet:
+			pm.doAPIForwardDestsGet(req)
+
+		case req := <-pm.chAPIStaticSourcesGet:
+			pm.doAPIStaticSourcesGet(req)
 
 		case <-pm.ctx.Done():
 			break outer
@@ -520,24 +525,34 @@ func (pm *pathManager) doAPIPathsGet(req pathAPIPathsGetReq) {
 	req.res <- pathAPIPathsGetRes{path: pa}
 }
 
-func (pm *pathManager) doAPIForwardDestList(req pathAPIForwardDestListReq) {
+func (pm *pathManager) doAPIForwardDestsList(req pathAPIForwardDestsListReq) {
 	pa, ok := pm.paths[req.name]
 	if !ok {
-		req.res <- pathAPIForwardDestListRes{err: conf.ErrPathNotFound}
+		req.res <- pathAPIForwardDestsListRes{err: conf.ErrPathNotFound}
 		return
 	}
 
-	req.res <- pathAPIForwardDestListRes{path: pa}
+	req.res <- pathAPIForwardDestsListRes{path: pa}
 }
 
-func (pm *pathManager) doAPIForwardDestGet(req pathAPIForwardDestGetReq) {
+func (pm *pathManager) doAPIForwardDestsGet(req pathAPIForwardDestsGetReq) {
 	pa, ok := pm.paths[req.name]
 	if !ok {
-		req.res <- pathAPIForwardDestGetRes{err: conf.ErrPathNotFound}
+		req.res <- pathAPIForwardDestsGetRes{err: conf.ErrPathNotFound}
 		return
 	}
 
-	req.res <- pathAPIForwardDestGetRes{path: pa}
+	req.res <- pathAPIForwardDestsGetRes{path: pa}
+}
+
+func (pm *pathManager) doAPIStaticSourcesGet(req pathAPIStaticSourcesGetReq) {
+	pa, ok := pm.paths[req.name]
+	if !ok {
+		req.res <- pathAPIStaticSourcesGetRes{err: conf.ErrPathNotFound}
+		return
+	}
+
+	req.res <- pathAPIStaticSourcesGetRes{path: pa}
 }
 
 func (pm *pathManager) createPath(
@@ -856,21 +871,21 @@ func (pm *pathManager) APIPathsGet(name string) (*defs.APIPath, error) {
 	}
 }
 
-// APIForwardDestList implements defs.APIPathManager.
-func (pm *pathManager) APIForwardDestList(name string) (*defs.APIForwardDestList, error) {
-	req := pathAPIForwardDestListReq{
+// APIForwardDestsList implements defs.APIPathManager.
+func (pm *pathManager) APIForwardDestsList(name string) (*defs.APIForwardDestList, error) {
+	req := pathAPIForwardDestsListReq{
 		name: name,
-		res:  make(chan pathAPIForwardDestListRes),
+		res:  make(chan pathAPIForwardDestsListRes),
 	}
 
 	select {
-	case pm.chAPIForwardDestList <- req:
+	case pm.chAPIForwardDestsList <- req:
 		res := <-req.res
 		if res.err != nil {
 			return nil, res.err
 		}
 
-		data := res.path.APIForwardDestList()
+		data := res.path.APIForwardDestsList()
 		return data, nil
 
 	case <-pm.ctx.Done():
@@ -878,22 +893,44 @@ func (pm *pathManager) APIForwardDestList(name string) (*defs.APIForwardDestList
 	}
 }
 
-// APIForwardDestGet implements defs.APIPathManager.
-func (pm *pathManager) APIForwardDestGet(name string, id uuid.UUID) (*defs.APIForwardDest, error) {
-	req := pathAPIForwardDestGetReq{
+// APIForwardDestsGet implements defs.APIPathManager.
+func (pm *pathManager) APIForwardDestsGet(name string, id uuid.UUID) (*defs.APIForwardDest, error) {
+	req := pathAPIForwardDestsGetReq{
 		name: name,
 		id:   id,
-		res:  make(chan pathAPIForwardDestGetRes),
+		res:  make(chan pathAPIForwardDestsGetRes),
 	}
 
 	select {
-	case pm.chAPIForwardDestGet <- req:
+	case pm.chAPIForwardDestsGet <- req:
 		res := <-req.res
 		if res.err != nil {
 			return nil, res.err
 		}
 
-		data, err := res.path.APIForwardDestGet(req.id)
+		data, err := res.path.APIForwardDestsGet(req.id)
+		return data, err
+
+	case <-pm.ctx.Done():
+		return nil, fmt.Errorf("terminated")
+	}
+}
+
+// APIStaticSourcesGet implements defs.APIPathManager.
+func (pm *pathManager) APIStaticSourcesGet(name string) (*defs.APIStaticSource, error) {
+	req := pathAPIStaticSourcesGetReq{
+		name: name,
+		res:  make(chan pathAPIStaticSourcesGetRes),
+	}
+
+	select {
+	case pm.chAPIStaticSourcesGet <- req:
+		res := <-req.res
+		if res.err != nil {
+			return nil, res.err
+		}
+
+		data, err := res.path.APIStaticSourcesGet(req)
 		return data, err
 
 	case <-pm.ctx.Done():

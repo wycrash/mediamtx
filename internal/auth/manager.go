@@ -332,7 +332,7 @@ func (m *Manager) pullJWTJWKS() (jwt.Keyfunc, error) {
 		defer tr.CloseIdleConnections()
 
 		httpClient := &http.Client{
-			Timeout:   (m.ReadTimeout),
+			Timeout:   m.ReadTimeout,
 			Transport: tr,
 		}
 
