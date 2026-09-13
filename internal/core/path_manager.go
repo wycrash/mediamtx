@@ -518,7 +518,7 @@ func (pm *pathManager) doAPIPathsList(req pathAPIPathsListReq) {
 func (pm *pathManager) doAPIPathsGet(req pathAPIPathsGetReq) {
 	pa, ok := pm.paths[req.name]
 	if !ok {
-		req.res <- pathAPIPathsGetRes{err: conf.ErrPathNotFound}
+		req.res <- pathAPIPathsGetRes{err: conf.PathNotFound(req.name)}
 		return
 	}
 
@@ -528,7 +528,7 @@ func (pm *pathManager) doAPIPathsGet(req pathAPIPathsGetReq) {
 func (pm *pathManager) doAPIForwardDestsList(req pathAPIForwardDestsListReq) {
 	pa, ok := pm.paths[req.name]
 	if !ok {
-		req.res <- pathAPIForwardDestsListRes{err: conf.ErrPathNotFound}
+		req.res <- pathAPIForwardDestsListRes{err: conf.PathNotFound(req.name)}
 		return
 	}
 
@@ -538,7 +538,7 @@ func (pm *pathManager) doAPIForwardDestsList(req pathAPIForwardDestsListReq) {
 func (pm *pathManager) doAPIForwardDestsGet(req pathAPIForwardDestsGetReq) {
 	pa, ok := pm.paths[req.name]
 	if !ok {
-		req.res <- pathAPIForwardDestsGetRes{err: conf.ErrPathNotFound}
+		req.res <- pathAPIForwardDestsGetRes{err: conf.PathNotFound(req.name)}
 		return
 	}
 
@@ -548,7 +548,7 @@ func (pm *pathManager) doAPIForwardDestsGet(req pathAPIForwardDestsGetReq) {
 func (pm *pathManager) doAPIStaticSourcesGet(req pathAPIStaticSourcesGetReq) {
 	pa, ok := pm.paths[req.name]
 	if !ok {
-		req.res <- pathAPIStaticSourcesGetRes{err: conf.ErrPathNotFound}
+		req.res <- pathAPIStaticSourcesGetRes{err: conf.PathNotFound(req.name)}
 		return
 	}
 

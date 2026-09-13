@@ -259,7 +259,12 @@ func TestSystemMetrics(t *testing.T) {
 		SystemMetrics: fakeSystemMetrics{
 			snap: defs.APISystemMetrics{
 				CollectedAt: collected,
-				CPU:         defs.APISystemMetricsCPU{Percent: 12.5, ProcessPercent: 4, Cores: 8},
+				CPU: defs.APISystemMetricsCPU{
+					Model:          "Intel(R) Core(TM) i7-9700",
+					Percent:        12.5,
+					ProcessPercent: 4,
+					Cores:          8,
+				},
 				Memory: defs.APISystemMetricsMemory{
 					TotalBytes:      1000,
 					UsedBytes:       400,
@@ -313,6 +318,7 @@ func TestSystemMetrics(t *testing.T) {
 	require.Equal(t, map[string]any{
 		"collectedAt": collected.Format(time.RFC3339),
 		"cpu": map[string]any{
+			"model":          "Intel(R) Core(TM) i7-9700",
 			"percent":        12.5,
 			"processPercent": float64(4),
 			"cores":          float64(8),

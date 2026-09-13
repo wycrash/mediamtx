@@ -341,7 +341,7 @@ func TestCompatIndexRebuildPathNotFound(t *testing.T) {
 	defer res.Body.Close()
 
 	require.Equal(t, http.StatusNotFound, res.StatusCode)
-	checkError(t, res.Body, "path not found")
+	checkError(t, res.Body, "path 'missing' not found")
 }
 
 func TestCompatIndexStatus(t *testing.T) {

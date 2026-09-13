@@ -14,6 +14,8 @@ type APISystemMetrics struct {
 
 // APISystemMetricsCPU is host and process CPU usage.
 type APISystemMetricsCPU struct {
+	// Processor name, for example "Intel(R) Core(TM) i7-9700".
+	Model          string  `json:"model"`
 	Percent        float64 `json:"percent"`
 	ProcessPercent float64 `json:"processPercent"`
 	Cores          int     `json:"cores"`

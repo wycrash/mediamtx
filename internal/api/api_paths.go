@@ -39,7 +39,7 @@ func (a *API) onPathsGet(ctx *gin.Context) {
 	data, err := a.PathManager.APIPathsGet(pathName)
 	if err != nil {
 		if errors.Is(err, conf.ErrPathNotFound) {
-			a.writeError(ctx, http.StatusNotFound, err)
+			a.writePathNotFound(ctx, pathName)
 		} else {
 			a.writeError(ctx, http.StatusInternalServerError, err)
 		}

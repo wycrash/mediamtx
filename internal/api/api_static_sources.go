@@ -20,7 +20,9 @@ func (a *API) onStaticSourcesGet(ctx *gin.Context) {
 
 	data, err := a.PathManager.APIStaticSourcesGet(pathName)
 	if err != nil {
-		if errors.Is(err, conf.ErrPathNotFound) || errors.Is(err, staticsources.ErrNoStaticSource) {
+		if errors.Is(err, conf.ErrPathNotFound) {
+			a.writePathNotFound(ctx, pathName)
+		} else if errors.Is(err, staticsources.ErrNoStaticSource) {
 			a.writeError(ctx, http.StatusNotFound, err)
 		} else {
 			a.writeError(ctx, http.StatusInternalServerError, err)

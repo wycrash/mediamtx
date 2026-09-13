@@ -32,6 +32,9 @@ type Collector struct {
 	ctxCancel func()
 	done      chan struct{}
 
+	cpuModelOnce sync.Once
+	cpuModel     string
+
 	mu          sync.RWMutex
 	recordPaths []string
 	snapshot    defs.APISystemMetrics
@@ -134,6 +137,12 @@ func (c *Collector) collect() {
 	if v, err := c.sample.cpuCores(); err == nil {
 		snap.CPU.Cores = v
 	}
+	c.cpuModelOnce.Do(func() {
+		if v, err := c.sample.cpuModel(); err == nil {
+			c.cpuModel = v
+		}
+	})
+	snap.CPU.Model = c.cpuModel
 	if snap.CPU.Cores > 0 {
 		snap.CPU.ProcessPercent /= float64(snap.CPU.Cores)
 	}

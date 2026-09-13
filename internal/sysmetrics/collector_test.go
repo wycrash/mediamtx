@@ -12,9 +12,11 @@ import (
 )
 
 type fakeSampler struct {
-	cpu     float64
-	procCPU float64
-	cores   int
+	cpu        float64
+	procCPU    float64
+	cores      int
+	model      string
+	modelCalls int
 	total   uint64
 	used    uint64
 	avail   uint64
@@ -36,6 +38,11 @@ func (f *fakeSampler) processCPUPercent() (float64, error) {
 
 func (f *fakeSampler) cpuCores() (int, error) {
 	return f.cores, nil
+}
+
+func (f *fakeSampler) cpuModel() (string, error) {
+	f.modelCalls++
+	return f.model, nil
 }
 
 func (f *fakeSampler) memory() (uint64, uint64, uint64, float64, error) {
@@ -82,6 +89,7 @@ func TestCollectorSnapshot(t *testing.T) {
 		cpu:     12.5,
 		procCPU: 4.5,
 		cores:   8,
+		model:   "Intel(R) Core(TM) i7-9700",
 		total:   8000,
 		used:    3000,
 		avail:   5000,
@@ -124,6 +132,8 @@ func TestCollectorSnapshot(t *testing.T) {
 	require.Equal(t, 12.5, snap.CPU.Percent)
 	require.InDelta(t, 4.5/8, snap.CPU.ProcessPercent, 0.001)
 	require.Equal(t, 8, snap.CPU.Cores)
+	require.Equal(t, "Intel(R) Core(TM) i7-9700", snap.CPU.Model)
+	require.Equal(t, 1, fake.modelCalls)
 	require.Equal(t, uint64(8000), snap.Memory.TotalBytes)
 	require.Equal(t, uint64(100), snap.Memory.ProcessRssBytes)
 	require.Equal(t, []string{"eth0", "eth1"}, []string{snap.Network[0].Name, snap.Network[1].Name})
@@ -155,6 +165,7 @@ func TestCollectorLive(t *testing.T) {
 	snap := c.Snapshot()
 	require.False(t, snap.CollectedAt.IsZero())
 	require.Greater(t, snap.CPU.Cores, 0)
+	require.NotEmpty(t, snap.CPU.Model)
 	require.Greater(t, snap.Memory.TotalBytes, uint64(0))
 	require.NotNil(t, snap.Disks)
 	require.NotNil(t, snap.Network)

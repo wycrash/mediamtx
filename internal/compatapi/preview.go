@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/bluenviron/mediacommon/v2/pkg/codecs/h264"
 	"github.com/bluenviron/mediacommon/v2/pkg/codecs/h265"
@@ -25,10 +26,12 @@ var (
 const previewSampleDuration = 90000 // 1s @ 90kHz
 
 // ExtractPreviewMP4 reads a recording segment (mpegts or fmp4) and returns a progressive MP4 with one keyframe.
-func ExtractPreviewMP4(segPath string) ([]byte, error) {
+// at is the offset from the segment start. fMP4 seeks to the last IDR at or before at;
+// mpegts always returns the first keyframe of the file.
+func ExtractPreviewMP4(segPath string, at time.Duration) ([]byte, error) {
 	switch {
 	case strings.HasSuffix(strings.ToLower(segPath), ".mp4"):
-		return ExtractPreviewFMP4(segPath)
+		return ExtractPreviewFMP4(segPath, at)
 	default:
 		f, err := os.Open(segPath)
 		if err != nil {

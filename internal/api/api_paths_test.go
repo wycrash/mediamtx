@@ -161,3 +161,31 @@ func TestPathsGet(t *testing.T) {
 	require.Equal(t, uint64(123456), out.BytesReceived)
 	require.Equal(t, uint64(789012), out.BytesSent)
 }
+
+func TestPathsGetNotFound(t *testing.T) {
+	api := API{
+		Address:      "localhost:9997",
+		ReadTimeout:  conf.Duration(10 * time.Second),
+		WriteTimeout: conf.Duration(10 * time.Second),
+		AuthManager:  test.NilAuthManager,
+		PathManager:  &testPathManager{paths: map[string]*defs.APIPath{}},
+		Parent:       &testParent{},
+	}
+	err := api.Initialize()
+	require.NoError(t, err)
+	defer api.Close()
+
+	tr := &http.Transport{}
+	defer tr.CloseIdleConnections()
+	hc := &http.Client{Transport: tr}
+
+	req, err := http.NewRequest(http.MethodGet, "http://localhost:9997/v3/paths/get/missing/stream", nil)
+	require.NoError(t, err)
+
+	res, err := hc.Do(req)
+	require.NoError(t, err)
+	defer res.Body.Close()
+
+	require.Equal(t, http.StatusNotFound, res.StatusCode)
+	checkError(t, res.Body, "path 'missing/stream' not found")
+}

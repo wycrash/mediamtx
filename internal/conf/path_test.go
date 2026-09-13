@@ -59,3 +59,9 @@ func TestIsValidPathName(t *testing.T) {
 		})
 	}
 }
+
+func TestPathNotFound(t *testing.T) {
+	err := PathNotFound("cam1")
+	require.EqualError(t, err, "path 'cam1' not found")
+	require.ErrorIs(t, err, ErrPathNotFound)
+}

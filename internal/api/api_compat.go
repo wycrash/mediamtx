@@ -120,7 +120,7 @@ func (a *API) onCompatIndexRebuildPath(ctx *gin.Context) {
 	data, err := cs.APIIndexRebuild(pathName)
 	if err != nil {
 		if errors.Is(err, compatapi.ErrPathNotFound) {
-			a.writeError(ctx, http.StatusNotFound, err)
+			a.writePathNotFound(ctx, pathName)
 		} else {
 			a.writeError(ctx, http.StatusBadRequest, err)
 		}

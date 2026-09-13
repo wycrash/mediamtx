@@ -43,7 +43,7 @@ func TestExtractPreviewMP4(t *testing.T) {
 	tsPath := filepath.Join(dir, "seg.ts")
 	require.NoError(t, os.WriteFile(tsPath, buf.Bytes(), 0o644))
 
-	mp4, err := ExtractPreviewMP4(tsPath)
+	mp4, err := ExtractPreviewMP4(tsPath, time.Hour)
 	require.NoError(t, err)
 	require.Greater(t, len(mp4), 100)
 	require.Equal(t, []byte("ftyp"), mp4[4:8])
@@ -168,7 +168,7 @@ func TestPreviewNoKeyframeReturns404(t *testing.T) {
 	tsPath := filepath.Join(dir, "seg.ts")
 	require.NoError(t, os.WriteFile(tsPath, buf.Bytes(), 0o644))
 
-	_, err = ExtractPreviewMP4(tsPath)
+	_, err = ExtractPreviewMP4(tsPath, 0)
 	require.ErrorIs(t, err, errNoVideoKeyframe)
 
 	idx := NewIndex()

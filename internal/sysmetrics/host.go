@@ -38,6 +38,7 @@ type sampler interface {
 	cpuPercent() (float64, error)
 	processCPUPercent() (float64, error)
 	cpuCores() (int, error)
+	cpuModel() (string, error)
 	memory() (total, used, available uint64, usedPercent float64, err error)
 	processRSS() (uint64, error)
 	diskUsage(path string) (diskUsage, error)
@@ -75,6 +76,19 @@ func (s *hostSampler) processCPUPercent() (float64, error) {
 
 func (s *hostSampler) cpuCores() (int, error) {
 	return cpu.Counts(true)
+}
+
+func (s *hostSampler) cpuModel() (string, error) {
+	infos, err := cpu.Info()
+	if err != nil {
+		return "", err
+	}
+	for _, inf := range infos {
+		if name := strings.TrimSpace(inf.ModelName); name != "" {
+			return name, nil
+		}
+	}
+	return "", nil
 }
 
 func (s *hostSampler) memory() (uint64, uint64, uint64, float64, error) {

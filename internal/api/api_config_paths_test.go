@@ -337,5 +337,5 @@ func TestConfigPathsDelete(t *testing.T) {
 	defer res.Body.Close()
 
 	require.Equal(t, http.StatusNotFound, res.StatusCode)
-	checkError(t, res.Body, "path configuration not found")
+	checkError(t, res.Body, "path configuration 'my/path' not found")
 }

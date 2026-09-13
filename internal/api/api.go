@@ -311,6 +311,10 @@ func (a *API) Log(level logger.Level, format string, args ...any) {
 	a.Parent.Log(level, "[API] "+format, args...)
 }
 
+func (a *API) writePathNotFound(ctx *gin.Context, name string) {
+	a.writeError(ctx, http.StatusNotFound, conf.PathNotFound(name))
+}
+
 func (a *API) writeError(ctx *gin.Context, status int, err error) {
 	// show error in logs
 	a.Log(logger.Error, err.Error())

@@ -22,7 +22,7 @@ func (a *API) onForwardDestsList(ctx *gin.Context) {
 	data, err := a.PathManager.APIForwardDestsList(pathName)
 	if err != nil {
 		if errors.Is(err, conf.ErrPathNotFound) {
-			a.writeError(ctx, http.StatusNotFound, err)
+			a.writePathNotFound(ctx, pathName)
 		} else {
 			a.writeError(ctx, http.StatusInternalServerError, err)
 		}
@@ -55,7 +55,9 @@ func (a *API) onForwardDestsGet(ctx *gin.Context) {
 
 	data, err := a.PathManager.APIForwardDestsGet(pathName, id)
 	if err != nil {
-		if errors.Is(err, conf.ErrPathNotFound) || errors.Is(err, forward.ErrDestNotFound) {
+		if errors.Is(err, conf.ErrPathNotFound) {
+			a.writePathNotFound(ctx, pathName)
+		} else if errors.Is(err, forward.ErrDestNotFound) {
 			a.writeError(ctx, http.StatusNotFound, err)
 		} else {
 			a.writeError(ctx, http.StatusInternalServerError, err)

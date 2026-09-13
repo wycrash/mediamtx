@@ -271,6 +271,11 @@ func inspectMoofPart(moof []byte, videoIDs map[uint32]struct{}, tsByID map[uint3
 						hasIDR = true
 					}
 				}
+				// mediacommon omits trun sample flags when every sample is sync
+				// (IDR-only fragment). Treat that as an IDR part.
+				if isVideo && !sampleFlagsPresent && !firstSampleFlagsPresent && !hasDefFlag {
+					hasIDR = true
+				}
 			}
 			if ts := tsByID[trackID]; ts != 0 {
 				dur := time.Duration(sum) * time.Second / time.Duration(ts)

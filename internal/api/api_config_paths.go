@@ -45,7 +45,7 @@ func (a *API) onConfigPathsGet(ctx *gin.Context) {
 
 	p, ok := c.Paths[confName]
 	if !ok {
-		a.writeError(ctx, http.StatusNotFound, fmt.Errorf("path configuration not found"))
+		a.writeError(ctx, http.StatusNotFound, fmt.Errorf("path configuration '%s' not found", confName))
 		return
 	}
 
@@ -92,7 +92,7 @@ func (a *API) onConfigPathsPatch(ctx *gin.Context) { //nolint:dupl
 	err = a.Parent.APIConfigPathsPatch(confName, p)
 	if err != nil {
 		if errors.Is(err, conf.ErrPathNotFound) {
-			a.writeError(ctx, http.StatusNotFound, err)
+			a.writePathNotFound(ctx, confName)
 		} else {
 			a.writeError(ctx, http.StatusBadRequest, err)
 		}
@@ -119,7 +119,7 @@ func (a *API) onConfigPathsReplace(ctx *gin.Context) { //nolint:dupl
 	err = a.Parent.APIConfigPathsReplace(confName, p)
 	if err != nil {
 		if errors.Is(err, conf.ErrPathNotFound) {
-			a.writeError(ctx, http.StatusNotFound, err)
+			a.writePathNotFound(ctx, confName)
 		} else {
 			a.writeError(ctx, http.StatusBadRequest, err)
 		}
@@ -139,7 +139,7 @@ func (a *API) onConfigPathsDelete(ctx *gin.Context) {
 	err := a.Parent.APIConfigPathsDelete(confName)
 	if err != nil {
 		if errors.Is(err, conf.ErrPathNotFound) {
-			a.writeError(ctx, http.StatusNotFound, err)
+			a.writePathNotFound(ctx, confName)
 		} else {
 			a.writeError(ctx, http.StatusBadRequest, err)
 		}

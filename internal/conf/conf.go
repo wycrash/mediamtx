@@ -26,6 +26,23 @@ import (
 // ErrPathNotFound is returned when a path is not found.
 var ErrPathNotFound = errors.New("path not found")
 
+type pathNotFoundError struct {
+	name string
+}
+
+func (e pathNotFoundError) Error() string {
+	return "path '" + e.name + "' not found"
+}
+
+func (e pathNotFoundError) Unwrap() error {
+	return ErrPathNotFound
+}
+
+// PathNotFound returns ErrPathNotFound with the given path name.
+func PathNotFound(name string) error {
+	return pathNotFoundError{name: name}
+}
+
 func sortedKeys(paths map[string]*OptionalPath) []string {
 	ret := make([]string, len(paths))
 	i := 0
@@ -1251,7 +1268,7 @@ func (conf *Conf) AddPath(name string, p *OptionalPath) error {
 func (conf *Conf) PatchPath(name string, optional2 *OptionalPath) error {
 	optional, ok := conf.OptionalPaths[name]
 	if !ok {
-		return ErrPathNotFound
+		return PathNotFound(name)
 	}
 
 	copyStructFields(optional.Values, optional2.Values)
@@ -1271,7 +1288,7 @@ func (conf *Conf) ReplacePath(name string, optional2 *OptionalPath) error {
 // RemovePath removes a path.
 func (conf *Conf) RemovePath(name string) error {
 	if _, ok := conf.OptionalPaths[name]; !ok {
-		return ErrPathNotFound
+		return PathNotFound(name)
 	}
 
 	delete(conf.OptionalPaths, name)

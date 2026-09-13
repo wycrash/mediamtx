@@ -164,6 +164,7 @@ func TestAPIIndexRebuildCoalescesPaths(t *testing.T) {
 
 	_, err = s.APIIndexRebuild("no-such-cam")
 	require.ErrorIs(t, err, ErrPathNotFound)
+	require.EqualError(t, err, "path 'no-such-cam' not found")
 
 	st, err := s.APIIndexStatus()
 	require.NoError(t, err)

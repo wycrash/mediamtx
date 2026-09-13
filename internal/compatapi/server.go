@@ -2,7 +2,6 @@
 package compatapi
 
 import (
-	"errors"
 	"fmt"
 	"io/fs"
 	"net"
@@ -402,7 +401,7 @@ func (s *Server) logDebugStatsInterval() {
 }
 
 // ErrPathNotFound is returned when a rebuild target path does not exist.
-var ErrPathNotFound = errors.New("path not found")
+var ErrPathNotFound = conf.ErrPathNotFound
 
 // APIIndexRebuild implements defs.APICompatServer.
 // pathName empty queues a rebuild of every recording path. Concurrent calls
@@ -437,7 +436,7 @@ func (s *Server) APIIndexRebuild(pathName string) (*defs.APICompatIndexRebuild, 
 		pathConfs := s.PathConfs
 		s.mutex.RUnlock()
 		if _, _, err := conf.FindPathConf(pathConfs, pathName); err != nil {
-			return nil, ErrPathNotFound
+			return nil, conf.PathNotFound(pathName)
 		}
 		s.Index.MarkNeedsRebuild(pathName)
 		out.Path = pathName

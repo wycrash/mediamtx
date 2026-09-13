@@ -3035,6 +3035,9 @@ components:
         cores:
           type: integer
           format: int64
+        model:
+          type: string
+          description: Processor name, for example "Intel(R) Core(TM) i7-9700".
         percent:
           type: number
           format: double

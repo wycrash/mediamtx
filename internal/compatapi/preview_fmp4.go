@@ -142,18 +142,49 @@ func fmp4TracksCompatible(a, b []*fmp4.InitTrack) bool {
 	return true
 }
 
-// ExtractPreviewFMP4 extracts the first video keyframe from a recorded fMP4 segment.
-func ExtractPreviewFMP4(fpath string) ([]byte, error) {
+// previewFMP4PartAt returns the last IDR-carrying part with PTSStart <= at.
+// If at is before the first IDR, it returns that first IDR part.
+func previewFMP4PartAt(parts []fmp4MediaPart, at time.Duration) (fmp4MediaPart, bool) {
+	var last fmp4MediaPart
+	found := false
+	for _, p := range parts {
+		if !p.HasIDR {
+			continue
+		}
+		if p.PTSStart <= at {
+			last = p
+			found = true
+			continue
+		}
+		if !found {
+			return p, true
+		}
+		return last, true
+	}
+	return last, found
+}
+
+// ExtractPreviewFMP4 extracts a video keyframe from a recorded fMP4 segment.
+// at is the media offset from the segment start; the last IDR at or before at is used.
+// When at <= 0, the first keyframe of the file is returned (same as mpegts).
+func ExtractPreviewFMP4(fpath string, at time.Duration) ([]byte, error) {
+	from := int64(0)
+	if at > 0 {
+		if parts, err := loadFMP4MediaParts(fpath); err == nil {
+			if p, ok := previewFMP4PartAt(parts, at); ok {
+				from = p.Off
+			}
+		}
+	}
+	return extractPreviewFMP4From(fpath, from)
+}
+
+func extractPreviewFMP4From(fpath string, from int64) ([]byte, error) {
 	f, err := os.Open(fpath)
 	if err != nil {
 		return nil, err
 	}
 	defer f.Close()
-
-	_, err = f.Seek(0, io.SeekStart)
-	if err != nil {
-		return nil, err
-	}
 
 	initSize, _, err := readFMP4InitHeader(f)
 	if err != nil {
@@ -187,10 +218,19 @@ func ExtractPreviewFMP4(fpath string) ([]byte, error) {
 		return nil, errNoVideoTrack
 	}
 
-	_, err = f.Seek(0, io.SeekStart)
+	fi, err := f.Stat()
 	if err != nil {
 		return nil, err
 	}
+	if from < 0 {
+		from = 0
+	}
+	if from >= fi.Size() {
+		return nil, errNoVideoKeyframe
+	}
+
+	// ReadBoxStructure always Seek(0); a SectionReader makes "0" the chosen moof.
+	sr := io.NewSectionReader(f, from, fi.Size()-from)
 
 	var (
 		payload    []byte
@@ -200,7 +240,7 @@ func ExtractPreviewFMP4(fpath string) ([]byte, error) {
 		tfdt       *amp4.Tfdt
 	)
 
-	_, err = amp4.ReadBoxStructure(f, func(h *amp4.ReadHandle) (any, error) {
+	_, err = amp4.ReadBoxStructure(sr, func(h *amp4.ReadHandle) (any, error) {
 		if gotSample {
 			return nil, errPreviewDone
 		}
@@ -208,6 +248,8 @@ func ExtractPreviewFMP4(fpath string) ([]byte, error) {
 		switch h.BoxInfo.Type.String() {
 		case "moof":
 			moofOffset = h.BoxInfo.Offset
+			tfhd = nil
+			tfdt = nil
 			return h.Expand()
 
 		case "traf":
@@ -246,7 +288,7 @@ func ExtractPreviewFMP4(fpath string) ([]byte, error) {
 					continue
 				}
 				buf := make([]byte, e.SampleSize)
-				n, err2 := f.ReadAt(buf, int64(dataOffset))
+				n, err2 := f.ReadAt(buf, from+int64(dataOffset))
 				if err2 != nil {
 					return nil, err2
 				}

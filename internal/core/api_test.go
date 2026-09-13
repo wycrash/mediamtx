@@ -431,7 +431,7 @@ func TestAPIPathsGet(t *testing.T) {
 				defer res.Body.Close()
 
 				require.Equal(t, http.StatusNotFound, res.StatusCode)
-				checkError(t, "path not found", res.Body)
+				checkError(t, "path 'nonexisting' not found", res.Body)
 			}
 		})
 	}

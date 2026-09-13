@@ -467,7 +467,11 @@ func (s *Server) onPreviewAt(ctx *gin.Context, pathName string, ts time.Time) {
 		return
 	}
 
-	s.servePreviewMP4(ctx, seg.Fpath())
+	at := ts.Sub(seg.Start)
+	if at < 0 {
+		at = 0
+	}
+	s.servePreviewMP4(ctx, seg.Fpath(), at)
 }
 
 func (s *Server) onLatestPreview(ctx *gin.Context, pathName, contentType, filename string) {
@@ -490,14 +494,14 @@ func (s *Server) onLatestPreview(ctx *gin.Context, pathName, contentType, filena
 		return
 	}
 
-	s.writePreview(ctx, contentType, filename, seg.Fpath())
+	s.writePreview(ctx, contentType, filename, seg.Fpath(), 0)
 }
 
-func (s *Server) servePreviewMP4(ctx *gin.Context, segPath string) {
-	s.writePreview(ctx, "video/mp4", "snapshot.mp4", segPath)
+func (s *Server) servePreviewMP4(ctx *gin.Context, segPath string, at time.Duration) {
+	s.writePreview(ctx, "video/mp4", "snapshot.mp4", segPath, at)
 }
 
-func (s *Server) writePreview(ctx *gin.Context, contentType, filename, segPath string) {
+func (s *Server) writePreview(ctx *gin.Context, contentType, filename, segPath string, at time.Duration) {
 	ctx.Header("Content-Type", contentType)
 	ctx.Header("Content-Disposition", `inline; filename="`+filename+`"`)
 	ctx.Header("Cache-Control", "no-cache")
@@ -506,7 +510,7 @@ func (s *Server) writePreview(ctx *gin.Context, contentType, filename, segPath s
 		return
 	}
 
-	mp4, err := ExtractPreviewMP4(segPath)
+	mp4, err := ExtractPreviewMP4(segPath, at)
 	if err != nil {
 		// Missing keyframe, missing file, empty/truncated segment: the preview
 		// is simply not available. Do not report this as a server error.
