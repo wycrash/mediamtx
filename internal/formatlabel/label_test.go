@@ -90,3 +90,26 @@ func TestMediasToLabels(t *testing.T) {
 		{Formats: []format.Format{&format.KLV{}}},
 	}))
 }
+
+func TestParse(t *testing.T) {
+	for _, ca := range []struct {
+		in    string
+		label formatlabel.Label
+		ok    bool
+	}{
+		{in: "G711", label: formatlabel.G711, ok: true},
+		{in: "LPCM", label: formatlabel.LPCM, ok: true},
+		{in: "H264", label: formatlabel.H264, ok: true},
+		{in: "MPEG4Audio", label: formatlabel.MPEG4Audio, ok: true},
+		{in: "MPEG-4 Audio", label: formatlabel.MPEG4Audio, ok: true},
+		{in: "MJPEG", label: formatlabel.MJPEG, ok: true},
+		{in: "M-JPEG", label: formatlabel.MJPEG, ok: true},
+		{in: "no-such-codec", ok: false},
+	} {
+		t.Run(ca.in, func(t *testing.T) {
+			label, ok := formatlabel.Parse(ca.in)
+			require.Equal(t, ca.ok, ok)
+			require.Equal(t, ca.label, label)
+		})
+	}
+}

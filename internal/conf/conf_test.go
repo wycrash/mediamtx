@@ -15,6 +15,7 @@ import (
 	"golang.org/x/crypto/nacl/secretbox"
 
 	"github.com/bluenviron/mediamtx/internal/confpersist"
+	"github.com/bluenviron/mediamtx/internal/formatlabel"
 	"github.com/bluenviron/mediamtx/internal/logger"
 )
 
@@ -61,6 +62,7 @@ func TestConfFromFile(t *testing.T) {
 			RecordSegmentDuration:      3600000000000,
 			RecordHlsChunkDuration:     Duration(5 * time.Second),
 			RecordDeleteAfter:          86400000000000,
+			RecordSkipTracks:           RecordSkipTracks{},
 			HLSVariant:                 HLSVariant(gohlslib.MuxerVariantLowLatency),
 			RTSPUDPSourcePortRange:     []uint{32768, 60999},
 			MoQTransport:               MoQTransportQUIC,
@@ -683,6 +685,13 @@ func TestConfErrors(t *testing.T) {
 			`'recordHlsChunkDuration' cannot be negative`,
 		},
 		{
+			"invalid record skip tracks",
+			"paths:\n" +
+				"  my_path:\n" +
+				"    recordSkipTracks: [G711, no-such-codec]\n",
+			`invalid 'recordSkipTracks' value 'no-such-codec'`,
+		},
+		{
 			"missing rtpAddress with UDP and no encryption",
 			"rtspEncryption: \"no\"\n" +
 				"rtspTransports: [udp]\n" +
@@ -1188,6 +1197,21 @@ func TestDeprecatedAvailabilityHooks(t *testing.T) {
 	require.Equal(t, "command1", *pa.RunOnReady)
 	require.Equal(t, true, *pa.RunOnReadyRestart)
 	require.Equal(t, "command2", *pa.RunOnNotReady)
+}
+
+func TestConfRecordSkipTracks(t *testing.T) {
+	tmpf := createTempFile(t, []byte(
+		"paths:\n"+
+			"  cam1:\n"+
+			"    recordSkipTracks: [G711, LPCM, MPEG4Audio, G711]\n"))
+
+	cnf, _, err := Load(tmpf, nil, nil)
+	require.NoError(t, err)
+	require.Equal(t, RecordSkipTracks{
+		formatlabel.G711,
+		formatlabel.LPCM,
+		formatlabel.MPEG4Audio,
+	}, cnf.Paths["cam1"].RecordSkipTracks)
 }
 
 func TestAlwaysAvailableFileErrorMagicBytes(t *testing.T) {

@@ -18,6 +18,7 @@ import (
 	"github.com/bluenviron/mediacommon/v2/pkg/formats/mp4/codecs"
 	"github.com/bluenviron/mediacommon/v2/pkg/formats/pmp4"
 
+	"github.com/bluenviron/mediamtx/internal/formatlabel"
 	"github.com/bluenviron/mediamtx/internal/logger"
 )
 
@@ -255,6 +256,8 @@ type Path struct {
 	RecordSegmentDuration  Duration     `json:"recordSegmentDuration"`
 	RecordHlsChunkDuration Duration     `json:"recordHlsChunkDuration"`
 	RecordDeleteAfter      Duration     `json:"recordDeleteAfter"`
+	// Codecs that are not written to disk. Live readers are not affected.
+	RecordSkipTracks RecordSkipTracks `json:"recordSkipTracks"`
 
 	// HLS
 	HLSVariant HLSVariant `json:"hlsVariant"`
@@ -445,6 +448,27 @@ func (pconf *Path) setDefaults() {
 	// Hooks
 	pconf.RunOnDemandStartTimeout = 10 * Duration(time.Second)
 	pconf.RunOnDemandCloseAfter = 10 * Duration(time.Second)
+}
+
+func normalizeRecordSkipTracks(tracks RecordSkipTracks) (RecordSkipTracks, error) {
+	if len(tracks) == 0 {
+		return tracks, nil
+	}
+
+	out := make(RecordSkipTracks, 0, len(tracks))
+	seen := make(map[formatlabel.Label]struct{}, len(tracks))
+	for _, raw := range tracks {
+		label, ok := formatlabel.Parse(string(raw))
+		if !ok {
+			return nil, fmt.Errorf("invalid 'recordSkipTracks' value '%s'", raw)
+		}
+		if _, dup := seen[label]; dup {
+			continue
+		}
+		seen[label] = struct{}{}
+		out = append(out, label)
+	}
+	return out, nil
 }
 
 func newPath(defaults *Path, partial *OptionalPath) *Path {
@@ -935,6 +959,12 @@ func (pconf *Path) validate(
 	if pconf.RecordDeleteAfter != 0 && pconf.RecordDeleteAfter < pconf.RecordSegmentDuration {
 		return fmt.Errorf("'recordDeleteAfter' cannot be lower than 'recordSegmentDuration'")
 	}
+
+	normalized, err := normalizeRecordSkipTracks(pconf.RecordSkipTracks)
+	if err != nil {
+		return err
+	}
+	pconf.RecordSkipTracks = normalized
 
 	// Authentication (deprecated)
 

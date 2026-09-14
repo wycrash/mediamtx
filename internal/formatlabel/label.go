@@ -98,6 +98,37 @@ func FormatToLabel(forma format.Format) Label {
 	return Generic
 }
 
+// Parse maps a configuration name to a Label.
+// Canonical names match FormatToLabel (G711, LPCM, H264, "MPEG-4 Audio", ...).
+// Compact aliases used elsewhere in config (MPEG4Audio, MJPEG, MPEGTS) are also accepted.
+func Parse(s string) (Label, bool) {
+	switch Label(s) {
+	case AV1, VP9, VP8, H265, H264, MPEG4Video, MPEG1Video, MJPEG,
+		Opus, FLAC, Vorbis, MPEG4Audio, MPEG4AudioLATM, MPEG1Audio,
+		AC3, Speex, G726, G722, G711, LPCM, MPEGTS, KLV, Generic:
+		return Label(s), true
+	}
+
+	switch s {
+	case "MPEG4Video":
+		return MPEG4Video, true
+	case "MPEG1Video":
+		return MPEG1Video, true
+	case "MJPEG":
+		return MJPEG, true
+	case "MPEG4Audio":
+		return MPEG4Audio, true
+	case "MPEG4AudioLATM":
+		return MPEG4AudioLATM, true
+	case "MPEG1Audio":
+		return MPEG1Audio, true
+	case "MPEGTS":
+		return MPEGTS, true
+	default:
+		return "", false
+	}
+}
+
 func gatherFormats(medias []*description.Media) []format.Format {
 	n := 0
 	for _, media := range medias {

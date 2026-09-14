@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/bluenviron/mediamtx/internal/conf"
+	"github.com/bluenviron/mediamtx/internal/formatlabel"
 	"github.com/bluenviron/mediamtx/internal/logger"
 	"github.com/bluenviron/mediamtx/internal/stream"
 )
@@ -50,6 +51,7 @@ type Recorder struct {
 	OnSegmentComplete OnSegmentCompleteFunc
 	PickRoot          PickRootFunc
 	NoteRoot          NoteRootFunc
+	SkipTracks        []formatlabel.Label
 	Parent            logger.Writer
 
 	restartPause time.Duration
@@ -89,6 +91,7 @@ func (r *Recorder) Initialize() {
 		onSegmentComplete: r.OnSegmentComplete,
 		pickRoot:          r.PickRoot,
 		noteRoot:          r.NoteRoot,
+		skipTracks:        r.SkipTracks,
 		parent:            r,
 	}
 	r.currentInstance.initialize()
@@ -138,6 +141,7 @@ func (r *Recorder) run() {
 			onSegmentComplete: r.OnSegmentComplete,
 			pickRoot:          r.PickRoot,
 			noteRoot:          r.NoteRoot,
+			skipTracks:        r.SkipTracks,
 			parent:            r,
 		}
 		r.currentInstance.initialize()

@@ -3,12 +3,15 @@ package recorder
 import (
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
+	rtspformat "github.com/bluenviron/gortsplib/v5/pkg/format"
 	"github.com/google/uuid"
 
 	"github.com/bluenviron/mediamtx/internal/conf"
+	"github.com/bluenviron/mediamtx/internal/formatlabel"
 	"github.com/bluenviron/mediamtx/internal/logger"
 	"github.com/bluenviron/mediamtx/internal/recordstore"
 	"github.com/bluenviron/mediamtx/internal/stream"
@@ -26,6 +29,7 @@ type recorderInstance struct {
 	onSegmentComplete OnSegmentCompleteFunc
 	pickRoot          PickRootFunc
 	noteRoot          NoteRootFunc
+	skipTracks        []formatlabel.Label
 	parent            logger.Writer
 
 	streamID    uuid.UUID
@@ -41,6 +45,10 @@ type recorderInstance struct {
 // Log implements logger.Writer.
 func (ri *recorderInstance) Log(level logger.Level, format string, args ...any) {
 	ri.parent.Log(level, format, args...)
+}
+
+func (ri *recorderInstance) skipConfiguredTrack(forma rtspformat.Format) bool {
+	return len(ri.skipTracks) > 0 && slices.Contains(ri.skipTracks, formatlabel.FormatToLabel(forma))
 }
 
 func (ri *recorderInstance) initialize() {

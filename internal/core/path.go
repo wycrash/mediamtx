@@ -475,6 +475,7 @@ func (pa *path) doReloadConf(newConf *conf.Path) {
 			newConf.RecordMaxPartSize != oldConf.RecordMaxPartSize ||
 			newConf.RecordSegmentDuration != oldConf.RecordSegmentDuration ||
 			newConf.RecordDeleteAfter != oldConf.RecordDeleteAfter ||
+			!slices.Equal(newConf.RecordSkipTracks, oldConf.RecordSkipTracks) ||
 			newConf.AlwaysAvailableRecorded != oldConf.AlwaysAvailableRecorded) {
 		pa.recorder.Close()
 		pa.recorder = nil
@@ -1068,6 +1069,7 @@ func (pa *path) startRecording() {
 		Stream:          pa.stream,
 		PickRoot:        pickRoot,
 		NoteRoot:        noteRoot,
+		SkipTracks:      []formatlabel.Label(pa.conf.RecordSkipTracks),
 		OnSegmentCreate: func(segmentPath string) {
 			pa.parent.onRecordSegmentCreate(pa.name, segmentPath)
 

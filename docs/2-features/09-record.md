@@ -46,6 +46,10 @@ pathDefaults:
   # Delete segments after this timespan.
   # Set to 0s to disable automatic deletion.
   recordDeleteAfter: 1d
+  # Codecs that are not written to disk. Live readers are not affected.
+  # G.711 is stored as LPCM in fMP4; skip both for archive HLS in Chrome MSE.
+  recordSkipTracks: []
+  # recordSkipTracks: [G711, LPCM]
 ```
 
 To spread recordings across several disks, define a named pool and point the path at it. `recordPath` stays a filename template; the pool owns disks, fill limit, and pick strategy. With `roundRobin`, **each path** alternates disks on its own (so one camera is not stuck on a single disk because other cameras share the pool). `fillFirst` fills disks in list order.

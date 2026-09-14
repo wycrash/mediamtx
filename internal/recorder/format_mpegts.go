@@ -82,6 +82,10 @@ func (f *formatMPEGTS) initialize() bool {
 
 	for _, media := range f.ri.stream.OrigDesc.Medias {
 		for _, forma := range media.Formats {
+			if f.ri.skipConfiguredTrack(forma) {
+				continue
+			}
+
 			clockRate := forma.ClockRate()
 
 			switch forma := forma.(type) {

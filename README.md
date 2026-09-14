@@ -1,28 +1,13 @@
 <h1 align="center">
-  <a href="https://mediamtx.org">
-    <img src="logo.png" alt="MediaMTX">
-  </a>
-
   <br>
   <br>
-
-[![Website](https://img.shields.io/badge/website-mediamtx.org-1c94b5)](https://mediamtx.org)
-[![Test](https://github.com/bluenviron/mediamtx/actions/workflows/test.yml/badge.svg?branch=main)](https://github.com/bluenviron/mediamtx/actions/workflows/test.yml?query=branch%3Amain)
-[![Lint](https://github.com/bluenviron/mediamtx/actions/workflows/lint.yml/badge.svg?branch=main)](https://github.com/bluenviron/mediamtx/actions/workflows/lint.yml?query=branch%3Amain)
-[![CodeCov](https://codecov.io/gh/bluenviron/mediamtx/branch/main/graph/badge.svg)](https://app.codecov.io/gh/bluenviron/mediamtx/tree/main)
-[![Release](https://img.shields.io/github/v/release/bluenviron/mediamtx)](https://github.com/bluenviron/mediamtx/releases)
-[![Docker Hub](https://img.shields.io/badge/docker-bluenviron/mediamtx-blue)](https://hub.docker.com/r/bluenviron/mediamtx)
-
 </h1>
 
 <br>
 
-_MediaMTX_ is a ready-to-use and zero-dependency live media server and media proxy that allows to publish, read, proxy, record and playback real-time video and audio streams. It has been conceived as a "media router" that routes media streams from one end to the other, with a focus on efficiency and portability.
+_MediaMTX DVR_ fork [MediaMTX](https://github.com/bluenviron/mediamtx) is a ready-to-use and zero-dependency live media server and media proxy that allows to publish, read, proxy, record and playback real-time video and audio streams. It has been conceived as a "media router" that routes media streams from one end to the other, with a focus on efficiency and portability.
 
 <div align="center">
-
-| [Install](https://mediamtx.org/docs/kickoff/install) | [Documentation](https://mediamtx.org/docs/kickoff/introduction) |
-| ---------------------------------------------------- | --------------------------------------------------------------- |
 
 </div>
 
@@ -46,13 +31,3 @@ _MediaMTX_ is a ready-to-use and zero-dependency live media server and media pro
 - Compatible with Linux, Windows and macOS, does not require any dependency or interpreter, it's a single executable
 - ...and many [others](https://mediamtx.org/docs/kickoff/introduction).
 
-git tag v1.20.0
-git tag -f v1.20.0
-go generate ./...
-CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build .
-
-git tag v1.20.0
-go generate ./...
-CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build .
-
-go test ./internal/compatapi/ -count=1 -run 'TestDvr|TestIndex'

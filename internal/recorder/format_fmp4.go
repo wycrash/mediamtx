@@ -155,6 +155,10 @@ func (f *formatFMP4) initialize() bool {
 
 	for i, origMedia := range f.ri.stream.OrigDesc.Medias {
 		for j, origFormat := range origMedia.Formats {
+			if f.ri.skipConfiguredTrack(origFormat) {
+				continue
+			}
+
 			clockRate := origFormat.ClockRate()
 
 			switch origFormat := origFormat.(type) {

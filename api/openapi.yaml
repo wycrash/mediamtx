@@ -1226,6 +1226,11 @@ components:
           type: string
         recordSegmentDuration:
           type: string
+        recordSkipTracks:
+          type: array
+          description: Codecs that are not written to disk. Live readers are not affected.
+          items:
+            $ref: "#/components/schemas/PathTrackCodec"
         rpiCameraAWB:
           type: string
         rpiCameraAWBGains:

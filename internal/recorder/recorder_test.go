@@ -17,6 +17,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/bluenviron/mediamtx/internal/conf"
+	"github.com/bluenviron/mediamtx/internal/formatlabel"
 	"github.com/bluenviron/mediamtx/internal/logger"
 	"github.com/bluenviron/mediamtx/internal/recordstore"
 	"github.com/bluenviron/mediamtx/internal/stream"
@@ -680,6 +681,90 @@ func TestRecorderSkipTracksPartial(t *testing.T) {
 			defer w.Close()
 
 			require.Equal(t, 2, n)
+		})
+	}
+}
+
+func TestRecorderSkipTracksConfigured(t *testing.T) {
+	for _, ca := range []string{"fmp4", "mpegts"} {
+		t.Run(ca, func(t *testing.T) {
+			desc := &description.Session{Medias: []*description.Media{
+				{
+					Type:    description.MediaTypeVideo,
+					Formats: []rtspformat.Format{&rtspformat.H264{PacketizationMode: 1}},
+				},
+				{
+					Type: description.MediaTypeAudio,
+					Formats: []rtspformat.Format{&rtspformat.G711{
+						PayloadTyp:   8,
+						MULaw:        false,
+						SampleRate:   8000,
+						ChannelCount: 1,
+					}},
+				},
+				{
+					Type: description.MediaTypeAudio,
+					Formats: []rtspformat.Format{&rtspformat.LPCM{
+						PayloadTyp:   96,
+						BitDepth:     16,
+						SampleRate:   44100,
+						ChannelCount: 2,
+					}},
+				},
+			}}
+
+			strm := &stream.Stream{
+				OrigDesc:          desc,
+				WriteQueueSize:    512,
+				RTPMaxPayloadSize: 1450,
+				Parent:            test.NilLogger,
+			}
+			err := strm.Initialize()
+			require.NoError(t, err)
+			defer strm.Close()
+
+			dir := t.TempDir()
+			recordPath := filepath.Join(dir, "%path/%Y-%m-%d_%H-%M-%S-%f")
+
+			n := 0
+			l := test.Logger(func(l logger.Level, format string, args ...any) {
+				msg := fmt.Sprintf(format, args...)
+				switch n {
+				case 0:
+					require.Equal(t, logger.Warn, l)
+					require.Equal(t, "[recorder] skipping track 2 (G711)", msg)
+				case 1:
+					require.Equal(t, logger.Warn, l)
+					require.Equal(t, "[recorder] skipping track 3 (LPCM)", msg)
+				case 2:
+					require.Equal(t, logger.Info, l)
+					require.Equal(t, "[recorder] recording 1 track (H264)", msg)
+				}
+				n++
+			})
+
+			var fo conf.RecordFormat
+			if ca == "fmp4" {
+				fo = conf.RecordFormatFMP4
+			} else {
+				fo = conf.RecordFormatMPEGTS
+			}
+
+			w := &Recorder{
+				PathFormat:      recordPath,
+				Format:          fo,
+				PartDuration:    100 * time.Millisecond,
+				MaxPartSize:     50 * 1024 * 1024,
+				SegmentDuration: 1 * time.Second,
+				PathName:        "mypath",
+				Stream:          strm,
+				SkipTracks:      []formatlabel.Label{formatlabel.G711, formatlabel.LPCM},
+				Parent:          l,
+			}
+			w.Initialize()
+			defer w.Close()
+
+			require.Equal(t, 3, n)
 		})
 	}
 }

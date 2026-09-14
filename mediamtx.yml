@@ -669,6 +669,15 @@ pathDefaults:
   # Delete segments after this timespan.
   # Set to 0s to disable automatic deletion.
   recordDeleteAfter: 1d
+  # Codecs that are not written to disk. Live readers are not affected.
+  # Names match recorder logs. Empty = record all supported codecs.
+  # Available values are: AV1, VP9, VP8, H265, H264, MPEG-4 Video, MPEG-1/2 Video,
+  # M-JPEG, Opus, FLAC, Vorbis, MPEG-4 Audio, MPEG-4 Audio LATM, MPEG-1/2 Audio,
+  # AC3, Speex, G726, G722, G711, LPCM
+  # Compact aliases: MPEG4Video, MPEG1Video, MJPEG, MPEG4Audio, MPEG4AudioLATM, MPEG1Audio
+  # G.711 is stored as LPCM in fMP4; skip both to keep archive HLS playable in Chrome MSE.
+  recordSkipTracks: []
+  # recordSkipTracks: [G711, LPCM]
 
   ###############################################
   # Default path settings -> HLS
