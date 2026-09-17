@@ -1353,7 +1353,6 @@ func (p *Core) closeResources(newConf *conf.Conf) {
 		!slices.Equal(newConf.HLSAllowOrigins, currentConf.HLSAllowOrigins) ||
 		!reflect.DeepEqual(newConf.HLSTrustedProxies, currentConf.HLSTrustedProxies) ||
 		newConf.HLSAlwaysRemux != currentConf.HLSAlwaysRemux ||
-		newConf.HLSVariant != currentConf.HLSVariant ||
 		newConf.HLSSegmentCount != currentConf.HLSSegmentCount ||
 		newConf.HLSSegmentDuration != currentConf.HLSSegmentDuration ||
 		newConf.HLSPartDuration != currentConf.HLSPartDuration ||
@@ -1382,7 +1381,6 @@ func (p *Core) closeResources(newConf *conf.Conf) {
 		newConf.WriteTimeout != currentConf.WriteTimeout ||
 		newConf.DumpPackets != currentConf.DumpPackets ||
 		closeAuthManager ||
-		closeHLSServer ||
 		closePathManager ||
 		closeLogger
 	if !closeCompatServer && p.compatServer != nil && !reflect.DeepEqual(newConf.Paths, currentConf.Paths) {
@@ -1514,6 +1512,9 @@ func (p *Core) closeResources(newConf *conf.Conf) {
 	}
 
 	if closeHLSServer && p.hlsServer != nil {
+		if p.compatServer != nil {
+			p.compatServer.SetHLSHandler(nil)
+		}
 		p.hlsServer.Close()
 		p.hlsServer = nil
 	}

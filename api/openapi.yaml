@@ -467,12 +467,6 @@ components:
           type: array
           items:
             type: string
-        hlsVariant:
-          type: string
-          allOf:
-            - $ref: "#/components/schemas/HLSVariant"
-          nullable: true
-          deprecated: true
         logDestinations:
           type: array
           items:

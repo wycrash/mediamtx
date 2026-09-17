@@ -1063,3 +1063,131 @@ func TestPrefetchDaysLoadsUnpinned(t *testing.T) {
 	require.Len(t, idx.SegmentsInWindow("cam1", hist, time.Minute), 1)
 	idx.ClosePersist()
 }
+
+func copyPathConf(p *conf.Path) *conf.Path {
+	c := *p
+	if p.StorageDisks != nil {
+		c.StorageDisks = append([]string(nil), p.StorageDisks...)
+	}
+	return &c
+}
+
+func confsCopyWith(base map[string]*conf.Path, name string, mut func(*conf.Path)) map[string]*conf.Path {
+	out := make(map[string]*conf.Path, len(base))
+	for k, v := range base {
+		out[k] = copyPathConf(v)
+	}
+	mut(out[name])
+	return out
+}
+
+type pathSnap struct {
+	complete bool
+	nseg     int
+	hash     uint64
+	dur      time.Duration
+	rangesOK bool
+}
+
+func snapPath(idx *Index, name string) pathSnap {
+	idx.mutex.RLock()
+	defer idx.mutex.RUnlock()
+	pe := idx.paths[name]
+	if pe == nil {
+		return pathSnap{}
+	}
+	s := pathSnap{
+		complete: pe.complete,
+		nseg:     len(pe.segments),
+		dur:      pe.segmentDuration,
+		rangesOK: pe.rangesOK,
+	}
+	if pe.persist != nil {
+		s.hash = pe.persist.hash
+	}
+	return s
+}
+
+func setupTwoCamIndex(t *testing.T) (*Index, string, map[string]*conf.Path, time.Time) {
+	t.Helper()
+	dir := t.TempDir()
+	hist := time.Date(2020, 1, 1, 0, 0, 0, 0, time.Local)
+	datedFMP4(t, dir, "cam1", hist, 2)
+	datedFMP4(t, dir, "cam1", hist.Add(5*time.Second), 2)
+	datedFMP4(t, dir, "cam2", hist, 2)
+	datedFMP4(t, dir, "cam2", hist.Add(5*time.Second), 3)
+	confs := map[string]*conf.Path{
+		"cam1": testRecordPathConf(dir, "cam1"),
+		"cam2": testRecordPathConf(dir, "cam2"),
+	}
+	idx := NewIndex()
+	require.Equal(t, 0, idx.LoadFromDisk(confs).Segments)
+	require.Equal(t, 4, idx.ReconcileAll(nil, false).Segments)
+	require.Equal(t, 0, idx.NeedsRebuildCount())
+	return idx, dir, confs, hist
+}
+
+func TestReloadPathConfsIgnoresUnrelatedSettings(t *testing.T) {
+	idx, _, confs, hist := setupTwoCamIndex(t)
+	defer idx.ClosePersist()
+
+	before1 := snapPath(idx, "cam1")
+	before2 := snapPath(idx, "cam2")
+	st := idx.ReloadPathConfs(confsCopyWith(confs, "cam1", func(p *conf.Path) {
+		p.Source = "rtsp://127.0.0.1:8554/cam1b"
+	}))
+	require.Equal(t, 0, st.Paths)
+	require.Equal(t, 0, idx.NeedsRebuildCount())
+	require.Equal(t, before1, snapPath(idx, "cam1"))
+	require.Equal(t, before2, snapPath(idx, "cam2"))
+	require.Len(t, idx.SegmentsInWindow("cam1", hist, time.Minute), 2)
+	require.Len(t, idx.SegmentsInWindow("cam2", hist, time.Minute), 2)
+}
+
+func TestReloadPathConfsDurationDoesNotRebuild(t *testing.T) {
+	idx, _, confs, hist := setupTwoCamIndex(t)
+	defer idx.ClosePersist()
+
+	before1 := snapPath(idx, "cam1")
+	before2 := snapPath(idx, "cam2")
+	st := idx.ReloadPathConfs(confsCopyWith(confs, "cam1", func(p *conf.Path) {
+		p.RecordSegmentDuration = conf.Duration(10 * time.Second)
+	}))
+	require.Equal(t, 0, st.Paths)
+	require.Equal(t, 0, idx.NeedsRebuildCount())
+
+	after1 := snapPath(idx, "cam1")
+	after2 := snapPath(idx, "cam2")
+	require.Equal(t, before1.hash, after1.hash)
+	require.True(t, after1.complete)
+	require.Equal(t, 10*time.Second, after1.dur)
+	require.False(t, after1.rangesOK)
+	require.Equal(t, before2, after2)
+	require.Len(t, idx.SegmentsInWindow("cam2", hist, time.Minute), 2)
+}
+
+func TestReloadPathConfsRecordPathRebuildsOnlyThatPath(t *testing.T) {
+	idx, _, confs, hist := setupTwoCamIndex(t)
+	defer idx.ClosePersist()
+
+	newDir := t.TempDir()
+	datedFMP4(t, newDir, "cam1", hist, 2)
+
+	before1 := snapPath(idx, "cam1")
+	before2 := snapPath(idx, "cam2")
+	st := idx.ReloadPathConfs(confsCopyWith(confs, "cam1", func(p *conf.Path) {
+		p.RecordPath = filepath.Join(newDir, "%path/%Y-%m-%d_%H-%M-%S-%f")
+	}))
+	require.Equal(t, 0, st.Paths)
+	require.Equal(t, []string{"cam1"}, idx.NeedsRebuildPaths())
+	require.Equal(t, before1.hash, snapPath(idx, "cam1").hash, "persist.hash must wait for rebuild")
+	require.Equal(t, before2, snapPath(idx, "cam2"))
+
+	qst := idx.ReconcileQueued(nil)
+	require.Equal(t, 1, qst.Paths)
+	require.Equal(t, 0, idx.NeedsRebuildCount())
+	require.NotEqual(t, before1.hash, snapPath(idx, "cam1").hash)
+	require.Equal(t, before2, snapPath(idx, "cam2"))
+	require.Len(t, idx.SegmentsInWindow("cam1", hist, time.Minute), 1)
+	require.Len(t, idx.SegmentsInWindow("cam2", hist, time.Minute), 2)
+}

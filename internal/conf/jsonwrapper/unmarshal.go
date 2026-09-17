@@ -156,3 +156,47 @@ func Decode(r io.Reader, dest any) error {
 	}
 	return decode(reflect.ValueOf(dest).Elem(), buf, "")
 }
+
+// MigrateRootHLSVariant moves a removed top-level hlsVariant into pathDefaults
+// so old YAML and persisted JSON keep loading after the global field was deleted.
+func MigrateRootHLSVariant(buf []byte) ([]byte, error) {
+	trimmed := bytes.TrimSpace(buf)
+	if len(trimmed) == 0 || trimmed[0] != '{' {
+		return buf, nil
+	}
+
+	var m map[string]json.RawMessage
+	err := json.Unmarshal(buf, &m)
+	if err != nil {
+		return nil, err
+	}
+
+	variant, ok := m["hlsVariant"]
+	if !ok {
+		return buf, nil
+	}
+	delete(m, "hlsVariant")
+
+	if !isJSONNull(variant) {
+		var pd map[string]json.RawMessage
+		if rawPD, exists := m["pathDefaults"]; exists && !isJSONNull(rawPD) {
+			err = json.Unmarshal(rawPD, &pd)
+			if err != nil {
+				return nil, err
+			}
+		}
+		if pd == nil {
+			pd = make(map[string]json.RawMessage)
+		}
+		if _, exists := pd["hlsVariant"]; !exists {
+			pd["hlsVariant"] = variant
+		}
+		enc, err := json.Marshal(pd)
+		if err != nil {
+			return nil, err
+		}
+		m["pathDefaults"] = enc
+	}
+
+	return json.Marshal(m)
+}

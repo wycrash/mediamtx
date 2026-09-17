@@ -1,9 +1,11 @@
 package compatapi
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -11,6 +13,7 @@ import (
 
 	"github.com/bluenviron/mediamtx/internal/conf"
 	"github.com/bluenviron/mediamtx/internal/defs"
+	"github.com/bluenviron/mediamtx/internal/logger"
 	"github.com/bluenviron/mediamtx/internal/recordstore"
 	"github.com/bluenviron/mediamtx/internal/test"
 )
@@ -186,6 +189,65 @@ func TestAPIIndexRebuildCoalescesPaths(t *testing.T) {
 	require.Empty(t, st.Current)
 	require.Empty(t, st.Queue)
 	require.Equal(t, 0, st.Queued)
+}
+
+func TestAPIIndexRebuildDoesNotScanOtherPaths(t *testing.T) {
+	dir := t.TempDir()
+	for _, name := range []string{"cam1", "cam2"} {
+		cam := filepath.Join(dir, name)
+		require.NoError(t, os.MkdirAll(cam, 0o755))
+		writeNamedFMP4(t, filepath.Join(cam, "2020-01-01_00-00-00-000000.mp4"), 2)
+	}
+
+	pathConfs := map[string]*conf.Path{}
+	for _, name := range []string{"cam1", "cam2"} {
+		pathConfs[name] = &conf.Path{
+			Name:                  name,
+			RecordPath:            filepath.Join(dir, "%path/%Y-%m-%d_%H-%M-%S-%f"),
+			RecordFormat:          conf.RecordFormatFMP4,
+			RecordSegmentDuration: conf.Duration(5 * time.Second),
+		}
+	}
+
+	s := &Server{
+		Address:      "127.0.0.1:0",
+		ReadTimeout:  conf.Duration(10 * time.Second),
+		WriteTimeout: conf.Duration(10 * time.Second),
+		PathConfs:    pathConfs,
+		AuthManager:  test.NilAuthManager,
+		Parent:       test.NilLogger,
+	}
+	require.NoError(t, s.Initialize())
+	defer s.Close()
+
+	require.Eventually(t, func() bool {
+		st, err := s.APIIndexStatus()
+		if err != nil || st.State != defs.APICompatIndexStatusIdle {
+			return false
+		}
+		return s.Index.NeedsRebuildCount() == 0 && s.Index.SegmentCount() >= 2
+	}, 5*time.Second, 20*time.Millisecond)
+
+	var mu sync.Mutex
+	var logs []string
+	s.Parent = test.Logger(func(_ logger.Level, format string, args ...any) {
+		mu.Lock()
+		logs = append(logs, fmt.Sprintf(format, args...))
+		mu.Unlock()
+	})
+
+	_, err := s.APIIndexRebuild("cam1")
+	require.NoError(t, err)
+	require.Eventually(t, func() bool {
+		return s.Index.NeedsRebuildCount() == 0
+	}, 5*time.Second, 20*time.Millisecond)
+
+	mu.Lock()
+	got := append([]string(nil), logs...)
+	mu.Unlock()
+	joined := strings.Join(got, "\n")
+	require.NotContains(t, joined, "updating path=cam2")
+	require.Contains(t, joined, "updating path=cam1")
 }
 
 // Live CompleteSegment during rebuild marks the day pinned with only the live

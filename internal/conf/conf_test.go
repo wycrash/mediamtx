@@ -1167,7 +1167,7 @@ func TestHLSVariant(t *testing.T) {
 		require.Equal(t, HLSVariant(gohlslib.MuxerVariantMPEGTS), conf.Paths["cam2"].HLSVariant)
 	})
 
-	t.Run("deprecated global hlsVariant", func(t *testing.T) {
+	t.Run("legacy top-level hlsVariant migrates to pathDefaults", func(t *testing.T) {
 		tmpf := createTempFile(t, []byte(
 			"hlsVariant: mpegts\n"+
 				"paths:\n"+
@@ -1177,6 +1177,18 @@ func TestHLSVariant(t *testing.T) {
 		require.NoError(t, err)
 		require.Equal(t, HLSVariant(gohlslib.MuxerVariantMPEGTS), conf.PathDefaults.HLSVariant)
 		require.Equal(t, HLSVariant(gohlslib.MuxerVariantMPEGTS), conf.Paths["cam1"].HLSVariant)
+	})
+
+	t.Run("legacy persist JSON hlsVariant does not override pathDefaults", func(t *testing.T) {
+		tmpf := createTempFile(t, []byte("paths:\n  cam1:\n"))
+		err := os.WriteFile(tmpf+".json", []byte(
+			`{"hlsVariant":"mpegts","pathDefaults":{"hlsVariant":"fmp4"},"paths":{"cam1":{}}}`), 0o600)
+		require.NoError(t, err)
+
+		conf, _, err := Load(tmpf, nil, nil)
+		require.NoError(t, err)
+		require.Equal(t, HLSVariant(gohlslib.MuxerVariantFMP4), conf.PathDefaults.HLSVariant)
+		require.Equal(t, HLSVariant(gohlslib.MuxerVariantFMP4), conf.Paths["cam1"].HLSVariant)
 	})
 }
 

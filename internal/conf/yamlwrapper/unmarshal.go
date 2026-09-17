@@ -141,6 +141,11 @@ func Unmarshal(buf []byte, dest any) error {
 		return err
 	}
 
+	buf, err = jsonwrapper.MigrateRootHLSVariant(buf)
+	if err != nil {
+		return err
+	}
+
 	// load JSON into destination
 	return jsonwrapper.Unmarshal(buf, dest)
 }

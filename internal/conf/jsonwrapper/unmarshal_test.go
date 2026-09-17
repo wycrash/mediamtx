@@ -152,6 +152,28 @@ func TestUnmarshalStructWithCustomUnmarshalerFromString(t *testing.T) {
 	require.Equal(t, &testStructWithUnmarshaler{Field1: "testing"}, &data)
 }
 
+func TestMigrateRootHLSVariant(t *testing.T) {
+	t.Run("copies into empty pathDefaults", func(t *testing.T) {
+		out, err := jsonwrapper.MigrateRootHLSVariant([]byte(`{"hlsVariant":"mpegts","hls":true}`))
+		require.NoError(t, err)
+		require.JSONEq(t, `{"hls":true,"pathDefaults":{"hlsVariant":"mpegts"}}`, string(out))
+	})
+
+	t.Run("does not override existing pathDefaults", func(t *testing.T) {
+		out, err := jsonwrapper.MigrateRootHLSVariant([]byte(
+			`{"hlsVariant":"mpegts","pathDefaults":{"hlsVariant":"fmp4"}}`))
+		require.NoError(t, err)
+		require.JSONEq(t, `{"pathDefaults":{"hlsVariant":"fmp4"}}`, string(out))
+	})
+
+	t.Run("noop without root key", func(t *testing.T) {
+		in := []byte(`{"hls":true}`)
+		out, err := jsonwrapper.MigrateRootHLSVariant(in)
+		require.NoError(t, err)
+		require.Equal(t, in, out)
+	})
+}
+
 func FuzzUnmarshal(f *testing.F) {
 	f.Fuzz(func(_ *testing.T, buf []byte) {
 		var dest any

@@ -18,6 +18,7 @@ import (
 
 	"github.com/bluenviron/mediamtx/internal/conf/decrypt"
 	"github.com/bluenviron/mediamtx/internal/conf/env"
+	"github.com/bluenviron/mediamtx/internal/conf/jsonwrapper"
 	"github.com/bluenviron/mediamtx/internal/conf/yamlwrapper"
 	"github.com/bluenviron/mediamtx/internal/confpersist"
 	"github.com/bluenviron/mediamtx/internal/logger"
@@ -395,7 +396,6 @@ type Conf struct {
 	HLSAllowOrigins    []string    `json:"hlsAllowOrigins"`
 	HLSTrustedProxies  IPNetworks  `json:"hlsTrustedProxies"`
 	HLSAlwaysRemux     bool        `json:"hlsAlwaysRemux"`
-	HLSVariant         *HLSVariant `json:"hlsVariant,omitempty" deprecated:"true"`
 	HLSSegmentCount    int         `json:"hlsSegmentCount"`
 	HLSSegmentDuration Duration    `json:"hlsSegmentDuration"`
 	HLSPartDuration    Duration    `json:"hlsPartDuration"`
@@ -627,7 +627,15 @@ func (conf *Conf) loadFromFile(fpath string, defaultConfPaths []string) (string,
 
 	jsonPath := confpersist.JSONPath(fpath)
 	if confpersist.Exists(jsonPath) {
-		err := confpersist.Load(jsonPath, conf)
+		byts, err := os.ReadFile(jsonPath)
+		if err != nil {
+			return "", err
+		}
+		byts, err = jsonwrapper.MigrateRootHLSVariant(byts)
+		if err != nil {
+			return "", err
+		}
+		err = jsonwrapper.Unmarshal(byts, conf)
 		if err != nil {
 			return "", err
 		}
@@ -1012,12 +1020,6 @@ func (conf *Conf) Validate(l logger.Writer) error {
 	if conf.HLSAllowOrigin != nil {
 		l.Log(logger.Warn, "parameter 'hlsAllowOrigin' is deprecated and has been replaced with 'hlsAllowOrigins'")
 		conf.HLSAllowOrigins = []string{*conf.HLSAllowOrigin}
-	}
-
-	if conf.HLSVariant != nil {
-		l.Log(logger.Warn, "parameter 'hlsVariant' is deprecated "+
-			"and has been replaced with 'pathDefaults.hlsVariant'")
-		conf.PathDefaults.HLSVariant = *conf.HLSVariant
 	}
 
 	// HLS

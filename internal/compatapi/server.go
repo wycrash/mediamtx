@@ -258,10 +258,10 @@ func (s *Server) drainForcedRebuilds() {
 			return
 		}
 		before := s.Index.NeedsRebuildCount()
-		if before == 0 {
+		if before == 0 && !s.Index.HasPendingDayRepairs() {
 			return
 		}
-		s.runBackgroundReconcile(false)
+		s.runQueuedReconcile()
 		after := s.Index.NeedsRebuildCount()
 		if after == 0 || after >= before {
 			return
@@ -277,6 +277,24 @@ func (s *Server) kickBackgroundReconcile() {
 	case s.reconcileKick <- struct{}{}:
 	default:
 	}
+}
+
+func (s *Server) runQueuedReconcile() {
+	if s.MaintMu != nil {
+		s.MaintMu.Lock()
+		defer s.MaintMu.Unlock()
+	}
+
+	s.beginReconcile(defs.APICompatIndexStatusRebuild)
+	defer s.endReconcile()
+
+	s.Log(logger.Info, "recording index queued rebuild started")
+	t0 := time.Now()
+	st := s.Index.ReconcileQueued(s.reconcileStop)
+	dbg := s.Index.DebugSnapshot()
+	s.Log(logger.Info, "recording index queued rebuild done (built=%d added=%d removed=%d inspected=%d pendingRepairs=%d) in %s; %s",
+		st.Built, st.Added, st.Removed, st.Inspected, s.Index.PendingDayRepairCount(), time.Since(t0),
+		dbg.logLine())
 }
 
 func (s *Server) runBackgroundReconcile(slow bool) {
@@ -569,12 +587,11 @@ func (s *Server) ReloadPathConfs(pathConfs map[string]*conf.Path) {
 		return
 	}
 	st := s.Index.ReloadPathConfs(pathConfs)
-	if st.Paths == 0 {
-		return
+	if st.Paths > 0 {
+		s.Log(logger.Info, "recording index loaded for new paths (%d segments, %d new paths, %d from disk)",
+			st.Segments, st.Paths, st.DiskPaths)
 	}
-	s.Log(logger.Info, "recording index loaded for new paths (%d segments, %d new paths, %d from disk)",
-		st.Segments, st.Paths, st.DiskPaths)
-	if st.DiskPaths < st.Paths {
+	if s.Index.NeedsRebuildCount() > 0 {
 		s.kickBackgroundReconcile()
 	}
 }

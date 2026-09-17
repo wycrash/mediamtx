@@ -439,29 +439,39 @@ func (idx *Index) EnablePersist(pathConfs map[string]*conf.Path) {
 }
 
 // ReloadPathConfs updates path configuration used for decoding / durations.
-// Paths that were not previously indexed load their on-disk snapshot+journal,
-// the same way LoadFromDisk does at startup. Otherwise an API-added path whose
-// recordings already exist on disk stays empty until the next reconcile.
+// Unchanged cameras keep RAM, journals, and persist.hash. Identity changes
+// (recordPath / format / storage) queue a rebuild of that path only. Paths
+// that were not previously indexed load their on-disk snapshot+journal, the
+// same way LoadFromDisk does at startup.
 func (idx *Index) ReloadPathConfs(pathConfs map[string]*conf.Path) IndexLoadStats {
 	var st IndexLoadStats
 	idx.mutex.Lock()
+	oldConfs := idx.pathConfs
 	idx.pathConfs = pathConfs
 	known := make(map[string]struct{}, len(idx.paths))
+	identityChanged := make([]string, 0)
 	for name, pe := range idx.paths {
 		known[name] = struct{}{}
-		if pathConf, _, err := conf.FindPathConf(pathConfs, name); err == nil {
-			dur := time.Duration(pathConf.RecordSegmentDuration)
-			if pe.segmentDuration != dur {
-				pe.segmentDuration = dur
-				pe.rangesOK = false
-			}
-			pe.setLayouts(makeDvrLayouts(pathConf, name))
-			if pe.persist != nil {
-				pe.persist.hash = dvrIndexHash(pathConf, name)
-			}
+		newConf, _, err := conf.FindPathConf(pathConfs, name)
+		if err != nil || newConf == nil {
+			continue
+		}
+		dur := time.Duration(newConf.RecordSegmentDuration)
+		if pe.segmentDuration != dur {
+			pe.segmentDuration = dur
+			pe.rangesOK = false
+		}
+		if pathIdentityChanged(pe, oldConfs, newConf, name) {
+			identityChanged = append(identityChanged, name)
 		}
 	}
 	idx.mutex.Unlock()
+
+	for _, name := range identityChanged {
+		idx.OnPathDisabled(name)
+		idx.MarkNeedsRebuild(name)
+		idx.logInfo("recording index identity changed path=%s queued rebuild", name)
+	}
 
 	before := idx.SegmentCount()
 	newNames := make([]string, 0)
@@ -488,6 +498,24 @@ func (idx *Index) ReloadPathConfs(pathConfs map[string]*conf.Path) IndexLoadStat
 	}
 	st.Segments = idx.SegmentCount() - before
 	return st
+}
+
+func pathIdentityChanged(pe *pathIndex, oldConfs map[string]*conf.Path, newConf *conf.Path, name string) bool {
+	if newConf == nil {
+		return false
+	}
+	newHash := dvrIndexHash(newConf, name)
+	if pe != nil && pe.persist != nil && pe.persist.hash != 0 {
+		return pe.persist.hash != newHash
+	}
+	if oldConfs == nil {
+		return false
+	}
+	oldConf, _, err := conf.FindPathConf(oldConfs, name)
+	if err != nil || oldConf == nil {
+		return false
+	}
+	return dvrIndexHash(oldConf, name) != newHash
 }
 
 // OnPathDisabled closes the live day journal without rewriting packs or
@@ -955,6 +983,54 @@ func (idx *Index) ReconcileAll(stop <-chan struct{}, slow bool) IndexLoadStats {
 	if !slow {
 		idx.logInfo("recording index scanning paths found %d in %s", len(pathNames), time.Since(tScan))
 	}
+	return idx.reconcilePathList(pathNames, pathConfs, stop, slow, true)
+}
+
+// ReconcileQueued rebuilds incomplete paths and repairs damaged day journals.
+// Healthy neighbors are not edge-scanned.
+func (idx *Index) ReconcileQueued(stop <-chan struct{}) IndexLoadStats {
+	var st IndexLoadStats
+	if stopped(stop) {
+		return st
+	}
+	idx.mutex.RLock()
+	pathConfs := idx.pathConfs
+	idx.mutex.RUnlock()
+	if pathConfs == nil {
+		return st
+	}
+	pathNames := idx.queuedReconcilePaths()
+	if len(pathNames) == 0 {
+		return st
+	}
+	idx.logInfo("recording index queued reconcile paths=%d", len(pathNames))
+	return idx.reconcilePathList(pathNames, pathConfs, stop, false, false)
+}
+
+func (idx *Index) queuedReconcilePaths() []string {
+	idx.mutex.RLock()
+	defer idx.mutex.RUnlock()
+	out := make([]string, 0)
+	for name, pe := range idx.paths {
+		if pe == nil {
+			continue
+		}
+		if (pe.checkedDisk && !pe.complete) || len(pe.repairDays) > 0 {
+			out = append(out, name)
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
+func (idx *Index) reconcilePathList(
+	pathNames []string,
+	pathConfs map[string]*conf.Path,
+	stop <-chan struct{},
+	slow bool,
+	edges bool,
+) IndexLoadStats {
+	var st IndexLoadStats
 	st.Paths = len(pathNames)
 	nPaths := len(pathNames)
 	for i, pathName := range pathNames {
@@ -970,31 +1046,7 @@ func (idx *Index) ReconcileAll(stop <-chan struct{}, slow bool) IndexLoadStats {
 			idx.logInfo("recording index updating path=%s (%d/%d)", pathName, i+1, nPaths)
 		}
 		tPath := time.Now()
-		var ins, add, del int
-		mode := "edges"
-		if idx.pathNeedsRebuild(pathName) {
-			mode = "rebuild"
-			ins, add, del = idx.buildPathFromDir(pathName, pathConf, stop, slow)
-			if add > 0 {
-				st.Built++
-			}
-		} else {
-			if repairs := idx.takeRepairDays(pathName); len(repairs) > 0 {
-				mode = "repairDays"
-				ins, add, del = idx.rebuildRepairDays(pathName, pathConf, repairs, stop, slow)
-				if add > 0 {
-					st.Built++
-				}
-			}
-			if !slow && idx.rangesNeedRepair(pathName) {
-				mode = "ranges+edges"
-				idx.rebuildRangesFromDayFiles(pathName, true)
-			}
-			i2, a2, d2 := idx.reconcilePathEdges(pathName, pathConf, stop, slow)
-			ins += i2
-			add += a2
-			del += d2
-		}
+		mode, ins, add, del, built := idx.reconcileOnePath(pathName, pathConf, stop, slow, edges)
 		pathDur := time.Since(tPath)
 		idx.debug.noteReconcilePath(pathDur)
 		if !slow {
@@ -1004,6 +1056,7 @@ func (idx *Index) ReconcileAll(stop <-chan struct{}, slow bool) IndexLoadStats {
 			idx.logSlow("reconcilePath", pathName, pathDur,
 				fmt.Sprintf("mode=%s ins=%d add=%d del=%d", mode, ins, add, del))
 		}
+		st.Built += built
 		st.Inspected += ins
 		st.Added += add
 		st.Removed += del
@@ -1012,6 +1065,44 @@ func (idx *Index) ReconcileAll(stop <-chan struct{}, slow bool) IndexLoadStats {
 	st.Segments = idx.SegmentCount()
 	st.DiskPaths = st.Paths
 	return st
+}
+
+func (idx *Index) reconcileOnePath(
+	pathName string,
+	pathConf *conf.Path,
+	stop <-chan struct{},
+	slow bool,
+	edges bool,
+) (mode string, ins, add, del, built int) {
+	if idx.pathNeedsRebuild(pathName) {
+		ins, add, del = idx.buildPathFromDir(pathName, pathConf, stop, slow)
+		if add > 0 {
+			built = 1
+		}
+		return "rebuild", ins, add, del, built
+	}
+	mode = "skip"
+	if repairs := idx.takeRepairDays(pathName); len(repairs) > 0 {
+		mode = "repairDays"
+		ins, add, del = idx.rebuildRepairDays(pathName, pathConf, repairs, stop, slow)
+		if add > 0 {
+			built = 1
+		}
+	}
+	if !edges {
+		return mode, ins, add, del, built
+	}
+	if !slow && idx.rangesNeedRepair(pathName) {
+		mode = "ranges+edges"
+		idx.rebuildRangesFromDayFiles(pathName, true)
+	} else if mode == "skip" {
+		mode = "edges"
+	}
+	i2, a2, d2 := idx.reconcilePathEdges(pathName, pathConf, stop, slow)
+	ins += i2
+	add += a2
+	del += d2
+	return mode, ins, add, del, built
 }
 
 func (idx *Index) takeRepairDays(pathName string) []repairDay {
@@ -1171,6 +1262,9 @@ func (idx *Index) buildPathFromDir(
 	pe := idx.ensurePathLocked(pathName)
 	if pe.persist == nil {
 		pe.persist = newDvrPersist(pathConf, pathName)
+	} else {
+		pe.persist.hash = dvrIndexHash(pathConf, pathName)
+		pe.persist.ready = false
 	}
 	pe.setLayouts(layouts)
 	pe.days = nil
