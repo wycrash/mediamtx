@@ -1,5 +1,5 @@
 ###############################################
-# Global settings
+# Global settings use for first start
 
 # Settings in this section are applied anywhere.
 
@@ -279,6 +279,13 @@ compatAPITimeOffsetMinutes: 0
 # Interval for the Compat DVR index background edge update.
 # 0 disables the periodic update (manual rebuild via Control API still works).
 compatAPIIndexUpdateInterval: 10m
+# DVR index RAM policy.
+# old: pin every day journal (current behavior).
+# new: keep meta, ranges, and status in RAM; load day journals on demand
+# and pin the last compatAPIIndexEngineNewDay days. If that number is >= the
+# archive depth, behavior matches old.
+compatAPIIndexEngine: old
+compatAPIIndexEngineNewDay: 2
 
 ###############################################
 # Global settings -> RTSP server
@@ -639,14 +646,14 @@ pathDefaults:
   # Default path settings -> Record
 
   # Record streams to disk.
-  record: true
+  record: false
   # Path of recording segments.
   # Extension is added automatically.
   # Available variables are %path (path name), %Y %m %d (year, month, day),
   # %H %M %S (hours, minutes, seconds), %f (microseconds), %z (time zone), %s (unix epoch).
   # When "storage" is set, this is a filename template: a static directory prefix is ignored
   # and each pool disk is used as the root.
-  recordPath: ./recordings/%path/%Y-%m-%d_%H-%M-%S-%f
+  recordPath: '%path/%Y-%m-%d_%H-%M-%S-%f'
   # Named storage pool (see top-level storages). Empty = recordPath is a full path.
   # storage: dvr
   # Format of recorded segments.

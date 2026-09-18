@@ -747,6 +747,8 @@ func (p *Core) createResources(initial bool) error {
 			WriteTimeout:        currentConf.WriteTimeout,
 			TimeOffsetMinutes:   currentConf.CompatAPITimeOffsetMinutes,
 			IndexUpdateInterval: currentConf.CompatAPIIndexUpdateInterval,
+			IndexEngine:         currentConf.CompatAPIIndexEngine,
+			IndexEngineNewDay:   currentConf.CompatAPIIndexEngineNewDay,
 			HLSHandler:          p.hlsServer,
 			PathConfs:           currentConf.Paths,
 			PathManager:         p.pathManager,
@@ -1377,6 +1379,8 @@ func (p *Core) closeResources(newConf *conf.Conf) {
 		!reflect.DeepEqual(newConf.CompatAPITrustedProxies, currentConf.CompatAPITrustedProxies) ||
 		newConf.CompatAPITimeOffsetMinutes != currentConf.CompatAPITimeOffsetMinutes ||
 		newConf.CompatAPIIndexUpdateInterval != currentConf.CompatAPIIndexUpdateInterval ||
+		newConf.CompatAPIIndexEngine != currentConf.CompatAPIIndexEngine ||
+		newConf.CompatAPIIndexEngineNewDay != currentConf.CompatAPIIndexEngineNewDay ||
 		newConf.ReadTimeout != currentConf.ReadTimeout ||
 		newConf.WriteTimeout != currentConf.WriteTimeout ||
 		newConf.DumpPackets != currentConf.DumpPackets ||

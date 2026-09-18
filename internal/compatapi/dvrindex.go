@@ -206,6 +206,9 @@ func makeDvrLayouts(pathConf *conf.Path, pathName string) []dvrPathLayout {
 	formats := pathConf.RecordPathFormats()
 	out := make([]dvrPathLayout, 0, len(formats))
 	for _, raw := range formats {
+		if strings.TrimSpace(raw) == "" {
+			continue
+		}
 		out = append(out, makeDvrLayoutFrom(raw, pathConf, pathName))
 	}
 	return out

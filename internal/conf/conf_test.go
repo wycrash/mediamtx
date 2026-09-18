@@ -1094,6 +1094,19 @@ func TestConfErrors(t *testing.T) {
 			"invalid 'forward': entry 0: unsupported scheme 'http', supported ones are " +
 				"rtmp, rtmps, rtsp, rtsps, srt, moqt, whip and whips",
 		},
+		{
+			"invalid compatAPIIndexEngine",
+			"compatAPI: yes\n" +
+				"compatAPIIndexEngine: lazy\n",
+			"invalid 'compatAPIIndexEngine': 'lazy'",
+		},
+		{
+			"invalid compatAPIIndexEngineNewDay",
+			"compatAPI: yes\n" +
+				"compatAPIIndexEngine: new\n" +
+				"compatAPIIndexEngineNewDay: 0\n",
+			"'compatAPIIndexEngineNewDay' must be >= 1",
+		},
 	} {
 		t.Run(ca.name, func(t *testing.T) {
 			tmpf := createTempFile(t, []byte(ca.conf))
@@ -1106,6 +1119,25 @@ func TestConfErrors(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestConfCompatAPIIndexEngine(t *testing.T) {
+	t.Run("defaults", func(t *testing.T) {
+		cnf, _, err := Load("", nil, nil)
+		require.NoError(t, err)
+		require.Equal(t, IndexEngineOld, cnf.CompatAPIIndexEngine)
+		require.Equal(t, 2, cnf.CompatAPIIndexEngineNewDay)
+	})
+	t.Run("new", func(t *testing.T) {
+		tmpf := createTempFile(t, []byte(
+			"compatAPI: yes\n"+
+				"compatAPIIndexEngine: new\n"+
+				"compatAPIIndexEngineNewDay: 5\n"))
+		cnf, _, err := Load(tmpf, nil, nil)
+		require.NoError(t, err)
+		require.Equal(t, IndexEngineNew, cnf.CompatAPIIndexEngine)
+		require.Equal(t, 5, cnf.CompatAPIIndexEngineNewDay)
+	})
 }
 
 func TestPathTitle(t *testing.T) {

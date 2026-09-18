@@ -185,7 +185,7 @@ func TestPresentDayIndexesFromFlatJournalNames(t *testing.T) {
 	require.Equal(t, map[string]struct{}{"2026-09-10": {}}, got)
 }
 
-func TestLoadOneDaySnapshotMergesSnapshotAndJournal(t *testing.T) {
+func TestLoadOneDayJournalIsSourceOfTruth(t *testing.T) {
 	dir := t.TempDir()
 	l := dvrPathLayout{common: dir}
 	hash := uint64(3)
@@ -205,12 +205,41 @@ func TestLoadOneDaySnapshotMergesSnapshotAndJournal(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, os.WriteFile(l.dayJournal("2020-01-01"), append(journalHeader(hash), op...), 0o644))
 
+	nSnap := 0
+	orig := readFile
+	readFile = func(name string) ([]byte, error) {
+		if name == l.daySnap("2020-01-01") {
+			nSnap++
+		}
+		return orig(name)
+	}
+	t.Cleanup(func() { readFile = orig })
+
 	snap, ops, ok := loadOneDaySnapshot(l, "2020-01-01", hash)
 	require.True(t, ok)
 	require.Len(t, ops, 1)
-	require.Len(t, snap.Segs, 2)
+	require.Len(t, snap.Segs, 1)
+	require.Equal(t, "b.mp4", snap.Segs[0].Rel)
+	require.Equal(t, 0, nSnap, "journal present: do not read snap")
+}
+
+func TestLoadOneDaySnapshotUsedWhenJournalMissing(t *testing.T) {
+	dir := t.TempDir()
+	l := dvrPathLayout{common: dir}
+	hash := uint64(3)
+	base := time.Unix(1000, 0).UTC()
+	require.NoError(t, writeSnapshotFile(l.daySnap("2020-01-01"), dvrSnapshot{
+		Hash: hash,
+		Segs: []dvrSegRec{{
+			Rel: "a.mp4", Start: base, Duration: time.Second, Ready: true,
+		}},
+	}))
+
+	snap, ops, ok := loadOneDaySnapshot(l, "2020-01-01", hash)
+	require.True(t, ok)
+	require.Empty(t, ops)
+	require.Len(t, snap.Segs, 1)
 	require.Equal(t, "a.mp4", snap.Segs[0].Rel)
-	require.Equal(t, "b.mp4", snap.Segs[1].Rel)
 }
 
 func TestIndexLoadFromDiskUsesSnapshot(t *testing.T) {
@@ -1062,6 +1091,100 @@ func TestPrefetchDaysLoadsUnpinned(t *testing.T) {
 	idx.mutex.RUnlock()
 	require.Len(t, idx.SegmentsInWindow("cam1", hist, time.Minute), 1)
 	idx.ClosePersist()
+}
+
+func TestRecentDays(t *testing.T) {
+	days := []dvrDayInfo{{Date: "2020-01-01"}, {Date: "2020-01-02"}, {Date: "2020-01-03"}}
+	require.Equal(t, days, recentDays(days, 0))
+	require.Equal(t, days, recentDays(days, 10))
+	require.Equal(t, days[1:], recentDays(days, 2))
+	require.Nil(t, recentDays(nil, 2))
+}
+
+func TestPrefetchDaysNewEngineKeepsLastN(t *testing.T) {
+	dir := t.TempDir()
+	d1 := time.Date(2020, 1, 1, 0, 0, 0, 0, time.Local)
+	d2 := time.Date(2020, 1, 2, 0, 0, 0, 0, time.Local)
+	today := time.Now().Truncate(time.Second)
+	oldA := datedFMP4(t, dir, "cam1", d1, 2)
+	datedFMP4(t, dir, "cam1", d2, 2)
+	datedFMP4(t, dir, "cam1", today, 2)
+
+	pathConf := testRecordPathConf(dir, "cam1")
+	confs := map[string]*conf.Path{"cam1": pathConf}
+
+	idx := NewIndex()
+	require.Equal(t, 0, idx.LoadFromDisk(confs).DiskPaths)
+	require.Equal(t, 3, idx.ReconcileAll(nil, false).Segments)
+	idx.ClosePersist()
+
+	idx = NewIndex()
+	idx.ConfigureEngine(conf.IndexEngineNew, 2)
+	require.Equal(t, 1, idx.LoadFromDisk(confs).DiskPaths)
+
+	ranges := idx.Ranges("cam1")
+	require.NotEmpty(t, ranges)
+	require.LessOrEqual(t, ranges[0].From, d1.Unix(), "ranges stay in RAM from meta")
+
+	idx.PrefetchDays(nil)
+	idx.mutex.RLock()
+	pe := idx.paths["cam1"]
+	require.NotNil(t, pe)
+	require.False(t, pe.dayIsPinned(dvrDayDate(d1)), "days older than keep window stay on disk")
+	require.True(t, pe.dayIsPinned(dvrDayDate(d2)))
+	require.True(t, pe.dayIsPinned(dvrDayDate(today)))
+	idx.mutex.RUnlock()
+
+	out := idx.SegmentsInWindow("cam1", d1, time.Minute)
+	require.Len(t, out, 1)
+	require.Equal(t, oldA, out[0].Fpath())
+	idx.mutex.RLock()
+	require.False(t, idx.paths["cam1"].dayIsPinned(dvrDayDate(d1)), "on-demand load must not pin the archive day")
+	idx.mutex.RUnlock()
+	idx.ClosePersist()
+}
+
+func TestPrefetchDaysNewEngineCoversArchiveMatchesOld(t *testing.T) {
+	dir := t.TempDir()
+	d1 := time.Date(2020, 1, 1, 0, 0, 0, 0, time.Local)
+	d2 := time.Date(2020, 1, 2, 0, 0, 0, 0, time.Local)
+	today := time.Now().Truncate(time.Second)
+	datedFMP4(t, dir, "cam1", d1, 2)
+	datedFMP4(t, dir, "cam1", d2, 2)
+	datedFMP4(t, dir, "cam1", today, 2)
+
+	pathConf := testRecordPathConf(dir, "cam1")
+	confs := map[string]*conf.Path{"cam1": pathConf}
+
+	build := func() *Index {
+		idx := NewIndex()
+		require.Equal(t, 0, idx.LoadFromDisk(confs).DiskPaths)
+		require.Equal(t, 3, idx.ReconcileAll(nil, false).Segments)
+		idx.ClosePersist()
+		return idx
+	}
+	build()
+
+	oldIdx := NewIndex()
+	require.Equal(t, 1, oldIdx.LoadFromDisk(confs).DiskPaths)
+	oldIdx.PrefetchDays(nil)
+
+	newIdx := NewIndex()
+	newIdx.ConfigureEngine(conf.IndexEngineNew, 10)
+	require.Equal(t, 1, newIdx.LoadFromDisk(confs).DiskPaths)
+	newIdx.PrefetchDays(nil)
+
+	for _, day := range []string{dvrDayDate(d1), dvrDayDate(d2), dvrDayDate(today)} {
+		oldIdx.mutex.RLock()
+		newIdx.mutex.RLock()
+		require.True(t, oldIdx.paths["cam1"].dayIsPinned(day), "old engine pins %s", day)
+		require.True(t, newIdx.paths["cam1"].dayIsPinned(day), "new engine with keep>=archive pins %s", day)
+		oldIdx.mutex.RUnlock()
+		newIdx.mutex.RUnlock()
+	}
+	require.Equal(t, oldIdx.Ranges("cam1"), newIdx.Ranges("cam1"))
+	oldIdx.ClosePersist()
+	newIdx.ClosePersist()
 }
 
 func copyPathConf(p *conf.Path) *conf.Path {

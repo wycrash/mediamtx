@@ -141,6 +141,10 @@ func (c *Cleaner) freeDisk(storageName, diskRoot string, maxPct, untilPct float6
 		storageName, diskRoot, used, maxPct, untilPct, budget, stats.cameras, stats.segSize, stats.partDur, usage.totalBytes)
 
 	recheckEvery := c.usageRecheckEvery()
+	absDisk, absErr := filepath.Abs(diskRoot)
+	if absErr != nil {
+		absDisk = filepath.Clean(diskRoot)
+	}
 	segments := c.segmentsOnDisk(storageName, diskRoot, budget)
 	if len(segments) == 0 {
 		c.Log(logger.Warn, "storage '%s' disk '%s' is %.1f%% full but no deletable segments were found (check path storage= name and record paths)",
@@ -149,9 +153,11 @@ func (c *Cleaner) freeDisk(storageName, diskRoot string, maxPct, untilPct float6
 	}
 
 	deleted := 0
+	deletedOnDisk := 0
 	skippedActive := 0
 	for _, seg := range segments {
-		if deleted >= budget {
+		onPressure := pathUnderRoot(seg.Fpath, absDisk)
+		if onPressure && deletedOnDisk >= budget {
 			if used > untilPct {
 				c.Log(logger.Warn, "storage '%s' disk '%s': delete budget (%d) reached this tick (still reclaiming next pass)",
 					storageName, diskRoot, budget)
@@ -173,8 +179,11 @@ func (c *Cleaner) freeDisk(storageName, diskRoot string, maxPct, untilPct float6
 			c.OnSegmentRemove(seg.Fpath)
 		}
 		deleted++
+		if onPressure {
+			deletedOnDisk++
+		}
 
-		if deleted%recheckEvery != 0 {
+		if !onPressure || deletedOnDisk%recheckEvery != 0 {
 			continue
 		}
 		used, err = c.diskUsedPercent(diskRoot)
@@ -212,7 +221,7 @@ func (c *Cleaner) segmentsOnDisk(storageName, diskRoot string, limit int) []*rec
 	// Ask for a few extra so active-write skips do not exhaust the batch early.
 	ask := limit + 32
 	if lister := c.getSegmentLister(); lister != nil {
-		refs, ok := lister.OldestOnDisk(storageName, diskRoot, ask)
+		refs, ok := lister.ReclaimCandidates(storageName, diskRoot, ask)
 		if ok {
 			out := make([]*recordstore.Segment, 0, len(refs))
 			for _, ref := range refs {

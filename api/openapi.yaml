@@ -104,6 +104,12 @@ components:
         - optional
         - strict
 
+    IndexEngine:
+      type: string
+      enum:
+        - old
+        - new
+
     MoQSessionState:
       type: string
       enum:
@@ -398,6 +404,12 @@ components:
             type: string
         compatAPIEncryption:
           type: boolean
+        compatAPIIndexEngine:
+          $ref: "#/components/schemas/IndexEngine"
+        compatAPIIndexEngineNewDay:
+          type: integer
+          format: int64
+          description: Days of segment index kept in RAM when engine is new. If >= archive depth, same as old.
         compatAPIIndexUpdateInterval:
           type: string
         compatAPIServerCert:

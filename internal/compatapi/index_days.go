@@ -11,6 +11,9 @@ import (
 	"github.com/bluenviron/mediamtx/internal/conf"
 )
 
+// readFile is os.ReadFile; tests swap it to count journal/snap IO.
+var readFile = os.ReadFile
+
 type dayCacheKey struct {
 	path string
 	day  string
@@ -540,30 +543,38 @@ func loadOneDayIndexDetail(idx *Index, l dvrPathLayout, day string, hash uint64)
 	}
 
 	tRead := time.Now()
-	snapPath := l.daySnap(day)
-	snapData, snapErr := os.ReadFile(snapPath)
-	if snapErr == nil {
-		info.snapB = int64(len(snapData))
-	}
-	if idx != nil {
-		idx.logIndexIO("read-snap", snapPath, info.snapB, time.Since(tRead), snapErr)
-	}
-
-	tJ := time.Now()
 	jourPath := l.dayJournal(day)
-	jourData, jErr := os.ReadFile(jourPath)
+	jourData, jErr := readFile(jourPath)
+	journalPresent := false
 	if os.IsNotExist(jErr) {
 		if idx != nil {
-			idx.logIndexIO("read-journal", jourPath, 0, time.Since(tJ), jErr)
+			idx.logIndexIO("read-journal", jourPath, 0, time.Since(tRead), jErr)
 		}
 		jourData, jErr = nil, nil
 	} else {
+		journalPresent = jErr == nil
 		if jErr == nil {
 			info.journalB = int64(len(jourData))
 		}
 		if idx != nil {
-			idx.logIndexIO("read-journal", jourPath, info.journalB, time.Since(tJ), jErr)
+			idx.logIndexIO("read-journal", jourPath, info.journalB, time.Since(tRead), jErr)
 		}
+	}
+
+	var snapData []byte
+	var snapErr error
+	snapPath := l.daySnap(day)
+	if !journalPresent {
+		tSnap := time.Now()
+		snapData, snapErr = readFile(snapPath)
+		if snapErr == nil {
+			info.snapB = int64(len(snapData))
+		}
+		if idx != nil {
+			idx.logIndexIO("read-snap", snapPath, info.snapB, time.Since(tSnap), snapErr)
+		}
+	} else {
+		snapErr = os.ErrNotExist
 	}
 	info.read = time.Since(tRead)
 
@@ -945,6 +956,50 @@ func (idx *Index) pinnedAsLoadedLocked(pe *pathIndex, day string) *loadedDay {
 	return ld
 }
 
+func (idx *Index) dropDayCacheKeyLocked(pathName, day string) {
+	if idx == nil || pathName == "" || day == "" {
+		return
+	}
+	key := dayCacheKey{path: pathName, day: day}
+	delete(idx.dayCache, key)
+	for i, k := range idx.dayLRU {
+		if k == key {
+			idx.dayLRU = append(idx.dayLRU[:i], idx.dayLRU[i+1:]...)
+			return
+		}
+	}
+}
+
+func (idx *Index) dropSegFromDayCacheLocked(pathName, fpath string) (start time.Time, dur time.Duration, ok bool) {
+	if idx == nil || pathName == "" || fpath == "" {
+		return
+	}
+	clean := filepath.Clean(fpath)
+	name := filepath.Base(fpath)
+	for key, ld := range idx.dayCache {
+		if key.path != pathName || ld == nil {
+			continue
+		}
+		for i, s := range ld.segs {
+			if s == nil {
+				continue
+			}
+			if s.Fpath() != fpath && filepath.Clean(s.Fpath()) != clean && s.Name() != name {
+				continue
+			}
+			start = s.Start
+			if s.fmp4.Duration > 0 {
+				dur = s.fmp4.Duration
+			}
+			ld.segs = append(ld.segs[:i], ld.segs[i+1:]...)
+			delete(ld.byName, name)
+			idx.touchDayLRULocked(key)
+			return start, dur, true
+		}
+	}
+	return
+}
+
 func (idx *Index) touchDayLRULocked(key dayCacheKey) {
 	for i, k := range idx.dayLRU {
 		if k == key {
@@ -1047,7 +1102,11 @@ func (idx *Index) evictStalePinned(pathName string) {
 	if pe.openDay != "" {
 		keep[pe.openDay] = struct{}{}
 	}
-	for _, d := range pe.days {
+	days := pe.days
+	if n := idx.recentDayLimit(); n > 0 {
+		days = recentDays(days, n)
+	}
+	for _, d := range days {
 		keep[d.Date] = struct{}{}
 	}
 	for day := range pe.pinnedDays {
@@ -1056,6 +1115,22 @@ func (idx *Index) evictStalePinned(pathName string) {
 		}
 		idx.unpinDayLocked(pe, day)
 	}
+}
+
+// pinLiveDayIfNeeded pins the recording day so its journal can be unpinned
+// later when it falls out of the new-engine window. No-op for the old engine.
+func (idx *Index) pinLiveDayIfNeeded(pathName, day string) {
+	if !idx.engineIsNew() || day == "" {
+		return
+	}
+	idx.mutex.RLock()
+	pe := idx.paths[pathName]
+	pinned := pe != nil && pe.dayIsPinned(day)
+	idx.mutex.RUnlock()
+	if pinned {
+		return
+	}
+	idx.pinDay(pathName, day)
 }
 
 func (idx *Index) segsForDay(pathName, day string) []*IndexedSegment {
@@ -1159,17 +1234,24 @@ func trimRangesBefore(ranges []RecordingRange, cutoff time.Time) []RecordingRang
 	return out
 }
 
+func unlinkLayoutDay(l dvrPathLayout, day string) {
+	if day == "" || l.common == "" {
+		return
+	}
+	_ = os.Remove(l.daySnap(day))
+	_ = os.Remove(l.dayJournal(day))
+	_ = os.Remove(l.dayPack(day))
+	if l.dateDir {
+		_ = os.Remove(filepath.Join(l.common, day))
+	}
+}
+
 func (idx *Index) unlinkDayFiles(pe *pathIndex, day string) {
 	if pe == nil || day == "" {
 		return
 	}
 	for _, layout := range pe.allLayouts() {
-		_ = os.Remove(layout.daySnap(day))
-		_ = os.Remove(layout.dayJournal(day))
-		_ = os.Remove(layout.dayPack(day))
-		if layout.dateDir {
-			_ = os.Remove(filepath.Join(layout.common, day))
-		}
+		unlinkLayoutDay(layout, day)
 	}
 }
 
@@ -1209,20 +1291,41 @@ func (idx *Index) PrefetchDays(stop <-chan struct{}) {
 	if curPath != "" {
 		idx.logInfo("recording index ram path=%s in %s", curPath, time.Since(tPath))
 	}
-	idx.logInfo("recording index in memory days=%d/%d segs=%d in %s",
-		n, len(jobs), idx.SegmentCount(), time.Since(t0))
+	if idx.engineIsNew() {
+		idx.logInfo("recording index in memory engine=new keepDays=%d days=%d/%d segs=%d in %s",
+			idx.recentDayLimit(), n, len(jobs), idx.SegmentCount(), time.Since(t0))
+	} else {
+		idx.logInfo("recording index in memory days=%d/%d segs=%d in %s",
+			n, len(jobs), idx.SegmentCount(), time.Since(t0))
+	}
+	if idx.engineIsNew() {
+		idx.mutex.RLock()
+		names := make([]string, 0, len(idx.paths))
+		for name := range idx.paths {
+			names = append(names, name)
+		}
+		idx.mutex.RUnlock()
+		for _, name := range names {
+			idx.evictStalePinned(name)
+		}
+	}
 	idx.wakeChunkScan()
 }
 
 func (idx *Index) prefetchJobs() []prefetchJob {
 	idx.mutex.RLock()
 	defer idx.mutex.RUnlock()
+	limit := idx.recentDayLimit()
 	var out []prefetchJob
 	for name, pe := range idx.paths {
 		if pe == nil {
 			continue
 		}
-		for _, d := range pe.days {
+		days := pe.days
+		if limit > 0 {
+			days = recentDays(days, limit)
+		}
+		for _, d := range days {
 			if pe.dayIsPinned(d.Date) {
 				continue
 			}

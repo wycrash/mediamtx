@@ -194,10 +194,6 @@ func (c *Cleaner) cleanInterval(spacePressure bool) time.Duration {
 		}
 	}
 
-	if c.hasSpaceClean() && interval > time.Minute {
-		interval = time.Minute
-	}
-
 	return interval
 }
 
@@ -218,6 +214,10 @@ func (c *Cleaner) doRun() time.Duration {
 	now := timeNow()
 	for _, pathName := range c.pathNamesForAge() {
 		c.processPathAge(now, pathName)
+	}
+
+	if lister := c.getSegmentLister(); lister != nil {
+		lister.Flush()
 	}
 
 	return c.cleanInterval(spacePressure)
@@ -242,17 +242,19 @@ func (c *Cleaner) processPathAge(now time.Time, pathName string) {
 		return
 	}
 
-	err = c.deleteExpiredSegments(now, pathName, pathConf)
+	n, err := c.deleteExpiredSegments(now, pathName, pathConf)
 	if err != nil && !errors.Is(err, recordstore.ErrNoSegmentsFound) {
 		c.Log(logger.Warn, "path %s: %v", pathName, err)
 		return
 	}
-
-	c.deleteEmptyDirs(pathConf)
+	if n > 0 {
+		c.deleteEmptyDirs(pathConf)
+	}
 }
 
-func (c *Cleaner) deleteExpiredSegments(now time.Time, pathName string, pathConf *conf.Path) error {
+func (c *Cleaner) deleteExpiredSegments(now time.Time, pathName string, pathConf *conf.Path) (int, error) {
 	end := now.Add(-time.Duration(pathConf.RecordDeleteAfter))
+	deleted := 0
 
 	if lister := c.getSegmentLister(); lister != nil {
 		refs, ok := lister.SegmentsBefore(pathName, end)
@@ -266,14 +268,15 @@ func (c *Cleaner) deleteExpiredSegments(now time.Time, pathName string, pathConf
 				if c.OnSegmentRemove != nil {
 					c.OnSegmentRemove(ref.Fpath)
 				}
+				deleted++
 			}
-			return nil
+			return deleted, nil
 		}
 	}
 
 	segments, err := recordstore.FindSegments(pathConf, pathName, nil, &end)
 	if err != nil {
-		return err
+		return 0, err
 	}
 
 	for _, seg := range segments {
@@ -285,9 +288,10 @@ func (c *Cleaner) deleteExpiredSegments(now time.Time, pathName string, pathConf
 		if c.OnSegmentRemove != nil {
 			c.OnSegmentRemove(seg.Fpath)
 		}
+		deleted++
 	}
 
-	return nil
+	return deleted, nil
 }
 
 func (c *Cleaner) deleteEmptyDirs(pathConf *conf.Path) {

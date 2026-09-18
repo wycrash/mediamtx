@@ -469,6 +469,9 @@ func isStructEnum(rt reflect.Type) bool {
 	case reflect.TypeOf(conf.LogLevel(0)):
 		return true
 
+	case reflect.TypeOf(conf.IndexEngine("")):
+		return true
+
 	case reflect.TypeOf(conf.RecordFormat("")):
 		return true
 

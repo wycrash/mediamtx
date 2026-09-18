@@ -43,6 +43,8 @@ type Server struct {
 	WriteTimeout        conf.Duration
 	TimeOffsetMinutes   int
 	IndexUpdateInterval conf.Duration
+	IndexEngine         conf.IndexEngine
+	IndexEngineNewDay   int
 	PathConfs           map[string]*conf.Path
 	PathManager         pathAPIGetter
 	AuthManager         serverAuthManager
@@ -89,6 +91,7 @@ func (s *Server) SetHLSHandler(h http.Handler) {
 func (s *Server) Initialize() error {
 	s.Index = NewIndex()
 	s.Index.Parent = s
+	s.Index.ConfigureEngine(s.IndexEngine, s.IndexEngineNewDay)
 	s.Index.EnablePersist(s.PathConfs)
 
 	s.sessions = make(map[uuid.UUID]*session)
@@ -123,6 +126,9 @@ func (s *Server) Initialize() error {
 		proto = "TCP/HTTPS"
 	}
 	s.Log(logger.Info, "started with listener on %s (%s)", s.Address, proto)
+	if s.IndexEngine == conf.IndexEngineNew {
+		s.Log(logger.Info, "recording index engine=new keepDays=%d", s.IndexEngineNewDay)
+	}
 	s.reconcileStop = make(chan struct{})
 	s.reconcileDone = make(chan struct{})
 	s.reconcileKick = make(chan struct{}, 1)

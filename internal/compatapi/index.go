@@ -218,6 +218,12 @@ func (pe *pathIndex) setDiskDayNSeg(common, day string, n int) {
 	if n < 0 {
 		n = 0
 	}
+	if n == 0 {
+		if pe.diskDays != nil && pe.diskDays[common] != nil {
+			delete(pe.diskDays[common], day)
+		}
+		return
+	}
 	if pe.diskDays == nil {
 		pe.diskDays = make(map[string]map[string]int)
 	}
@@ -325,6 +331,15 @@ type Index struct {
 	chunkIdle bool
 	chunkGen  uint64
 	packDirty map[packDirtyKey]struct{}
+
+	// indexEngine selects RAM policy. Empty / old pins every day journal.
+	// new keeps meta+ranges in RAM and pins only the last indexEngineNewDay days.
+	indexEngine       conf.IndexEngine
+	indexEngineNewDay int
+
+	dirListMu    sync.Mutex
+	dirListCache map[string][]cachedDirEnt
+	metaDirty    map[string]int
 }
 
 type snapMemoEntry struct {
@@ -342,6 +357,43 @@ func NewIndex() *Index {
 		chunkQ:    make(chan chunkJob, 1024),
 		packDirty: make(map[packDirtyKey]struct{}),
 	}
+}
+
+// ConfigureEngine selects the RAM policy for day journals. old (default) pins
+// every day. new pins the last newDay days and loads the rest on demand.
+// When newDay is at least the archive depth, new matches old.
+func (idx *Index) ConfigureEngine(engine conf.IndexEngine, newDay int) {
+	if idx == nil {
+		return
+	}
+	idx.mutex.Lock()
+	defer idx.mutex.Unlock()
+	idx.indexEngine = engine
+	idx.indexEngineNewDay = newDay
+}
+
+func (idx *Index) engineIsNew() bool {
+	return idx != nil && idx.indexEngine == conf.IndexEngineNew
+}
+
+// recentDayLimit is how many newest day journals stay pinned. 0 means all days
+// (old engine, or new engine when the caller should treat the archive as fully hot).
+func (idx *Index) recentDayLimit() int {
+	if !idx.engineIsNew() {
+		return 0
+	}
+	n := idx.indexEngineNewDay
+	if n < 1 {
+		return 2
+	}
+	return n
+}
+
+func recentDays(days []dvrDayInfo, limit int) []dvrDayInfo {
+	if limit <= 0 || len(days) <= limit {
+		return days
+	}
+	return days[len(days)-limit:]
 }
 
 func (idx *Index) logInfo(format string, args ...any) {
@@ -1458,6 +1510,7 @@ func (idx *Index) buildPathFromDir(
 	for _, day := range toPin {
 		idx.pinDay(pathName, day)
 	}
+	idx.evictStalePinned(pathName)
 	if today != "" {
 		hasToday := false
 		idx.mutex.RLock()
@@ -1787,7 +1840,7 @@ func (idx *Index) pruneExpired(pathName string, deleteAfter time.Duration) int {
 		idx.mutex.Lock()
 		if pe := idx.paths[pathName]; pe != nil {
 			idx.unpinDayLocked(pe, day)
-			delete(idx.dayCache, dayCacheKey{path: pathName, day: day})
+			idx.dropDayCacheKeyLocked(pathName, day)
 		}
 		idx.mutex.Unlock()
 	}
@@ -2543,17 +2596,20 @@ func (idx *Index) persistDeleteLocked(pe *pathIndex, pathName, fpath, day string
 		pe.persist.journalPath == pe.layout.dayJournal(day) {
 		_ = pe.persist.writeOp(op)
 	} else {
-		hash := uint64(0)
-		if pe.persist != nil {
-			hash = pe.persist.hash
-		} else if idx.pathConfs != nil {
+		if pe.persist == nil && !pe.complete {
+			return
+		}
+		if pe.layout.common == "" {
+			return
+		}
+		hash := idx.pathHash(pathName, pe)
+		if hash == 0 {
 			return
 		}
 		_ = appendJournalOpFile(pe.layout.dayJournal(day), hash, op)
 	}
-	if pathName != "" && day != "" {
-		delete(idx.dayCache, dayCacheKey{path: pathName, day: day})
-	}
+	// Keep the day's RAM list; reclaim reuses it until nseg hits 0.
+	idx.dropSegFromDayCacheLocked(pathName, fpath)
 }
 
 func (idx *Index) ensurePersistLocked(pathName string, pe *pathIndex) {
@@ -2692,6 +2748,10 @@ func (idx *Index) CompleteSegment(pathName, fpath string, duration time.Duration
 	}
 	idx.Add(pathName, fpath, start)
 	idx.bindPersistFile(pathName, day, fpath)
+	idx.pinLiveDayIfNeeded(pathName, day)
+	if prev != "" {
+		idx.evictStalePinned(pathName)
+	}
 
 	idx.mutex.RLock()
 	pathConfs := idx.pathConfs
@@ -2767,52 +2827,192 @@ func (idx *Index) Remove(fpath string) {
 	if fpath == "" {
 		return
 	}
+	pathName := idx.pathNameForFpath(fpath)
+	pathNameOut = pathName
+	if pathName == "" {
+		return
+	}
+	idx.RemoveIndexed(pathName, fpath)
+}
+
+// RemoveIndexed deletes a segment from disk indexes, meta, and RAM ranges.
+// Works for cold days that are not pinned in pe.segments.
+func (idx *Index) RemoveIndexed(pathName, fpath string) {
+	if idx == nil || pathName == "" || fpath == "" {
+		return
+	}
+	clean := filepath.Clean(fpath)
+	name := filepath.Base(fpath)
+
+	idx.mutex.Lock()
+	pe := idx.paths[pathName]
+	if pe == nil {
+		idx.mutex.Unlock()
+		return
+	}
+	idx.fillLayoutsLocked(pe, pathName)
+	pe.selectLayoutForFpath(fpath)
+	common := pe.commonFor(fpath)
+	layout := pe.layout
+	if layout.common == "" {
+		if l := layoutForFpath(pe.allLayouts(), fpath); l.common != "" {
+			layout = l
+			common = l.common
+		}
+	}
+
+	start := time.Time{}
+	dur := pe.segmentDuration
+	removedLive := false
+
+	if seg, ok := pe.byName[name]; ok {
+		if seg.Fpath() == fpath || filepath.Clean(seg.Fpath()) == clean || seg.Name() == name {
+			start = seg.Start
+			if seg.fmp4.Duration > 0 {
+				dur = seg.fmp4.Duration
+			}
+			removedLive = true
+			delete(pe.byName, name)
+			for i, s := range pe.segments {
+				if s == seg {
+					pe.segments = append(pe.segments[:i], pe.segments[i+1:]...)
+					break
+				}
+			}
+		}
+	}
+
+	if cachedStart, cachedDur, cachedOK := idx.dropSegFromDayCacheLocked(pathName, fpath); cachedOK {
+		if start.IsZero() {
+			start = cachedStart
+		}
+		if cachedDur > 0 {
+			dur = cachedDur
+		}
+		removedLive = true
+	}
+
+	idx.mutex.Unlock()
+
+	if start.IsZero() {
+		if t, ok := idx.decodeStart(pathName, fpath); ok {
+			start = t
+		}
+	}
+	day := dvrDayDate(start)
+	if day == "" {
+		day = dvrDayDate(time.Now())
+	}
+	if dur <= 0 {
+		dur = time.Second
+	}
+	cutoff := time.Time{}
+	if !start.IsZero() {
+		cutoff = start.Add(dur)
+	}
+
+	idx.mutex.Lock()
+	pe = idx.paths[pathName]
+	if pe == nil {
+		idx.mutex.Unlock()
+		return
+	}
+	if common == "" {
+		common = pe.commonFor(fpath)
+	}
+	if layout.common == "" {
+		pe.selectLayoutForFpath(fpath)
+		layout = pe.layout
+	}
+
+	idx.persistDeleteLocked(pe, pathName, fpath, day)
+
+	inMeta := pe.dayNSeg(day) > 0 || pe.diskDayNSeg(common, day) > 0
+	if removedLive || inMeta {
+		pe.setDayNSeg(day, pe.dayNSeg(day)-1)
+		pe.setDiskDayNSeg(common, day, pe.diskDayNSeg(common, day)-1)
+	}
+	if !cutoff.IsZero() && len(pe.ranges) > 0 && start.Unix() <= pe.ranges[0].From {
+		pe.ranges = trimRangesBefore(pe.ranges, cutoff)
+		if pe.diskRanges != nil && common != "" {
+			pe.diskRanges[common] = trimRangesBefore(pe.diskRanges[common], cutoff)
+		}
+		pe.rangesOK = true
+	} else if removedLive {
+		pe.rangesOK = false
+	}
+
+	forgetFMP4FileCaches(fpath)
+	forgetFMP4FileCaches(clean)
+	if pe.dayNSeg(day) == 0 {
+		idx.dropDayCacheKeyLocked(pathName, day)
+	}
+	if inMeta && pe.dayNSeg(day) == 0 {
+		idx.unpinDayLocked(pe, day)
+	}
+
+	dayEmptyOnDisk := common != "" && inMeta && pe.diskDayNSeg(common, day) == 0
+	dayGone := inMeta && pe.dayNSeg(day) == 0
+	complete := pe.complete
+	if idx.metaDirty == nil {
+		idx.metaDirty = make(map[string]int)
+	}
+	idx.metaDirty[pathName]++
+	dirtyN := idx.metaDirty[pathName]
+	idx.mutex.Unlock()
+
+	idx.dropDirCacheName(filepath.Dir(fpath), name)
+	if complete && dayEmptyOnDisk {
+		unlinkLayoutDay(layout, day)
+		if layout.dateDir {
+			idx.dropDirCache(filepath.Join(layout.common, day))
+		}
+	}
+	if complete && (dayGone || dirtyN >= dvrMetaEvery || dayEmptyOnDisk) {
+		idx.writeMeta(pathName)
+		idx.mutex.Lock()
+		if idx.metaDirty != nil {
+			delete(idx.metaDirty, pathName)
+		}
+		idx.mutex.Unlock()
+	}
+}
+
+func (idx *Index) pathNameForFpath(fpath string) string {
+	if idx == nil || fpath == "" {
+		return ""
+	}
 	name := filepath.Base(fpath)
 	clean := filepath.Clean(fpath)
 
-	idx.mutex.Lock()
-	pathName := ""
-	for namePath, pe := range idx.paths {
-		seg, ok := pe.byName[name]
-		if !ok {
+	idx.mutex.RLock()
+	defer idx.mutex.RUnlock()
+	best := ""
+	bestLen := -1
+	for pathName, pe := range idx.paths {
+		if pe == nil {
 			continue
 		}
-		if seg.Fpath() != fpath && filepath.Clean(seg.Fpath()) != clean {
-			continue
-		}
-		day := dvrDayDate(seg.Start)
-		common := pe.commonFor(fpath)
-		idx.persistDeleteLocked(pe, pathName, fpath, day)
-		delete(pe.byName, name)
-		for i, s := range pe.segments {
-			if s == seg {
-				pe.segments = append(pe.segments[:i], pe.segments[i+1:]...)
-				break
+		if seg, ok := pe.byName[name]; ok {
+			if seg.Fpath() == fpath || filepath.Clean(seg.Fpath()) == clean {
+				return pathName
 			}
 		}
-		if seg.countedInMeta {
-			pe.setDayNSeg(day, pe.dayNSeg(day)-1)
-			pe.setDiskDayNSeg(common, day, pe.diskDayNSeg(common, day)-1)
-			seg.countedInMeta = false
-		}
-		pe.rangesOK = false
-		forgetFMP4FileCaches(fpath)
-		forgetFMP4FileCaches(clean)
-		delete(idx.dayCache, dayCacheKey{path: namePath, day: day})
-		pathName = namePath
-		break
-	}
-	idx.mutex.Unlock()
-	pathNameOut = pathName
-	if pathName != "" {
-		idx.mutex.RLock()
-		pe := idx.paths[pathName]
-		write := pe != nil && pe.complete && pe.persist != nil
-		idx.mutex.RUnlock()
-		if write {
-			idx.writeMeta(pathName)
+		for _, l := range pe.allLayouts() {
+			if l.common == "" {
+				continue
+			}
+			if !cleanPathUnderRoot(fpath, l.common) && !cleanPathUnderRoot(clean, l.common) {
+				continue
+			}
+			n := len(l.common)
+			if n > bestLen {
+				best = pathName
+				bestLen = n
+			}
 		}
 	}
+	return best
 }
 
 // Ranges returns cached recording ranges for a path.
