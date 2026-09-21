@@ -177,6 +177,10 @@ func (s *Server) OnPathEnabled(pathName string) {
 		return
 	}
 	s.Index.OnPathEnabled(pathName)
+	// Rebuilds were skipped while disabled; catch up now if meta/days are incomplete.
+	if s.Index.pathNeedsRebuild(pathName) || s.Index.pathHasDayRepairs(pathName) {
+		s.kickBackgroundReconcile()
+	}
 }
 
 // Close closes Server.
@@ -442,11 +446,16 @@ func (s *Server) APIIndexRebuild(pathName string) (*defs.APICompatIndexRebuild, 
 	if pathName == "" {
 		s.mutex.RLock()
 		names := recordingPathNames(s.PathConfs)
+		pathConfs := s.PathConfs
 		s.mutex.RUnlock()
 		for _, name := range names {
+			pc, _, err := conf.FindPathConf(pathConfs, name)
+			if err != nil || pc == nil || !pc.Enabled {
+				continue
+			}
 			s.Index.MarkNeedsRebuild(name)
 		}
-		// Also mark any already-loaded paths that recordingPathNames missed
+		// Also mark any already-loaded enabled paths that recordingPathNames missed
 		// (e.g. removed from disk but still in memory).
 		s.Index.MarkAllNeedsRebuild()
 		out.All = true
@@ -459,8 +468,15 @@ func (s *Server) APIIndexRebuild(pathName string) (*defs.APICompatIndexRebuild, 
 		s.mutex.RLock()
 		pathConfs := s.PathConfs
 		s.mutex.RUnlock()
-		if _, _, err := conf.FindPathConf(pathConfs, pathName); err != nil {
+		pc, _, err := conf.FindPathConf(pathConfs, pathName)
+		if err != nil {
 			return nil, conf.PathNotFound(pathName)
+		}
+		if pc != nil && !pc.Enabled {
+			out.Path = pathName
+			out.Queued = s.Index.NeedsRebuildCount()
+			s.Log(logger.Info, "recording index rebuild skipped (path=%s disabled)", pathName)
+			return out, nil
 		}
 		s.Index.MarkNeedsRebuild(pathName)
 		out.Path = pathName

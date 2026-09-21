@@ -252,6 +252,7 @@ func TestIndexLoadFromDiskUsesSnapshot(t *testing.T) {
 
 	pathConf := &conf.Path{
 		Name:                  "cam1",
+		Enabled:               true,
 		RecordPath:            filepath.Join(dir, "%path/%Y-%m-%d_%H-%M-%S-%f"),
 		RecordFormat:          conf.RecordFormatFMP4,
 		RecordSegmentDuration: conf.Duration(5 * time.Second),
@@ -298,6 +299,7 @@ func TestIndexRebuildsWhenSnapshotDeleted(t *testing.T) {
 
 	pathConf := &conf.Path{
 		Name:                  "cam1",
+		Enabled:               true,
 		RecordPath:            filepath.Join(dir, "%path/%Y-%m-%d_%H-%M-%S-%f"),
 		RecordFormat:          conf.RecordFormatFMP4,
 		RecordSegmentDuration: conf.Duration(5 * time.Second),
@@ -342,6 +344,7 @@ func TestIndexLoadFromDiskReconcilesDeletedAndNew(t *testing.T) {
 
 	pathConf := &conf.Path{
 		Name:                  "cam1",
+		Enabled:               true,
 		RecordPath:            filepath.Join(dir, "%path/%Y-%m-%d_%H-%M-%S-%f"),
 		RecordFormat:          conf.RecordFormatFMP4,
 		RecordSegmentDuration: conf.Duration(5 * time.Second),
@@ -400,6 +403,7 @@ func TestIndexPersistUpsertReplayedFromJournal(t *testing.T) {
 
 	pathConf := &conf.Path{
 		Name:                  "cam1",
+		Enabled:               true,
 		RecordPath:            filepath.Join(dir, "%path/%Y-%m-%d_%H-%M-%S-%f"),
 		RecordFormat:          conf.RecordFormatFMP4,
 		RecordSegmentDuration: conf.Duration(5 * time.Second),
@@ -438,6 +442,7 @@ func TestClosePersistSyncsJournal(t *testing.T) {
 
 	pathConf := &conf.Path{
 		Name:                  "cam1",
+		Enabled:               true,
 		RecordPath:            filepath.Join(dir, "%path/%Y-%m-%d_%H-%M-%S-%f"),
 		RecordFormat:          conf.RecordFormatFMP4,
 		RecordSegmentDuration: conf.Duration(5 * time.Second),
@@ -496,6 +501,7 @@ func TestIndexReloadPathConfsLoadsSnapshot(t *testing.T) {
 
 	pathConf := &conf.Path{
 		Name:                  "cam1",
+		Enabled:               true,
 		RecordPath:            filepath.Join(dir, "%path/%Y-%m-%d_%H-%M-%S-%f"),
 		RecordFormat:          conf.RecordFormatFMP4,
 		RecordSegmentDuration: conf.Duration(5 * time.Second),
@@ -532,6 +538,7 @@ func datedFMP4(t *testing.T, dir, pathName string, start time.Time, moofs int) s
 func testRecordPathConf(dir, name string) *conf.Path {
 	return &conf.Path{
 		Name:                  name,
+		Enabled:               true,
 		RecordPath:            filepath.Join(dir, "%path/%Y-%m-%d_%H-%M-%S-%f"),
 		RecordFormat:          conf.RecordFormatFMP4,
 		RecordSegmentDuration: conf.Duration(5 * time.Second),
@@ -686,6 +693,7 @@ func TestIndexCompleteSegmentUsesRecorderDuration(t *testing.T) {
 
 	pathConf := &conf.Path{
 		Name:                  "cam1",
+		Enabled:               true,
 		RecordPath:            filepath.Join(dir, "%path/%Y-%m-%d_%H-%M-%S-%f"),
 		RecordFormat:          conf.RecordFormatFMP4,
 		RecordSegmentDuration: conf.Duration(5 * time.Second),
@@ -718,6 +726,7 @@ func TestIndexCompleteSegmentMPEGTSPersistsForPlaylist(t *testing.T) {
 
 	pathConf := &conf.Path{
 		Name:                  "cam1",
+		Enabled:               true,
 		RecordPath:            filepath.Join(dir, "%path/%Y-%m-%d_%H-%M-%S-%f"),
 		RecordFormat:          conf.RecordFormatMPEGTS,
 		RecordSegmentDuration: conf.Duration(5 * time.Second),
@@ -767,6 +776,7 @@ func TestIndexDateDirStoresShardInDayFolder(t *testing.T) {
 
 	pathConf := &conf.Path{
 		Name:                  "cam1",
+		Enabled:               true,
 		RecordPath:            filepath.Join(dir, "%path/%Y-%m-%d/%Y-%m-%d_%H-%M-%S-%f"),
 		RecordFormat:          conf.RecordFormatFMP4,
 		RecordSegmentDuration: conf.Duration(5 * time.Second),
@@ -843,6 +853,7 @@ func TestIndexLoadFromDiskTwoDisks(t *testing.T) {
 
 	pathConf := &conf.Path{
 		Name:                  "cam1",
+		Enabled:               true,
 		RecordPath:            "%path/%Y-%m-%d_%H-%M-%S-%f",
 		RecordFormat:          conf.RecordFormatFMP4,
 		RecordSegmentDuration: conf.Duration(5 * time.Second),
@@ -886,6 +897,7 @@ func TestIndexRebuildsWhenOneStorageDiskIndexDeleted(t *testing.T) {
 
 	pathConf := &conf.Path{
 		Name:                  "cam1",
+		Enabled:               true,
 		RecordPath:            "%path/%Y-%m-%d_%H-%M-%S-%f",
 		RecordFormat:          conf.RecordFormatFMP4,
 		RecordSegmentDuration: conf.Duration(5 * time.Second),
@@ -929,6 +941,7 @@ func TestIndexRebuildsWhenOneStorageDiskSnapshotsDeleted(t *testing.T) {
 
 	pathConf := &conf.Path{
 		Name:                  "cam1",
+		Enabled:               true,
 		RecordPath:            "%path/%Y-%m-%d_%H-%M-%S-%f",
 		RecordFormat:          conf.RecordFormatFMP4,
 		RecordSegmentDuration: conf.Duration(5 * time.Second),
@@ -971,6 +984,7 @@ func TestIndexRecordingStatusMergesRoundRobinDisks(t *testing.T) {
 
 	pathConf := &conf.Path{
 		Name:                  "cam1",
+		Enabled:               true,
 		RecordPath:            "%path/%Y-%m-%d_%H-%M-%S-%f",
 		RecordFormat:          conf.RecordFormatFMP4,
 		RecordSegmentDuration: conf.Duration(5 * time.Second),

@@ -156,6 +156,7 @@ func TestIndexReclaimCandidatesRoundRobinCompanions(t *testing.T) {
 
 	pathConf := &conf.Path{
 		Name:                  "cam1",
+		Enabled:               true,
 		Storage:               "dvr",
 		StorageDisks:          []string{d1, d2},
 		RecordPath:            "%path/%Y-%m-%d_%H-%M-%S-%f",
@@ -275,6 +276,7 @@ func TestIndexListDirCachedOnce(t *testing.T) {
 
 	pathConf := &conf.Path{
 		Name:         "cam1",
+		Enabled:      true,
 		Storage:      "dvr",
 		StorageDisks: []string{dir},
 		RecordPath:   "%path/%Y-%m-%d/%Y-%m-%d_%H-%M-%S-%f",

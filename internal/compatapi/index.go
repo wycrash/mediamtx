@@ -469,14 +469,16 @@ func (idx *Index) ResetDebugInterval() debugStatsSnapshot {
 }
 
 // PendingDayRepairCount returns how many path/day journals still need repair.
+// Disabled paths are excluded: their repairs wait until the path is enabled.
 func (idx *Index) PendingDayRepairCount() int {
 	idx.mutex.RLock()
 	defer idx.mutex.RUnlock()
 	n := 0
-	for _, pe := range idx.paths {
-		if pe != nil {
-			n += len(pe.repairDays)
+	for name, pe := range idx.paths {
+		if pe == nil || !idx.pathConfEnabledLocked(name) {
+			continue
 		}
+		n += len(pe.repairDays)
 	}
 	return n
 }
@@ -1064,7 +1066,7 @@ func (idx *Index) queuedReconcilePaths() []string {
 	defer idx.mutex.RUnlock()
 	out := make([]string, 0)
 	for name, pe := range idx.paths {
-		if pe == nil {
+		if pe == nil || !idx.pathConfEnabledLocked(name) {
 			continue
 		}
 		if (pe.checkedDisk && !pe.complete) || len(pe.repairDays) > 0 {
@@ -1126,6 +1128,11 @@ func (idx *Index) reconcileOnePath(
 	slow bool,
 	edges bool,
 ) (mode string, ins, add, del, built int) {
+	// Disabled paths keep loaded meta for archive, but must not burn CPU on
+	// full directory rebuild / day repair / edge scan until re-enabled.
+	if pathConf != nil && !pathConf.Enabled {
+		return "skip-disabled", 0, 0, 0, 0
+	}
 	if idx.pathNeedsRebuild(pathName) {
 		ins, add, del = idx.buildPathFromDir(pathName, pathConf, stop, slow)
 		if add > 0 {
@@ -1169,16 +1176,29 @@ func (idx *Index) takeRepairDays(pathName string) []repairDay {
 	return out
 }
 
-// HasPendingDayRepairs reports whether any path still has damaged day indexes.
+// HasPendingDayRepairs reports whether any enabled path still has damaged day indexes.
 func (idx *Index) HasPendingDayRepairs() bool {
 	idx.mutex.RLock()
 	defer idx.mutex.RUnlock()
-	for _, pe := range idx.paths {
-		if pe != nil && len(pe.repairDays) > 0 {
+	for name, pe := range idx.paths {
+		if pe != nil && len(pe.repairDays) > 0 && idx.pathConfEnabledLocked(name) {
 			return true
 		}
 	}
 	return false
+}
+
+// pathConfEnabledLocked reports whether pathName is enabled in pathConfs.
+// Missing / unknown config is treated as enabled (do not suppress work).
+func (idx *Index) pathConfEnabledLocked(pathName string) bool {
+	if idx.pathConfs == nil || pathName == "" {
+		return true
+	}
+	pc, _, err := conf.FindPathConf(idx.pathConfs, pathName)
+	if err != nil || pc == nil {
+		return true
+	}
+	return pc.Enabled
 }
 
 func (idx *Index) pathNeedsRebuild(pathName string) bool {
@@ -1186,6 +1206,13 @@ func (idx *Index) pathNeedsRebuild(pathName string) bool {
 	defer idx.mutex.RUnlock()
 	pe := idx.paths[pathName]
 	return pe == nil || (pe.checkedDisk && !pe.complete)
+}
+
+func (idx *Index) pathHasDayRepairs(pathName string) bool {
+	idx.mutex.RLock()
+	defer idx.mutex.RUnlock()
+	pe := idx.paths[pathName]
+	return pe != nil && len(pe.repairDays) > 0
 }
 
 // MarkNeedsRebuild forces the next ReconcileAll to rebuild pathName from disk.
@@ -1201,12 +1228,16 @@ func (idx *Index) MarkNeedsRebuild(pathName string) {
 	pe.repairDays = nil
 }
 
-// MarkAllNeedsRebuild forces rebuild of every known path. Returns how many were marked.
+// MarkAllNeedsRebuild forces rebuild of every enabled known path.
+// Returns how many were marked.
 func (idx *Index) MarkAllNeedsRebuild() int {
 	idx.mutex.Lock()
 	defer idx.mutex.Unlock()
 	n := 0
-	for _, pe := range idx.paths {
+	for name, pe := range idx.paths {
+		if pe == nil || !idx.pathConfEnabledLocked(name) {
+			continue
+		}
 		pe.complete = false
 		pe.checkedDisk = true
 		n++
@@ -1220,14 +1251,19 @@ func (idx *Index) NeedsRebuildCount() int {
 }
 
 // NeedsRebuildPaths returns sorted path names marked incomplete.
+// Disabled paths are omitted so the rebuild worker does not spin on them.
 func (idx *Index) NeedsRebuildPaths() []string {
 	idx.mutex.RLock()
 	defer idx.mutex.RUnlock()
 	out := make([]string, 0)
 	for name, pe := range idx.paths {
-		if pe.checkedDisk && !pe.complete {
-			out = append(out, name)
+		if pe == nil || !pe.checkedDisk || pe.complete {
+			continue
 		}
+		if !idx.pathConfEnabledLocked(name) {
+			continue
+		}
+		out = append(out, name)
 	}
 	sort.Strings(out)
 	return out

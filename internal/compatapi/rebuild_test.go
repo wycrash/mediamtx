@@ -34,6 +34,7 @@ func TestReconcileAdoptsOffGridSegment(t *testing.T) {
 			dir := t.TempDir()
 			pathConf := &conf.Path{
 				Name:                  "cam1",
+				Enabled:               true,
 				RecordPath:            filepath.Join(dir, ca.template),
 				RecordFormat:          conf.RecordFormatFMP4,
 				RecordSegmentDuration: conf.Duration(5 * time.Second),
@@ -93,6 +94,7 @@ func TestMarkNeedsRebuildForcesDiskRescan(t *testing.T) {
 
 	pathConf := &conf.Path{
 		Name:                  "cam1",
+		Enabled:               true,
 		RecordPath:            filepath.Join(dir, "%path/%Y-%m-%d_%H-%M-%S-%f"),
 		RecordFormat:          conf.RecordFormatFMP4,
 		RecordSegmentDuration: conf.Duration(5 * time.Second),
@@ -125,6 +127,7 @@ func TestAPIIndexRebuildCoalescesPaths(t *testing.T) {
 	for _, name := range []string{"cam1", "cam2", "cam3"} {
 		pathConfs[name] = &conf.Path{
 			Name:                  name,
+			Enabled:               true,
 			RecordPath:            filepath.Join(dir, "%path/%Y-%m-%d_%H-%M-%S-%f"),
 			RecordFormat:          conf.RecordFormatFMP4,
 			RecordSegmentDuration: conf.Duration(5 * time.Second),
@@ -203,6 +206,7 @@ func TestAPIIndexRebuildDoesNotScanOtherPaths(t *testing.T) {
 	for _, name := range []string{"cam1", "cam2"} {
 		pathConfs[name] = &conf.Path{
 			Name:                  name,
+			Enabled:               true,
 			RecordPath:            filepath.Join(dir, "%path/%Y-%m-%d_%H-%M-%S-%f"),
 			RecordFormat:          conf.RecordFormatFMP4,
 			RecordSegmentDuration: conf.Duration(5 * time.Second),
@@ -263,6 +267,7 @@ func TestPinDayMergesWhenAlreadyPinned(t *testing.T) {
 
 	pathConf := &conf.Path{
 		Name:                  "cam1",
+		Enabled:               true,
 		RecordPath:            filepath.Join(dir, "%path/%Y-%m-%d_%H-%M-%S-%f"),
 		RecordFormat:          conf.RecordFormatFMP4,
 		RecordSegmentDuration: conf.Duration(5 * time.Second),
@@ -321,6 +326,7 @@ func TestIndexPathDisableEnableKeepsArchive(t *testing.T) {
 
 	pathConf := &conf.Path{
 		Name:                  "cam1",
+		Enabled:               true,
 		RecordPath:            filepath.Join(dir, "%path/%Y-%m-%d_%H-%M-%S-%f"),
 		RecordFormat:          conf.RecordFormatFMP4,
 		RecordSegmentDuration: conf.Duration(5 * time.Second),
@@ -385,6 +391,7 @@ func TestRebuildOnlyDamagedDay(t *testing.T) {
 
 	pathConf := &conf.Path{
 		Name:                  "cam1",
+		Enabled:               true,
 		RecordPath:            filepath.Join(dir, "%path/%Y-%m-%d_%H-%M-%S-%f"),
 		RecordFormat:          conf.RecordFormatFMP4,
 		RecordSegmentDuration: conf.Duration(5 * time.Second),
@@ -433,6 +440,7 @@ func TestRebuildArchivePlaylistNotEmpty(t *testing.T) {
 
 	pathConf := &conf.Path{
 		Name:                  "cam1",
+		Enabled:               true,
 		RecordPath:            filepath.Join(dir, "%path/%Y-%m-%d_%H-%M-%S-%f"),
 		RecordFormat:          conf.RecordFormatFMP4,
 		RecordSegmentDuration: conf.Duration(5 * time.Second),
@@ -451,5 +459,41 @@ func TestRebuildArchivePlaylistNotEmpty(t *testing.T) {
 	body := GenerateArchiveM3U8Indexed(conf.RecordFormatFMP4, out, 5*time.Second, 0, 0, start)
 	require.Contains(t, body, "#EXTINF:")
 	require.Contains(t, body, filepath.Base(a))
+	idx.ClosePersist()
+}
+
+func TestReconcileSkipsDisabledPath(t *testing.T) {
+	dir := t.TempDir()
+	cam := filepath.Join(dir, "cam1")
+	require.NoError(t, os.MkdirAll(cam, 0o755))
+	writeNamedFMP4(t, filepath.Join(cam, "2020-01-01_00-00-00-000000.mp4"), 2)
+	writeNamedFMP4(t, filepath.Join(cam, "2020-01-01_00-00-05-000000.mp4"), 2)
+
+	pathConf := &conf.Path{
+		Name:                  "cam1",
+		Enabled:               false,
+		RecordPath:            filepath.Join(dir, "%path/%Y-%m-%d_%H-%M-%S-%f"),
+		RecordFormat:          conf.RecordFormatFMP4,
+		RecordSegmentDuration: conf.Duration(5 * time.Second),
+	}
+	confs := map[string]*conf.Path{"cam1": pathConf}
+
+	idx := NewIndex()
+	require.Equal(t, 0, idx.LoadFromDisk(confs).DiskPaths)
+	require.True(t, idx.pathNeedsRebuild("cam1"))
+	require.Empty(t, idx.NeedsRebuildPaths(), "disabled incomplete paths must not enter the rebuild queue")
+	require.False(t, idx.HasPendingDayRepairs())
+
+	st := idx.ReconcileAll(nil, false)
+	require.Equal(t, 0, st.Built)
+	require.Equal(t, 0, st.Segments)
+	require.True(t, idx.pathNeedsRebuild("cam1"), "disabled path must stay unrebuilt")
+
+	pathConf.Enabled = true
+	idx.ReloadPathConfs(confs)
+	require.Equal(t, []string{"cam1"}, idx.NeedsRebuildPaths())
+	st = idx.ReconcileAll(nil, false)
+	require.Equal(t, 1, st.Built)
+	require.Equal(t, 2, st.Segments)
 	idx.ClosePersist()
 }
