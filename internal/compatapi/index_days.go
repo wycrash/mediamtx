@@ -1209,6 +1209,202 @@ func (idx *Index) bindPersistLocked(pathName string, pe *pathIndex, day, fpath s
 	_ = pe.persist.openJournalAppend()
 }
 
+// subtractRecordingInterval removes [from, end) from a merged timeline.
+// A segment that sits in the middle of a range splits that range.
+func subtractRecordingInterval(ranges []RecordingRange, from, end int64) []RecordingRange {
+	if len(ranges) == 0 || end <= from {
+		return ranges
+	}
+	out := make([]RecordingRange, 0, len(ranges)+1)
+	for _, r := range ranges {
+		rEnd := r.closedAt()
+		if rEnd <= from || r.From >= end {
+			out = append(out, r)
+			continue
+		}
+		if r.From < from {
+			left := from - r.From
+			if left >= 1 {
+				out = append(out, RecordingRange{From: r.From, Duration: left})
+			}
+		}
+		if rEnd > end {
+			right := rEnd - end
+			if right >= 1 {
+				out = append(out, RecordingRange{From: end, Duration: right})
+			}
+		}
+	}
+	if out == nil {
+		return []RecordingRange{}
+	}
+	return out
+}
+
+func (idx *Index) dayCachedLocked(pathName, day string) bool {
+	if idx == nil || pathName == "" || day == "" || idx.dayCache == nil {
+		return false
+	}
+	_, ok := idx.dayCache[dayCacheKey{path: pathName, day: day}]
+	return ok
+}
+
+func (idx *Index) hasSegmentBeforeLocked(pe *pathIndex, pathName, fpath string, start time.Time) bool {
+	if pe == nil || start.IsZero() {
+		return false
+	}
+	before := func(s *IndexedSegment) bool {
+		if s == nil || !s.Start.Before(start) {
+			return false
+		}
+		return fpath == "" || s.Fpath() != fpath
+	}
+	for _, s := range pe.segments {
+		if before(s) {
+			return true
+		}
+	}
+	if idx == nil {
+		return false
+	}
+	for key, ld := range idx.dayCache {
+		if key.path != pathName || ld == nil {
+			continue
+		}
+		for _, s := range ld.segs {
+			if before(s) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// segmentIsOldestLocked reports whether no indexed segment remains before start.
+// nseg of older days is enough to say no. Same-day siblings count only when the
+// day is actually loaded: a cold day that is not in RAM must not be treated as
+// the archive head just because its count is greater than one.
+func (idx *Index) segmentIsOldestLocked(pe *pathIndex, pathName, fpath string, start time.Time) bool {
+	if pe == nil || start.IsZero() {
+		return false
+	}
+	day := dvrDayDate(start)
+	for _, d := range pe.days {
+		if d.NSeg > 0 && d.Date != "" && d.Date < day {
+			return false
+		}
+	}
+	if idx.hasSegmentBeforeLocked(pe, pathName, fpath, start) {
+		return false
+	}
+	if !pe.dayIsPinned(day) && !idx.dayCachedLocked(pathName, day) && len(pe.segments) == 0 && pe.dayNSeg(day) > 1 {
+		return false
+	}
+	return true
+}
+
+func (idx *Index) nextSegmentStartLocked(pe *pathIndex, pathName, fpath string, start time.Time) time.Time {
+	if pe == nil || start.IsZero() {
+		return time.Time{}
+	}
+	var next time.Time
+	consider := func(s *IndexedSegment) {
+		if s == nil || !s.Start.After(start) {
+			return
+		}
+		if fpath != "" && s.Fpath() == fpath {
+			return
+		}
+		if next.IsZero() || s.Start.Before(next) {
+			next = s.Start
+		}
+	}
+	for _, s := range pe.segments {
+		consider(s)
+	}
+	if idx != nil {
+		for key, ld := range idx.dayCache {
+			if key.path != pathName || ld == nil {
+				continue
+			}
+			for _, s := range ld.segs {
+				consider(s)
+			}
+		}
+	}
+	return next
+}
+
+func (pe *pathIndex) remergeRangesFromDisks() {
+	if pe == nil || len(pe.diskRanges) == 0 {
+		return
+	}
+	var merged []RecordingRange
+	for common, rr := range pe.diskRanges {
+		if len(rr) == 0 {
+			delete(pe.diskRanges, common)
+			continue
+		}
+		merged = mergeRecordingRanges(merged, rr, pe.segmentDuration)
+	}
+	pe.ranges = merged
+}
+
+// dropCoverageLocked removes a deleted segment from the in-memory timeline and
+// from per-disk ranges that writeMeta persists. Those two caches are what
+// recording_status.json serves and what the next start reloads.
+//
+// A prefix trim that stops at start+fileDuration gets stuck: the next file
+// begins a few seconds later, fails the "starts at ranges[0]" check, and days
+// of already-deleted archive stay in the timeline. When this segment is the
+// oldest one left, coverage before the next real file is dropped entirely.
+func (pe *pathIndex) dropCoverageLocked(common string, start, end time.Time, oldest bool, next time.Time, nominal time.Duration) {
+	if pe == nil || start.IsZero() {
+		return
+	}
+	from := start.Unix()
+	endUnix := end.Unix()
+	if endUnix <= from {
+		endUnix = from + 1
+	}
+	snapToNext := oldest && !next.IsZero() && next.After(start) &&
+		(dvrDayDate(next) == dvrDayDate(start) || next.Sub(start) <= segDurationCap(nominal))
+
+	if len(pe.diskRanges) == 0 {
+		if snapToNext {
+			pe.ranges = trimRangesBefore(pe.ranges, next)
+		} else {
+			if oldest {
+				pe.ranges = trimRangesBefore(pe.ranges, start)
+			}
+			pe.ranges = subtractRecordingInterval(pe.ranges, from, endUnix)
+		}
+		pe.rangesOK = true
+		return
+	}
+
+	if snapToNext {
+		for c, rr := range pe.diskRanges {
+			pe.diskRanges[c] = trimRangesBefore(rr, next)
+		}
+	} else {
+		if oldest {
+			for c, rr := range pe.diskRanges {
+				pe.diskRanges[c] = trimRangesBefore(rr, start)
+			}
+		}
+		if common != "" {
+			pe.diskRanges[common] = subtractRecordingInterval(pe.diskRanges[common], from, endUnix)
+		} else {
+			for c, rr := range pe.diskRanges {
+				pe.diskRanges[c] = subtractRecordingInterval(rr, from, endUnix)
+			}
+		}
+	}
+	pe.remergeRangesFromDisks()
+	pe.rangesOK = true
+}
+
 func trimRangesBefore(ranges []RecordingRange, cutoff time.Time) []RecordingRange {
 	if cutoff.IsZero() || len(ranges) == 0 {
 		return ranges

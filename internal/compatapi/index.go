@@ -2963,17 +2963,21 @@ func (idx *Index) RemoveIndexed(pathName, fpath string) {
 
 	idx.persistDeleteLocked(pe, pathName, fpath, day)
 
+	nominal := pe.segmentDuration
+	oldest := !start.IsZero() && idx.segmentIsOldestLocked(pe, pathName, fpath, start)
+	next := idx.nextSegmentStartLocked(pe, pathName, fpath, start)
+
 	inMeta := pe.dayNSeg(day) > 0 || pe.diskDayNSeg(common, day) > 0
 	if removedLive || inMeta {
 		pe.setDayNSeg(day, pe.dayNSeg(day)-1)
 		pe.setDiskDayNSeg(common, day, pe.diskDayNSeg(common, day)-1)
 	}
-	if !cutoff.IsZero() && len(pe.ranges) > 0 && start.Unix() <= pe.ranges[0].From {
-		pe.ranges = trimRangesBefore(pe.ranges, cutoff)
-		if pe.diskRanges != nil && common != "" {
-			pe.diskRanges[common] = trimRangesBefore(pe.diskRanges[common], cutoff)
+	if !start.IsZero() {
+		segEnd := cutoff
+		if !next.IsZero() && next.After(start) && next.Before(segEnd) {
+			segEnd = next
 		}
-		pe.rangesOK = true
+		pe.dropCoverageLocked(common, start, segEnd, oldest, next, nominal)
 	} else if removedLive {
 		pe.rangesOK = false
 	}

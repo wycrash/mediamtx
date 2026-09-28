@@ -451,3 +451,74 @@ func TestIndexReclaimKeepsDayCacheAcrossDeletes(t *testing.T) {
 	require.Equal(t, afterLoad, journalReads)
 	idx.ClosePersist()
 }
+
+// Storage reclaim deletes the oldest file, whose duration is a few seconds
+// shorter than the gap to the next file. The old prefix check then never
+// matched again, so recording_status kept days of already-deleted archive
+// until a full index rebuild. Meta on disk must follow the same cut.
+func TestRemoveIndexedDropsStaleRangePrefixAndSyncsMeta(t *testing.T) {
+	dir := t.TempDir()
+	pathConf := &conf.Path{
+		Name:                  "cam100",
+		Enabled:               true,
+		Record:                true,
+		RecordPath:            filepath.Join(dir, "%path/%Y-%m-%d/%H-%M-%S-%f"),
+		RecordFormat:          conf.RecordFormatFMP4,
+		RecordSegmentDuration: conf.Duration(time.Hour),
+		RecordPartDuration:    conf.Duration(time.Second),
+	}
+
+	idx := NewIndex()
+	idx.mutex.Lock()
+	idx.pathConfs = map[string]*conf.Path{"cam100": pathConf}
+	pe := idx.ensurePathLocked("cam100")
+	pe.setLayouts(makeDvrLayouts(pathConf, "cam100"))
+	pe.complete = true
+	pe.segmentDuration = time.Hour
+	common := pe.layout.common
+	require.NotEmpty(t, common)
+
+	base := time.Date(2026, 9, 20, 12, 0, 0, 0, time.Local)
+	const fileDur = 3590 * time.Second
+	segs := make([]*IndexedSegment, 3)
+	for i := range segs {
+		start := base.Add(time.Duration(i) * time.Hour)
+		fpath := filepath.Join(common, start.Format("2006-01-02"), start.Format("15-04-05-000000")+".mp4")
+		seg := bindSeg(pe, fpath, start)
+		seg.fmp4 = fmp4SegMeta{Duration: fileDur, Ready: true}
+		pe.byName[seg.Name()] = seg
+		pe.segments = append(pe.segments, seg)
+		segs[i] = seg
+	}
+	staleFrom := base.Add(-43 * time.Hour)
+	lastEnd := segs[2].Start.Add(fileDur)
+	stale := []RecordingRange{{
+		From:     staleFrom.Unix(),
+		Duration: lastEnd.Unix() - staleFrom.Unix(),
+	}}
+	pe.ranges = append([]RecordingRange(nil), stale...)
+	pe.rangesOK = true
+	pe.diskRanges = map[string][]RecordingRange{
+		common: append([]RecordingRange(nil), stale...),
+	}
+	day := dvrDayDate(base)
+	pe.setDayNSeg(day, len(segs))
+	pe.setDiskDayNSeg(common, day, len(segs))
+	idx.mutex.Unlock()
+
+	idx.RemoveIndexed("cam100", segs[0].Fpath())
+	got := idx.Ranges("cam100")
+	require.NotEmpty(t, got)
+	require.GreaterOrEqual(t, got[0].From, segs[1].Start.Unix())
+	require.Less(t, got[0].closedAt(), lastEnd.Add(time.Second).Unix())
+
+	idx.RemoveIndexed("cam100", segs[1].Fpath())
+	got = idx.Ranges("cam100")
+	require.NotEmpty(t, got)
+	require.GreaterOrEqual(t, got[0].From, segs[2].Start.Unix())
+
+	idx.writeMeta("cam100")
+	meta, err := readMetaFile(pe.layout.meta)
+	require.NoError(t, err)
+	require.Equal(t, idx.Ranges("cam100"), meta.Ranges)
+}
