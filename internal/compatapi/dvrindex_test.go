@@ -1133,7 +1133,7 @@ func TestPrefetchDaysNewEngineKeepsLastN(t *testing.T) {
 	idx.ClosePersist()
 
 	idx = NewIndex()
-	idx.ConfigureEngine(conf.IndexEngineNew, 2)
+	idx.ConfigureEngine(conf.IndexEngineHybrid, 2)
 	require.Equal(t, 1, idx.LoadFromDisk(confs).DiskPaths)
 
 	ranges := idx.Ranges("cam1")
@@ -1184,7 +1184,7 @@ func TestPrefetchDaysNewEngineCoversArchiveMatchesOld(t *testing.T) {
 	oldIdx.PrefetchDays(nil)
 
 	newIdx := NewIndex()
-	newIdx.ConfigureEngine(conf.IndexEngineNew, 10)
+	newIdx.ConfigureEngine(conf.IndexEngineHybrid, 10)
 	require.Equal(t, 1, newIdx.LoadFromDisk(confs).DiskPaths)
 	newIdx.PrefetchDays(nil)
 

@@ -106,7 +106,7 @@ func TestIndexReclaimCandidatesNewEngineSkipsToday(t *testing.T) {
 	idx.ClosePersist()
 
 	idx = NewIndex()
-	idx.ConfigureEngine(conf.IndexEngineNew, 1)
+	idx.ConfigureEngine(conf.IndexEngineHybrid, 1)
 	require.Equal(t, 1, idx.LoadFromDisk(confs).DiskPaths)
 
 	idx.mutex.RLock()
@@ -173,7 +173,7 @@ func TestIndexReclaimCandidatesRoundRobinCompanions(t *testing.T) {
 	idx.ClosePersist()
 
 	idx = NewIndex()
-	idx.ConfigureEngine(conf.IndexEngineNew, 1)
+	idx.ConfigureEngine(conf.IndexEngineHybrid, 1)
 	require.Equal(t, 1, idx.LoadFromDisk(confs).DiskPaths)
 
 	refs, ok := idx.ReclaimCandidates("dvr", d1, 2)
@@ -211,7 +211,7 @@ func TestIndexReclaimCandidatesOldestCameraFirst(t *testing.T) {
 	idx.ClosePersist()
 
 	idx = NewIndex()
-	idx.ConfigureEngine(conf.IndexEngineNew, 1)
+	idx.ConfigureEngine(conf.IndexEngineHybrid, 1)
 	require.Equal(t, 2, idx.LoadFromDisk(confs).DiskPaths)
 
 	cam1Journal := 0
@@ -256,7 +256,7 @@ func TestIndexSegmentsBeforeColdJournal(t *testing.T) {
 	idx.ClosePersist()
 
 	idx = NewIndex()
-	idx.ConfigureEngine(conf.IndexEngineNew, 1)
+	idx.ConfigureEngine(conf.IndexEngineHybrid, 1)
 	require.Equal(t, 1, idx.LoadFromDisk(confs).DiskPaths)
 
 	refs, ok := idx.SegmentsBefore("cam1", oldStart.Add(time.Minute))
@@ -363,7 +363,7 @@ func TestIndexSegmentsBeforeIntraDayOneJournal(t *testing.T) {
 	idx.ClosePersist()
 
 	idx = NewIndex()
-	idx.ConfigureEngine(conf.IndexEngineNew, 1)
+	idx.ConfigureEngine(conf.IndexEngineHybrid, 1)
 	require.Equal(t, 1, idx.LoadFromDisk(confs).DiskPaths)
 
 	journals := map[string]int{}
@@ -419,7 +419,7 @@ func TestIndexReclaimKeepsDayCacheAcrossDeletes(t *testing.T) {
 	idx.ClosePersist()
 
 	idx = NewIndex()
-	idx.ConfigureEngine(conf.IndexEngineNew, 1)
+	idx.ConfigureEngine(conf.IndexEngineHybrid, 1)
 	require.Equal(t, 1, idx.LoadFromDisk(confs).DiskPaths)
 
 	journalReads := 0

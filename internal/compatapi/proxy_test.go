@@ -30,6 +30,55 @@ func TestLocationToRelative(t *testing.T) {
 	)
 }
 
+func TestIsWHEPPath(t *testing.T) {
+	require.True(t, isWHEPPath("/cam226/whep"))
+	require.True(t, isWHEPPath("/group/cam226/whep"))
+	require.True(t, isWHEPPath("/cam226/whep/6ba7b810-9dad-11d1-80b4-00c04fd430c8"))
+	require.False(t, isWHEPPath("/cam226/whepfoo"))
+	require.False(t, isWHEPPath("/cam226/index.m3u8"))
+	require.False(t, isWHEPPath("/whep"))
+}
+
+func TestServeWHEPUsesHandler(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	var gotMethod, gotPath string
+	s := &Server{
+		WebRTCHandler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			gotMethod = r.Method
+			gotPath = r.URL.Path
+			w.Header().Set("Location", "/cam226/whep/6ba7b810-9dad-11d1-80b4-00c04fd430c8")
+			w.WriteHeader(http.StatusCreated)
+		}),
+		Parent: test.NilLogger,
+	}
+
+	r := gin.New()
+	r.Use(s.middlewarePreflightRequests)
+	r.NoRoute(s.onRequest)
+
+	req := httptest.NewRequest(http.MethodPost, "/cam226/whep", nil)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	require.Equal(t, http.MethodPost, gotMethod)
+	require.Equal(t, "/cam226/whep", gotPath)
+	require.Equal(t, http.StatusCreated, w.Code)
+	require.Equal(t, "whep/6ba7b810-9dad-11d1-80b4-00c04fd430c8", w.Header().Get("Location"))
+
+	req = httptest.NewRequest(http.MethodPatch, "/cam226/whep/6ba7b810-9dad-11d1-80b4-00c04fd430c8", nil)
+	w = httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+	require.Equal(t, http.MethodPatch, gotMethod)
+	require.Equal(t, http.StatusCreated, w.Code)
+
+	req = httptest.NewRequest(http.MethodPost, "/cam226/whep", nil)
+	s.WebRTCHandler = nil
+	w = httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+	require.Equal(t, http.StatusBadGateway, w.Code)
+}
+
 func TestServeLiveUsesHandler(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 

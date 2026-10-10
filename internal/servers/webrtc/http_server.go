@@ -129,6 +129,11 @@ func (s *httpServer) close() {
 	s.inner.Close()
 }
 
+// ServeHTTP handles a WHIP/WHEP request on the same router as the WebRTC listener.
+func (s *httpServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	s.inner.Handler.ServeHTTP(w, r)
+}
+
 func (s *httpServer) writeErrorNoLog(ctx *gin.Context, status int, err error) {
 	ctx.AbortWithStatusJSON(status, &defs.APIError{
 		Status: defs.APIErrorStatusError,

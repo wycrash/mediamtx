@@ -497,3 +497,70 @@ func TestReconcileSkipsDisabledPath(t *testing.T) {
 	require.Equal(t, 2, st.Segments)
 	idx.ClosePersist()
 }
+
+func TestRebuildClosesOnlyTheOpenDayJournal(t *testing.T) {
+	dir := t.TempDir()
+	hist := time.Date(2020, 1, 1, 0, 0, 0, 0, time.Local)
+	today := time.Now().Truncate(time.Second)
+	datedFMP4(t, dir, "cam1", hist, 2)
+	datedFMP4(t, dir, "cam1", today, 2)
+
+	pathConf := testRecordPathConf(dir, "cam1")
+	confs := map[string]*conf.Path{"cam1": pathConf}
+	idx := NewIndex()
+	require.Equal(t, 0, idx.LoadFromDisk(confs).DiskPaths)
+	require.Equal(t, 2, idx.ReconcileAll(nil, false).Segments)
+
+	idx.mutex.Lock()
+	pe := idx.paths["cam1"]
+	require.NotNil(t, pe)
+	require.NotNil(t, pe.persist)
+	require.NotNil(t, pe.persist.journal)
+	todayJournal := pe.persist.journalPath
+	idx.mutex.Unlock()
+	require.NotEmpty(t, todayJournal)
+
+	sawToday := false
+	testHookCommitDayJournal = func(path string, journal *os.File, rewriting bool) {
+		if path != todayJournal {
+			require.False(t, rewriting, "replacing an older day must leave recording free to append")
+			return
+		}
+		sawToday = true
+		require.Nil(t, journal, "today's journal fd must be closed before the file is replaced")
+		require.True(t, rewriting)
+	}
+	t.Cleanup(func() { testHookCommitDayJournal = nil })
+
+	idx.MarkNeedsRebuild("cam1")
+	require.Equal(t, 2, idx.ReconcileAll(nil, false).Segments)
+	require.True(t, sawToday)
+
+	var coversToday bool
+	for _, r := range idx.Ranges("cam1") {
+		if r.From <= today.Unix() && r.closedAt() > today.Unix() {
+			coversToday = true
+		}
+	}
+	require.True(t, coversToday, "rebuild must keep today's files on the timeline")
+	idx.ClosePersist()
+}
+
+func TestMergeLiveDaySegsKeepsSegmentWalkMissed(t *testing.T) {
+	day := "2020-01-02"
+	start := time.Date(2020, 1, 2, 0, 0, 5, 0, time.Local)
+	walked := []*IndexedSegment{{
+		Rel:   "a.mp4",
+		Start: time.Date(2020, 1, 2, 0, 0, 0, 0, time.Local),
+		fmp4:  fmp4SegMeta{Duration: time.Second, Ready: true},
+	}}
+	pe := &pathIndex{segments: []*IndexedSegment{{
+		Rel:    "b.mp4",
+		Start:  start,
+		common: "disk",
+		fmp4:   fmp4SegMeta{Duration: time.Second, Ready: true},
+	}}}
+	out := mergeLiveDaySegsLocked(pe, day, "disk", walked, nil)
+	require.Len(t, out, 2)
+	require.Equal(t, "b.mp4", out[1].Name())
+}

@@ -1101,11 +1101,11 @@ func TestConfErrors(t *testing.T) {
 			"invalid 'compatAPIIndexEngine': 'lazy'",
 		},
 		{
-			"invalid compatAPIIndexEngineNewDay",
+			"invalid compatAPIIndexEngineHybridDay",
 			"compatAPI: yes\n" +
-				"compatAPIIndexEngine: new\n" +
-				"compatAPIIndexEngineNewDay: 0\n",
-			"'compatAPIIndexEngineNewDay' must be >= 1",
+				"compatAPIIndexEngine: hybrid\n" +
+				"compatAPIIndexEngineHybridDay: 0\n",
+			"'compatAPIIndexEngineHybridDay' must be >= 1",
 		},
 	} {
 		t.Run(ca.name, func(t *testing.T) {
@@ -1125,18 +1125,18 @@ func TestConfCompatAPIIndexEngine(t *testing.T) {
 	t.Run("defaults", func(t *testing.T) {
 		cnf, _, err := Load("", nil, nil)
 		require.NoError(t, err)
-		require.Equal(t, IndexEngineOld, cnf.CompatAPIIndexEngine)
-		require.Equal(t, 2, cnf.CompatAPIIndexEngineNewDay)
+		require.Equal(t, IndexEngineHybrid, cnf.CompatAPIIndexEngine)
+		require.Equal(t, 1, cnf.CompatAPIIndexEngineHybridDay)
 	})
-	t.Run("new", func(t *testing.T) {
+	t.Run("inram", func(t *testing.T) {
 		tmpf := createTempFile(t, []byte(
 			"compatAPI: yes\n"+
-				"compatAPIIndexEngine: new\n"+
-				"compatAPIIndexEngineNewDay: 5\n"))
+				"compatAPIIndexEngine: inram\n"+
+				"compatAPIIndexEngineHybridDay: 5\n"))
 		cnf, _, err := Load(tmpf, nil, nil)
 		require.NoError(t, err)
-		require.Equal(t, IndexEngineNew, cnf.CompatAPIIndexEngine)
-		require.Equal(t, 5, cnf.CompatAPIIndexEngineNewDay)
+		require.Equal(t, IndexEngineInRAM, cnf.CompatAPIIndexEngine)
+		require.Equal(t, 5, cnf.CompatAPIIndexEngineHybridDay)
 	})
 }
 

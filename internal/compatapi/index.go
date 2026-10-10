@@ -332,10 +332,10 @@ type Index struct {
 	chunkGen  uint64
 	packDirty map[packDirtyKey]struct{}
 
-	// indexEngine selects RAM policy. Empty / old pins every day journal.
-	// new keeps meta+ranges in RAM and pins only the last indexEngineNewDay days.
-	indexEngine       conf.IndexEngine
-	indexEngineNewDay int
+	// indexEngine selects RAM policy. Empty / hybrid pins only the last
+	// indexEngineHybridDay days. inram pins every day journal.
+	indexEngine          conf.IndexEngine
+	indexEngineHybridDay int
 
 	dirListMu    sync.Mutex
 	dirListCache map[string][]cachedDirEnt
@@ -359,32 +359,32 @@ func NewIndex() *Index {
 	}
 }
 
-// ConfigureEngine selects the RAM policy for day journals. old (default) pins
-// every day. new pins the last newDay days and loads the rest on demand.
-// When newDay is at least the archive depth, new matches old.
-func (idx *Index) ConfigureEngine(engine conf.IndexEngine, newDay int) {
+// ConfigureEngine selects the RAM policy for day journals. hybrid (default)
+// pins the last hybridDay days and loads the rest on demand. inram pins every
+// day. When hybridDay is at least the archive depth, hybrid matches inram.
+func (idx *Index) ConfigureEngine(engine conf.IndexEngine, hybridDay int) {
 	if idx == nil {
 		return
 	}
 	idx.mutex.Lock()
 	defer idx.mutex.Unlock()
 	idx.indexEngine = engine
-	idx.indexEngineNewDay = newDay
+	idx.indexEngineHybridDay = hybridDay
 }
 
-func (idx *Index) engineIsNew() bool {
-	return idx != nil && idx.indexEngine == conf.IndexEngineNew
+func (idx *Index) engineIsHybrid() bool {
+	return idx != nil && idx.indexEngine == conf.IndexEngineHybrid
 }
 
 // recentDayLimit is how many newest day journals stay pinned. 0 means all days
-// (old engine, or new engine when the caller should treat the archive as fully hot).
+// (inram engine, or hybrid engine when the caller should treat the archive as fully hot).
 func (idx *Index) recentDayLimit() int {
-	if !idx.engineIsNew() {
+	if !idx.engineIsHybrid() {
 		return 0
 	}
-	n := idx.indexEngineNewDay
+	n := idx.indexEngineHybridDay
 	if n < 1 {
-		return 2
+		return 1
 	}
 	return n
 }
@@ -1332,6 +1332,144 @@ func (idx *Index) applySegMetaLocked(pe *pathIndex, fpath string, rec dvrSegRec)
 	pe.rangesOK = false
 }
 
+// testHookCommitDayJournal observes the live journal fd at the moment a day
+// file is replaced. Tests use it to prove the handle is closed only for that
+// file, not for the whole rebuild. Nil in production.
+var testHookCommitDayJournal func(path string, journal *os.File, rewriting bool)
+
+// commitDayJournal replaces one day journal. The live recording handle is
+// closed only when it points at this file, and only until the rename returns.
+// Segments that completed during the directory walk and are already in RAM are
+// merged into the new file so they are not dropped with the old journal.
+func (idx *Index) commitDayJournal(
+	pathName, day, common, journalPath string,
+	hash uint64,
+	segs []*IndexedSegment,
+	codecs [][]*fmp4.InitTrack,
+) (dvrSnapshot, error) {
+	idx.mutex.Lock()
+	if pe := idx.paths[pathName]; pe != nil {
+		segs = mergeLiveDaySegsLocked(pe, day, common, segs, &codecs)
+	}
+	sort.Slice(segs, func(i, j int) bool { return segs[i].Start.Before(segs[j].Start) })
+	snap := snapshotFromSegs(hash, common, segs, codecs)
+	// Detach under the same lock as the merge. Otherwise a segment can land in
+	// the old journal after the snapshot was taken and disappear on rename.
+	release, f, needSync := idx.detachJournalLocked(pathName, journalPath)
+	idx.mutex.Unlock()
+	if f != nil {
+		if needSync {
+			_ = f.Sync()
+		}
+		_ = f.Close()
+	}
+	defer release()
+	if testHookCommitDayJournal != nil {
+		idx.mutex.Lock()
+		var journal *os.File
+		rewriting := false
+		if pe := idx.paths[pathName]; pe != nil && pe.persist != nil {
+			journal = pe.persist.journal
+			rewriting = pe.persist.rewriting
+		}
+		idx.mutex.Unlock()
+		testHookCommitDayJournal(journalPath, journal, rewriting)
+	}
+	return snap, writeDayJournalFile(journalPath, hash, snap)
+}
+
+// detachJournalLocked marks the open journal for replacement. The mutex must
+// be held. The returned file is closed by the caller, outside the lock.
+func (idx *Index) detachJournalLocked(pathName, journalPath string) (release func(), f *os.File, needSync bool) {
+	pe := idx.paths[pathName]
+	if pe == nil || pe.persist == nil || !pe.persist.journalTargets(journalPath) {
+		return func() {}, nil, false
+	}
+	pe.persist.rewriting = true
+	pe.persist.ready = false
+	f, needSync = pe.persist.takeJournal()
+	return func() {
+		idx.mutex.Lock()
+		if pe := idx.paths[pathName]; pe != nil && pe.persist != nil {
+			pe.persist.rewriting = false
+		}
+		idx.mutex.Unlock()
+	}, f, needSync
+}
+
+// holdJournal closes the live fd when it refers to journalPath and keeps
+// recording from reopening it until release. release is a no-op when this
+// file was not the open journal.
+func (idx *Index) holdJournal(pathName, journalPath string) (release func()) {
+	idx.mutex.Lock()
+	release, f, needSync := idx.detachJournalLocked(pathName, journalPath)
+	idx.mutex.Unlock()
+	if f != nil {
+		if needSync {
+			_ = f.Sync()
+		}
+		_ = f.Close()
+	}
+	return release
+}
+
+// mergeLiveDaySegsLocked appends ready in-RAM segments for day that the
+// directory walk did not see. The caller holds idx.mutex.
+func mergeLiveDaySegsLocked(
+	pe *pathIndex,
+	day, common string,
+	segs []*IndexedSegment,
+	codecs *[][]*fmp4.InitTrack,
+) []*IndexedSegment {
+	if pe == nil {
+		return segs
+	}
+	seen := make(map[string]struct{}, len(segs))
+	for _, s := range segs {
+		if s == nil {
+			continue
+		}
+		seen[s.Name()] = struct{}{}
+	}
+	for _, s := range pe.segments {
+		if s == nil || !s.fmp4.Ready || dvrDayDate(s.Start) != day {
+			continue
+		}
+		if common != "" && s.common != "" && s.common != common {
+			continue
+		}
+		name := s.Name()
+		if name == "" {
+			continue
+		}
+		if _, ok := seen[name]; ok {
+			continue
+		}
+		seen[name] = struct{}{}
+		cp := *s
+		if tracks := s.tracks(); len(tracks) > 0 && codecs != nil {
+			internTracksInto(codecs, tracks)
+			cp.fmp4.codecID = codecIDFrom(*codecs, tracks)
+		}
+		segs = append(segs, &cp)
+	}
+	return segs
+}
+
+// waitJournalRewriteLocked blocks until a day-journal replace finishes.
+// The mutex must be held. It is released while waiting and held on return.
+func (idx *Index) waitJournalRewriteLocked(pathName string) *pathIndex {
+	for {
+		pe := idx.paths[pathName]
+		if pe == nil || pe.persist == nil || !pe.persist.rewriting {
+			return pe
+		}
+		idx.mutex.Unlock()
+		time.Sleep(time.Millisecond)
+		idx.mutex.Lock()
+	}
+}
+
 func (idx *Index) buildPathFromDir(
 	pathName string,
 	pathConf *conf.Path,
@@ -1435,9 +1573,10 @@ func (idx *Index) buildPathFromDir(
 				last.fmp4.codecID = codecIDFrom(codecs, tracks)
 			}
 			fillSegsMeta(segs, tracks, codecs, nominal, part)
-			snap := snapshotFromSegs(hash, layout.common, segs, codecs)
 			journalPath := layout.dayJournal(day)
-			if err := writeDayJournalFile(journalPath, hash, snap); err != nil {
+			snap, err := idx.commitDayJournal(pathName, day, layout.common, journalPath, hash, segs, codecs)
+			if err != nil {
+				idx.logInfo("index io op=write-journal path=%s file=%s err=%v", pathName, journalPath, err)
 				return 0
 			}
 			// Drop legacy MTXI snapshot so load uses journal as SoT.
@@ -1454,8 +1593,8 @@ func (idx *Index) buildPathFromDir(
 				}
 				pe.setDayNSeg(day, curN+len(snap.Segs))
 				pe.setDiskDayNSeg(layout.common, day, len(snap.Segs))
-				for _, seg := range segs {
-					pe.appendDiskRange(layout.common, seg.Start, trustedSegDuration(seg.fmp4.Duration, 0, nominal))
+				for _, rec := range snap.Segs {
+					pe.appendDiskRange(layout.common, rec.Start, trustedSegDuration(rec.Duration, 0, nominal))
 				}
 			}
 			idx.mutex.Unlock()
@@ -1697,9 +1836,13 @@ func (idx *Index) rebuildRepairDays(
 			return inspected, added, removed
 		}
 		if len(files) == 0 {
-			_ = os.Remove(layout.dayJournal(rep.day))
+			journalPath := layout.dayJournal(rep.day)
+			// Windows refuses to delete a journal this process still has open.
+			release := idx.holdJournal(pathName, journalPath)
+			_ = os.Remove(journalPath)
 			_ = os.Remove(layout.daySnap(rep.day))
 			_ = os.Remove(layout.dayPack(rep.day))
+			release()
 			idx.mutex.Lock()
 			if pe := idx.paths[pathName]; pe != nil {
 				pe.setDiskDayNSeg(layout.common, rep.day, 0)
@@ -1743,8 +1886,10 @@ func (idx *Index) rebuildRepairDays(
 			last.fmp4.codecID = codecIDFrom(codecs, tracks)
 		}
 		fillSegsMeta(segs, tracks, codecs, nominal, part)
-		snap := snapshotFromSegs(hash, layout.common, segs, codecs)
-		if err := writeDayJournalFile(layout.dayJournal(rep.day), hash, snap); err != nil {
+		journalPath := layout.dayJournal(rep.day)
+		snap, err := idx.commitDayJournal(pathName, rep.day, layout.common, journalPath, hash, segs, codecs)
+		if err != nil {
+			idx.logInfo("index io op=write-journal path=%s file=%s err=%v", pathName, journalPath, err)
 			idx.mutex.Lock()
 			if pe := idx.paths[pathName]; pe != nil {
 				pe.repairDays = append(pe.repairDays, rep)
@@ -1765,8 +1910,8 @@ func (idx *Index) rebuildRepairDays(
 				}
 			}
 			pe.setDayNSeg(rep.day, total)
-			for _, seg := range segs {
-				pe.appendDiskRange(layout.common, seg.Start, trustedSegDuration(seg.fmp4.Duration, 0, nominal))
+			for _, rec := range snap.Segs {
+				pe.appendDiskRange(layout.common, rec.Start, trustedSegDuration(rec.Duration, 0, nominal))
 			}
 			delete(idx.dayCache, dayCacheKey{path: pathName, day: rep.day})
 			needPin = pe.dayIsPinned(rep.day) || rep.day == pe.openDay || rep.day == dvrDayDate(time.Now())
@@ -2581,6 +2726,15 @@ func (idx *Index) PersistUpsert(pathName, fpath string) {
 			return
 		}
 	}
+	pe = idx.waitJournalRewriteLocked(pathName)
+	if pe == nil {
+		return
+	}
+	seg, ok = pe.byName[name]
+	if !ok || !seg.fmp4.Ready {
+		return
+	}
+	day = dvrDayDate(seg.Start)
 	idx.bindPersistLocked(pathName, pe, day, fpath)
 	if pe.persist == nil || !pe.persist.ready {
 		return

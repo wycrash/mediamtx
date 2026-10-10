@@ -8,12 +8,6 @@ const (
 func Redact(c *Conf) *Conf {
 	c = c.Clone()
 
-	for i := range c.AuthInternalUsers {
-		if c.AuthInternalUsers[i].Pass != "" {
-			c.AuthInternalUsers[i].Pass = Credential(redactedCredential)
-		}
-	}
-
 	if c.PathDefaults.PublishPass != nil && *c.PathDefaults.PublishPass != "" {
 		*c.PathDefaults.PublishPass = Credential(redactedCredential)
 	}

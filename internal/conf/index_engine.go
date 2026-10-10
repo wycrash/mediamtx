@@ -10,11 +10,11 @@ import (
 type IndexEngine string
 
 const (
-	// IndexEngineOld keeps every day journal pinned in RAM (current behavior).
-	IndexEngineOld IndexEngine = "old"
-	// IndexEngineNew keeps meta, ranges, and status in RAM and loads day
-	// journals on demand, pinning the last CompatAPIIndexEngineNewDay days.
-	IndexEngineNew IndexEngine = "new"
+	// IndexEngineInRAM keeps every day journal pinned in RAM.
+	IndexEngineInRAM IndexEngine = "inram"
+	// IndexEngineHybrid keeps meta, ranges, and status in RAM and loads day
+	// journals on demand, pinning the last CompatAPIIndexEngineHybridDay days.
+	IndexEngineHybrid IndexEngine = "hybrid"
 )
 
 // UnmarshalJSON implements json.Unmarshaler.
@@ -25,9 +25,9 @@ func (d *IndexEngine) UnmarshalJSON(b []byte) error {
 	}
 
 	switch *d {
-	case "", IndexEngineOld:
-		*d = IndexEngineOld
-	case IndexEngineNew:
+	case "", IndexEngineHybrid:
+		*d = IndexEngineHybrid
+	case IndexEngineInRAM:
 	default:
 		return fmt.Errorf("invalid 'compatAPIIndexEngine': '%s'", *d)
 	}

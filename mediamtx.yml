@@ -280,12 +280,12 @@ compatAPITimeOffsetMinutes: 0
 # 0 disables the periodic update (manual rebuild via Control API still works).
 compatAPIIndexUpdateInterval: 10m
 # DVR index RAM policy.
-# old: pin every day journal (current behavior).
-# new: keep meta, ranges, and status in RAM; load day journals on demand
-# and pin the last compatAPIIndexEngineNewDay days. If that number is >= the
-# archive depth, behavior matches old.
-compatAPIIndexEngine: old
-compatAPIIndexEngineNewDay: 2
+# hybrid: keep meta, ranges, and status in RAM; load day journals on demand
+# and pin the last compatAPIIndexEngineHybridDay days. If that number is >= the
+# archive depth, behavior matches inram.
+# inram: pin every day journal.
+compatAPIIndexEngine: hybrid
+compatAPIIndexEngineHybridDay: 1
 
 ###############################################
 # Global settings -> RTSP server

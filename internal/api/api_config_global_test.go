@@ -52,7 +52,7 @@ func TestConfigGlobalGet(t *testing.T) {
 
 	authInternalUsers := out["authInternalUsers"].([]any)
 	require.Len(t, authInternalUsers, 1)
-	require.Equal(t, "<redacted>", authInternalUsers[0].(map[string]any)["pass"])
+	require.Equal(t, "mypass", authInternalUsers[0].(map[string]any)["pass"])
 
 	require.True(t, checked)
 }

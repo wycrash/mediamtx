@@ -89,6 +89,11 @@ func requestIsHead(ctx *gin.Context) bool {
 }
 
 func (s *Server) onRequest(ctx *gin.Context) {
+	if isWHEPPath(ctx.Request.URL.Path) {
+		s.serveWHEP(ctx)
+		return
+	}
+
 	if ctx.Request.Method != http.MethodGet && ctx.Request.Method != http.MethodHead {
 		ctx.AbortWithStatus(http.StatusMethodNotAllowed)
 		return
@@ -731,6 +736,34 @@ func rewriteLivePlaylistPath(p string) string {
 		}
 	}
 	return p
+}
+
+func isWHEPPath(rawPath string) bool {
+	pa := strings.TrimPrefix(rawPath, "/")
+	if pa == "" {
+		return false
+	}
+	base, rest, found := strings.Cut(pa, "/whep")
+	if !found || base == "" {
+		return false
+	}
+	return rest == "" || strings.HasPrefix(rest, "/")
+}
+
+func (s *Server) serveWHEP(ctx *gin.Context) {
+	s.mutex.RLock()
+	h := s.WebRTCHandler
+	s.mutex.RUnlock()
+	if h == nil {
+		http.Error(ctx.Writer, "WebRTC backend unavailable", http.StatusBadGateway)
+		return
+	}
+
+	s.Log(logger.Debug, "[conn %v] serve whep %s", httpp.RemoteAddr(ctx), ctx.Request.URL.Path)
+	h.ServeHTTP(&relativeLocationWriter{
+		ResponseWriter: ctx.Writer,
+		reqPath:        ctx.Request.URL.Path,
+	}, ctx.Request)
 }
 
 func (s *Server) serveLive(ctx *gin.Context) {

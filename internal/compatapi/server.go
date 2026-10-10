@@ -32,25 +32,26 @@ type pathAPIGetter interface {
 
 // Server is the compat API server.
 type Server struct {
-	Address             string
-	Encryption          bool
-	ServerKey           string
-	ServerCert          string
-	DumpPackets         bool
-	AllowOrigins        []string
-	TrustedProxies      conf.IPNetworks
-	ReadTimeout         conf.Duration
-	WriteTimeout        conf.Duration
-	TimeOffsetMinutes   int
-	IndexUpdateInterval conf.Duration
-	IndexEngine         conf.IndexEngine
-	IndexEngineNewDay   int
-	PathConfs           map[string]*conf.Path
-	PathManager         pathAPIGetter
-	AuthManager         serverAuthManager
-	HLSHandler          http.Handler
-	DvrPlayer           fs.FS
-	Parent              logger.Writer
+	Address              string
+	Encryption           bool
+	ServerKey            string
+	ServerCert           string
+	DumpPackets          bool
+	AllowOrigins         []string
+	TrustedProxies       conf.IPNetworks
+	ReadTimeout          conf.Duration
+	WriteTimeout         conf.Duration
+	TimeOffsetMinutes    int
+	IndexUpdateInterval  conf.Duration
+	IndexEngine          conf.IndexEngine
+	IndexEngineHybridDay int
+	PathConfs            map[string]*conf.Path
+	PathManager          pathAPIGetter
+	AuthManager          serverAuthManager
+	HLSHandler           http.Handler
+	WebRTCHandler        http.Handler
+	DvrPlayer            fs.FS
+	Parent               logger.Writer
 	// MaintMu serializes index reconcile/rebuild with recordcleaner ticks.
 	MaintMu *sync.Mutex
 
@@ -60,6 +61,7 @@ type Server struct {
 	sessionsMu         sync.RWMutex
 	sessions           map[uuid.UUID]*session
 	sessionsBySecret   map[uuid.UUID]*session
+	sessionsByQuery    map[string]*session
 	sessionCleanupStop chan struct{}
 	sessionCleanupDone chan struct{}
 	reconcileStop      chan struct{}
@@ -86,16 +88,24 @@ func (s *Server) SetHLSHandler(h http.Handler) {
 	s.mutex.Unlock()
 }
 
+// SetWebRTCHandler attaches the WebRTC signaling backend after it is created.
+func (s *Server) SetWebRTCHandler(h http.Handler) {
+	s.mutex.Lock()
+	s.WebRTCHandler = h
+	s.mutex.Unlock()
+}
+
 // Initialize starts the HTTP listener immediately. Index load and the first
 // reconcile run in the background so recorders can register live segments.
 func (s *Server) Initialize() error {
 	s.Index = NewIndex()
 	s.Index.Parent = s
-	s.Index.ConfigureEngine(s.IndexEngine, s.IndexEngineNewDay)
+	s.Index.ConfigureEngine(s.IndexEngine, s.IndexEngineHybridDay)
 	s.Index.EnablePersist(s.PathConfs)
 
 	s.sessions = make(map[uuid.UUID]*session)
 	s.sessionsBySecret = make(map[uuid.UUID]*session)
+	s.sessionsByQuery = make(map[string]*session)
 
 	router := gin.New()
 	router.SetTrustedProxies(s.TrustedProxies.ToTrustedProxies()) //nolint:errcheck
@@ -126,8 +136,8 @@ func (s *Server) Initialize() error {
 		proto = "TCP/HTTPS"
 	}
 	s.Log(logger.Info, "started with listener on %s (%s)", s.Address, proto)
-	if s.IndexEngine == conf.IndexEngineNew {
-		s.Log(logger.Info, "recording index engine=new keepDays=%d", s.IndexEngineNewDay)
+	if s.IndexEngine == conf.IndexEngineHybrid {
+		s.Log(logger.Info, "recording index engine=hybrid keepDays=%d", s.IndexEngineHybridDay)
 	}
 	s.reconcileStop = make(chan struct{})
 	s.reconcileDone = make(chan struct{})
@@ -643,6 +653,10 @@ func (s *Server) safeFindPathConf(name string) (*conf.Path, error) {
 func (s *Server) middlewarePreflightRequests(ctx *gin.Context) {
 	if ctx.Request.Method == http.MethodOptions &&
 		ctx.Request.Header.Get("Access-Control-Request-Method") != "" {
+		// WHEP preflight is answered by the WebRTC handler (POST, PATCH, DELETE, If-Match).
+		if isWHEPPath(ctx.Request.URL.Path) {
+			return
+		}
 		ctx.Header("Access-Control-Allow-Methods", "OPTIONS, GET, HEAD")
 		ctx.Header("Access-Control-Allow-Headers", "Authorization, Content-Type")
 		ctx.AbortWithStatus(http.StatusNoContent)

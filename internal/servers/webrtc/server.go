@@ -337,6 +337,15 @@ func (s *Server) Initialize() error {
 	return nil
 }
 
+// ServeHTTP serves a WHIP/WHEP request with the same sessions as the WebRTC listener.
+func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if s == nil || s.httpServer == nil {
+		http.Error(w, "WebRTC backend unavailable", http.StatusBadGateway)
+		return
+	}
+	s.httpServer.ServeHTTP(w, r)
+}
+
 // Log implements logger.Writer.
 func (s *Server) Log(level logger.Level, format string, args ...any) {
 	s.Parent.Log(level, "[WebRTC] "+format, args...)

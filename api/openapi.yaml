@@ -107,8 +107,8 @@ components:
     IndexEngine:
       type: string
       enum:
-        - old
-        - new
+        - hybrid
+        - inram
 
     MoQSessionState:
       type: string
@@ -406,10 +406,10 @@ components:
           type: boolean
         compatAPIIndexEngine:
           $ref: "#/components/schemas/IndexEngine"
-        compatAPIIndexEngineNewDay:
+        compatAPIIndexEngineHybridDay:
           type: integer
           format: int64
-          description: Days of segment index kept in RAM when engine is new. If >= archive depth, same as old.
+          description: Days of segment index kept in RAM when engine is hybrid. If >= archive depth, same as inram.
         compatAPIIndexUpdateInterval:
           type: string
         compatAPIServerCert:

@@ -47,6 +47,10 @@ const (
 
 var errDvrIndexBadMagic = errors.New("dvr index: bad magic")
 
+// errJournalRewriting is returned when a day journal is being replaced and
+// must not be reopened yet. The window is one file rename, not a whole rebuild.
+var errJournalRewriting = errors.New("dvr journal rewrite in progress")
+
 type dvrSegRec struct {
 	Rel      string
 	Start    time.Time
@@ -76,7 +80,10 @@ type dvrPersist struct {
 	journal     *os.File
 	journalOps  int
 	ready       bool
-	savedCodec  map[uint8]struct{}
+	// rewriting is set only while this open journal file is replaced.
+	// Live appends continue during the rest of a rebuild.
+	rewriting  bool
+	savedCodec map[uint8]struct{}
 }
 
 func dvrIndexHash(pathConf *conf.Path, pathName string) uint64 {
@@ -577,7 +584,11 @@ func writeFileAtomic(path string, data []byte) error {
 		_ = os.Remove(tmp)
 		return err
 	}
-	return os.Rename(tmp, path)
+	if err = os.Rename(tmp, path); err != nil {
+		_ = os.Remove(tmp)
+		return err
+	}
+	return nil
 }
 
 func writeSnapshotFile(path string, s dvrSnapshot) error {
@@ -854,9 +865,21 @@ func (p *dvrPersist) takeJournal() (f *os.File, needSync bool) {
 	return f, needSync
 }
 
+func (p *dvrPersist) journalTargets(path string) bool {
+	if p == nil || path == "" || p.journalPath == "" {
+		return false
+	}
+	return filepath.Clean(p.journalPath) == filepath.Clean(path)
+}
+
 func (p *dvrPersist) openJournalAppend() error {
 	if p == nil {
 		return nil
+	}
+	// A concurrent replace of this file is in progress. Reopening here would
+	// make os.Rename fail on Windows (the destination is still open).
+	if p.rewriting {
+		return errJournalRewriting
 	}
 	p.closeJournal()
 	if err := os.MkdirAll(filepath.Dir(p.journalPath), 0o755); err != nil {

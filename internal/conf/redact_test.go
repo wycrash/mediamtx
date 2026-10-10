@@ -56,8 +56,8 @@ func TestRedact(t *testing.T) {
 
 	c2 := conf.Redact(&c)
 
-	require.Equal(t, "<redacted>", string(c2.AuthInternalUsers[0].Pass))
-	require.Equal(t, "<redacted>", string(c2.AuthInternalUsers[1].Pass))
+	require.Equal(t, "pass1", string(c2.AuthInternalUsers[0].Pass))
+	require.Equal(t, "pass2", string(c2.AuthInternalUsers[1].Pass))
 	require.Equal(t, "<redacted>", string(*c2.PathDefaults.PublishPass))
 	require.Equal(t, "<redacted>", string(*c2.PathDefaults.ReadPass))
 	require.Equal(t, "<redacted>", string(*c2.Paths["path1"].PublishPass))

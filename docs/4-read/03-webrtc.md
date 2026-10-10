@@ -18,6 +18,8 @@ WHEP is a WebRTC extension that allows to read streams by using a URL, without p
 http://localhost:8889/mystream/whep
 ```
 
+When the Compat API is enabled and WebRTC is on, the same WHEP URL is also served on the Compat API port (default `:8877`), for example `http://localhost:8877/mystream/whep`. ICE media still uses the WebRTC UDP ports.
+
 Be aware that not all browsers can read tracks with any codec, check [Codec support in browsers](../2-features/25-webrtc-specific-features.md#codec-support-in-browsers).
 
 Depending on the network it may be difficult to establish a connection between server and clients, read [Solving WebRTC connectivity issues](../2-features/25-webrtc-specific-features.md#solving-webrtc-connectivity-issues).

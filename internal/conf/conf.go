@@ -338,17 +338,17 @@ type Conf struct {
 	PlaybackTrustedProxies IPNetworks `json:"playbackTrustedProxies"`
 
 	// Compat API (DVR endpoints on a single HTTP port)
-	CompatAPI                    bool        `json:"compatAPI"`
-	CompatAPIAddress             string      `json:"compatAPIAddress"`
-	CompatAPIEncryption          bool        `json:"compatAPIEncryption"`
-	CompatAPIServerKey           string      `json:"compatAPIServerKey"`
-	CompatAPIServerCert          string      `json:"compatAPIServerCert"`
-	CompatAPIAllowOrigins        []string    `json:"compatAPIAllowOrigins"`
-	CompatAPITrustedProxies      IPNetworks  `json:"compatAPITrustedProxies"`
-	CompatAPITimeOffsetMinutes   int         `json:"compatAPITimeOffsetMinutes"`
-	CompatAPIIndexUpdateInterval Duration    `json:"compatAPIIndexUpdateInterval"`
-	CompatAPIIndexEngine         IndexEngine `json:"compatAPIIndexEngine"`       // old: pin every day journal. new: load days on demand.
-	CompatAPIIndexEngineNewDay   int         `json:"compatAPIIndexEngineNewDay"` // Days of segment index kept in RAM when engine is new. If >= archive depth, same as old.
+	CompatAPI                     bool        `json:"compatAPI"`
+	CompatAPIAddress              string      `json:"compatAPIAddress"`
+	CompatAPIEncryption           bool        `json:"compatAPIEncryption"`
+	CompatAPIServerKey            string      `json:"compatAPIServerKey"`
+	CompatAPIServerCert           string      `json:"compatAPIServerCert"`
+	CompatAPIAllowOrigins         []string    `json:"compatAPIAllowOrigins"`
+	CompatAPITrustedProxies       IPNetworks  `json:"compatAPITrustedProxies"`
+	CompatAPITimeOffsetMinutes    int         `json:"compatAPITimeOffsetMinutes"`
+	CompatAPIIndexUpdateInterval  Duration    `json:"compatAPIIndexUpdateInterval"`
+	CompatAPIIndexEngine          IndexEngine `json:"compatAPIIndexEngine"`          // inram: pin every day journal. hybrid: load days on demand.
+	CompatAPIIndexEngineHybridDay int         `json:"compatAPIIndexEngineHybridDay"` // Days of segment index kept in RAM when engine is hybrid. If >= archive depth, same as inram.
 
 	// RTSP server
 	RTSP                  bool             `json:"rtsp"`
@@ -512,8 +512,8 @@ func (conf *Conf) setDefaults() {
 	conf.CompatAPIServerCert = "server.crt"
 	conf.CompatAPIAllowOrigins = []string{"*"}
 	conf.CompatAPIIndexUpdateInterval = 10 * Duration(time.Minute)
-	conf.CompatAPIIndexEngine = IndexEngineOld
-	conf.CompatAPIIndexEngineNewDay = 2
+	conf.CompatAPIIndexEngine = IndexEngineHybrid
+	conf.CompatAPIIndexEngineHybridDay = 1
 
 	// RTSP server
 	conf.RTSP = true
@@ -882,14 +882,14 @@ func (conf *Conf) Validate(l logger.Writer) error {
 			return fmt.Errorf("'compatAPIIndexUpdateInterval' must be >= 0 (0 disables the periodic index update)")
 		}
 		switch conf.CompatAPIIndexEngine {
-		case "", IndexEngineOld:
-			conf.CompatAPIIndexEngine = IndexEngineOld
-		case IndexEngineNew:
+		case "", IndexEngineHybrid:
+			conf.CompatAPIIndexEngine = IndexEngineHybrid
+		case IndexEngineInRAM:
 		default:
 			return fmt.Errorf("invalid 'compatAPIIndexEngine': '%s'", conf.CompatAPIIndexEngine)
 		}
-		if conf.CompatAPIIndexEngineNewDay < 1 {
-			return fmt.Errorf("'compatAPIIndexEngineNewDay' must be >= 1")
+		if conf.CompatAPIIndexEngineHybridDay < 1 {
+			return fmt.Errorf("'compatAPIIndexEngineHybridDay' must be >= 1")
 		}
 		if !conf.HLS {
 			return fmt.Errorf("'hls' must be enabled when compatAPI is enabled (live playlists are served by the HLS muxer)")

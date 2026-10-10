@@ -1120,7 +1120,7 @@ func (idx *Index) evictStalePinned(pathName string) {
 // pinLiveDayIfNeeded pins the recording day so its journal can be unpinned
 // later when it falls out of the new-engine window. No-op for the old engine.
 func (idx *Index) pinLiveDayIfNeeded(pathName, day string) {
-	if !idx.engineIsNew() || day == "" {
+	if !idx.engineIsHybrid() || day == "" {
 		return
 	}
 	idx.mutex.RLock()
@@ -1487,14 +1487,14 @@ func (idx *Index) PrefetchDays(stop <-chan struct{}) {
 	if curPath != "" {
 		idx.logInfo("recording index ram path=%s in %s", curPath, time.Since(tPath))
 	}
-	if idx.engineIsNew() {
-		idx.logInfo("recording index in memory engine=new keepDays=%d days=%d/%d segs=%d in %s",
+	if idx.engineIsHybrid() {
+		idx.logInfo("recording index in memory engine=hybrid keepDays=%d days=%d/%d segs=%d in %s",
 			idx.recentDayLimit(), n, len(jobs), idx.SegmentCount(), time.Since(t0))
 	} else {
 		idx.logInfo("recording index in memory days=%d/%d segs=%d in %s",
 			n, len(jobs), idx.SegmentCount(), time.Since(t0))
 	}
-	if idx.engineIsNew() {
+	if idx.engineIsHybrid() {
 		idx.mutex.RLock()
 		names := make([]string, 0, len(idx.paths))
 		for name := range idx.paths {

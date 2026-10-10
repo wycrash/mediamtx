@@ -26,8 +26,8 @@ const (
 )
 
 var (
-	// Align with HLS: VLC keeps a media-playlist URL open for minutes.
-	sessionCloseAfter    = 5 * time.Minute
+	// Drop a compat session that has not been touched for a minute.
+	sessionCloseAfter    = time.Minute
 	sessionCleanupPeriod = 10 * time.Second
 )
 
@@ -42,6 +42,7 @@ type session struct {
 	ip         string
 	path       string
 	query      string
+	queryKey   string
 	userAgent  string
 	bytes      atomic.Uint64
 	lastReq    atomic.Int64
@@ -182,6 +183,7 @@ func (s *Server) sessionForRequest(ctx *gin.Context) (*session, bool) {
 		user:       creds.User,
 	}
 	sx.lastReq.Store(sx.created.UnixNano())
+	sx.queryKey = ctx.Request.URL.Query().Get(sessionQueryParamName)
 
 	if !s.sessionsAdd(sx) {
 		sx.kick()
@@ -214,7 +216,13 @@ func (s *Server) sessionFromCookie(ctx *gin.Context) *session {
 }
 
 func (s *Server) sessionFromQuery(ctx *gin.Context) *session {
-	return s.sessionBySecret(ctx.Request.URL.Query().Get(sessionQueryParamName), ctx.ClientIP())
+	raw := ctx.Request.URL.Query().Get(sessionQueryParamName)
+	if sx := s.sessionBySecret(raw, ctx.ClientIP()); sx != nil {
+		return sx
+	}
+	// Live HLS on :8888 already puts its own session id in ?session=.
+	// Reuse one compat session for that id instead of opening a new one per segment.
+	return s.sessionByQuery(raw, ctx.ClientIP())
 }
 
 func (s *Server) sessionBySecret(rawSecret, clientIP string) *session {
@@ -239,6 +247,22 @@ func (s *Server) sessionBySecret(rawSecret, clientIP string) *session {
 	return sx
 }
 
+func (s *Server) sessionByQuery(raw, clientIP string) *session {
+	if raw == "" {
+		return nil
+	}
+	s.sessionsMu.RLock()
+	sx := s.sessionsByQuery[raw]
+	s.sessionsMu.RUnlock()
+	if sx == nil || sx.killed.Load() {
+		return nil
+	}
+	if clientIP != "" && sx.ip != "" && sx.ip != clientIP {
+		return nil
+	}
+	return sx
+}
+
 func (s *Server) sessionsAdd(sx *session) bool {
 	s.sessionsMu.Lock()
 	defer s.sessionsMu.Unlock()
@@ -248,8 +272,14 @@ func (s *Server) sessionsAdd(sx *session) bool {
 	if s.sessionsBySecret == nil {
 		s.sessionsBySecret = make(map[uuid.UUID]*session)
 	}
+	if s.sessionsByQuery == nil {
+		s.sessionsByQuery = make(map[string]*session)
+	}
 	s.sessions[sx.uuid] = sx
 	s.sessionsBySecret[sx.secret] = sx
+	if sx.queryKey != "" {
+		s.sessionsByQuery[sx.queryKey] = sx
+	}
 	return true
 }
 
@@ -260,6 +290,7 @@ func (s *Server) sessionsKickAll() {
 	}
 	s.sessions = nil
 	s.sessionsBySecret = nil
+	s.sessionsByQuery = nil
 	s.sessionsMu.Unlock()
 }
 
@@ -301,6 +332,9 @@ func (s *Server) expireSessions() {
 		}
 		delete(s.sessions, id)
 		delete(s.sessionsBySecret, sx.secret)
+		if sx.queryKey != "" {
+			delete(s.sessionsByQuery, sx.queryKey)
+		}
 		sx.kick()
 	}
 }
@@ -342,6 +376,9 @@ func (s *Server) APISessionsKick(id uuid.UUID) error {
 	}
 	delete(s.sessions, id)
 	delete(s.sessionsBySecret, sx.secret)
+	if sx.queryKey != "" {
+		delete(s.sessionsByQuery, sx.queryKey)
+	}
 	s.sessionsMu.Unlock()
 
 	sx.kick()

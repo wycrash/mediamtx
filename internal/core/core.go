@@ -736,25 +736,25 @@ func (p *Core) createResources(initial bool) error {
 	if currentConf.CompatAPI &&
 		p.compatServer == nil {
 		i := &compatapi.Server{
-			Address:             currentConf.CompatAPIAddress,
-			Encryption:          currentConf.CompatAPIEncryption,
-			ServerKey:           currentConf.CompatAPIServerKey,
-			ServerCert:          currentConf.CompatAPIServerCert,
-			DumpPackets:         currentConf.DumpPackets,
-			AllowOrigins:        currentConf.CompatAPIAllowOrigins,
-			TrustedProxies:      currentConf.CompatAPITrustedProxies,
-			ReadTimeout:         currentConf.ReadTimeout,
-			WriteTimeout:        currentConf.WriteTimeout,
-			TimeOffsetMinutes:   currentConf.CompatAPITimeOffsetMinutes,
-			IndexUpdateInterval: currentConf.CompatAPIIndexUpdateInterval,
-			IndexEngine:         currentConf.CompatAPIIndexEngine,
-			IndexEngineNewDay:   currentConf.CompatAPIIndexEngineNewDay,
-			HLSHandler:          p.hlsServer,
-			PathConfs:           currentConf.Paths,
-			PathManager:         p.pathManager,
-			AuthManager:         p.authManager,
-			Parent:              p,
-			MaintMu:             &p.recordingMaintMu,
+			Address:              currentConf.CompatAPIAddress,
+			Encryption:           currentConf.CompatAPIEncryption,
+			ServerKey:            currentConf.CompatAPIServerKey,
+			ServerCert:           currentConf.CompatAPIServerCert,
+			DumpPackets:          currentConf.DumpPackets,
+			AllowOrigins:         currentConf.CompatAPIAllowOrigins,
+			TrustedProxies:       currentConf.CompatAPITrustedProxies,
+			ReadTimeout:          currentConf.ReadTimeout,
+			WriteTimeout:         currentConf.WriteTimeout,
+			TimeOffsetMinutes:    currentConf.CompatAPITimeOffsetMinutes,
+			IndexUpdateInterval:  currentConf.CompatAPIIndexUpdateInterval,
+			IndexEngine:          currentConf.CompatAPIIndexEngine,
+			IndexEngineHybridDay: currentConf.CompatAPIIndexEngineHybridDay,
+			HLSHandler:           p.hlsServer,
+			PathConfs:            currentConf.Paths,
+			PathManager:          p.pathManager,
+			AuthManager:          p.authManager,
+			Parent:               p,
+			MaintMu:              &p.recordingMaintMu,
 		}
 		err = i.Initialize()
 		if err != nil {
@@ -1030,6 +1030,9 @@ func (p *Core) createResources(initial bool) error {
 			return err
 		}
 		p.webRTCServer = i
+		if p.compatServer != nil {
+			p.compatServer.SetWebRTCHandler(i)
+		}
 	}
 
 	if currentConf.SRT &&
@@ -1380,7 +1383,7 @@ func (p *Core) closeResources(newConf *conf.Conf) {
 		newConf.CompatAPITimeOffsetMinutes != currentConf.CompatAPITimeOffsetMinutes ||
 		newConf.CompatAPIIndexUpdateInterval != currentConf.CompatAPIIndexUpdateInterval ||
 		newConf.CompatAPIIndexEngine != currentConf.CompatAPIIndexEngine ||
-		newConf.CompatAPIIndexEngineNewDay != currentConf.CompatAPIIndexEngineNewDay ||
+		newConf.CompatAPIIndexEngineHybridDay != currentConf.CompatAPIIndexEngineHybridDay ||
 		newConf.ReadTimeout != currentConf.ReadTimeout ||
 		newConf.WriteTimeout != currentConf.WriteTimeout ||
 		newConf.DumpPackets != currentConf.DumpPackets ||
@@ -1499,6 +1502,9 @@ func (p *Core) closeResources(newConf *conf.Conf) {
 	}
 
 	if closeWebRTCServer && p.webRTCServer != nil {
+		if p.compatServer != nil {
+			p.compatServer.SetWebRTCHandler(nil)
+		}
 		p.webRTCServer.Close()
 		p.webRTCServer = nil
 	}

@@ -298,6 +298,35 @@ func TestMiddlewareSessionPersistsViaQuery(t *testing.T) {
 	require.Len(t, list.Items, 2)
 }
 
+func TestMiddlewareSessionReusesHLSQueryID(t *testing.T) {
+	s := &Server{
+		Parent:   testParent{},
+		sessions: make(map[uuid.UUID]*session),
+	}
+
+	r := gin.New()
+	r.Use(s.middlewareSession)
+	r.NoRoute(func(ctx *gin.Context) {
+		ctx.String(http.StatusOK, "ok")
+	})
+
+	hlsSession := "6ba7b810-9dad-11d1-80b4-00c04fd430c8"
+	for _, target := range []string{
+		"/cam1/index.m3u8?session=" + hlsSession,
+		"/cam1/seg.m4s?session=" + hlsSession,
+	} {
+		w := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodGet, target, nil)
+		req.RemoteAddr = "192.0.2.10:1234"
+		r.ServeHTTP(w, req)
+		require.Equal(t, http.StatusOK, w.Code)
+	}
+
+	list, err := s.APISessionsList()
+	require.NoError(t, err)
+	require.Len(t, list.Items, 1)
+}
+
 func TestArchivePlaylistForwardsSessionToSegments(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
