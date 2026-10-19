@@ -67,6 +67,10 @@ type Server struct {
 	reconcileStop      chan struct{}
 	reconcileDone      chan struct{}
 	reconcileKick      chan struct{}
+	indexLoadMu        sync.Mutex
+	indexLoadPending   []string
+	indexLoadKick      chan struct{}
+	indexLoadDone      chan struct{}
 	reconcileStatusMu  sync.RWMutex
 	reconcileState     defs.APICompatIndexStatusState
 	reconcileStarted   time.Time
@@ -142,9 +146,12 @@ func (s *Server) Initialize() error {
 	s.reconcileStop = make(chan struct{})
 	s.reconcileDone = make(chan struct{})
 	s.reconcileKick = make(chan struct{}, 1)
+	s.indexLoadKick = make(chan struct{}, 1)
+	s.indexLoadDone = make(chan struct{})
 	s.reconcileState = defs.APICompatIndexStatusIdle
 	s.startSessionCleanup()
 	s.startDebugStats()
+	go s.runIndexLoads()
 	go s.runIndexLifecycle()
 	return nil
 }
@@ -371,6 +378,9 @@ func (s *Server) stopIndexLifecycle() {
 	}
 	if s.reconcileDone != nil {
 		<-s.reconcileDone
+	}
+	if s.indexLoadDone != nil {
+		<-s.indexLoadDone
 	}
 }
 
@@ -611,6 +621,8 @@ func diffUint(after, before uint64) uint64 {
 }
 
 // ReloadPathConfs is called by core.Core.
+// In-memory configuration is applied before return. Reading a new path's
+// on-disk index runs on the index-load goroutine.
 func (s *Server) ReloadPathConfs(pathConfs map[string]*conf.Path) {
 	s.mutex.Lock()
 	s.PathConfs = pathConfs
@@ -618,12 +630,60 @@ func (s *Server) ReloadPathConfs(pathConfs map[string]*conf.Path) {
 	if s.Index == nil {
 		return
 	}
-	st := s.Index.ReloadPathConfs(pathConfs)
+	pending := s.Index.stagePathConfs(pathConfs)
+	if len(pending) == 0 {
+		if s.Index.NeedsRebuildCount() > 0 {
+			s.kickBackgroundReconcile()
+		}
+		return
+	}
+	if s.indexLoadKick == nil {
+		s.finishIndexLoad(s.Index.loadNewPaths(pending))
+		return
+	}
+	s.indexLoadMu.Lock()
+	s.indexLoadPending = append(s.indexLoadPending, pending...)
+	s.indexLoadMu.Unlock()
+	select {
+	case s.indexLoadKick <- struct{}{}:
+	default:
+	}
+}
+
+func (s *Server) runIndexLoads() {
+	defer close(s.indexLoadDone)
+	for {
+		select {
+		case <-s.reconcileStop:
+			return
+		case <-s.indexLoadKick:
+			s.drainIndexLoads()
+		}
+	}
+}
+
+func (s *Server) drainIndexLoads() {
+	for {
+		if stopped(s.reconcileStop) {
+			return
+		}
+		s.indexLoadMu.Lock()
+		names := s.indexLoadPending
+		s.indexLoadPending = nil
+		s.indexLoadMu.Unlock()
+		if len(names) == 0 {
+			return
+		}
+		s.finishIndexLoad(s.Index.loadNewPaths(names))
+	}
+}
+
+func (s *Server) finishIndexLoad(st IndexLoadStats) {
 	if st.Paths > 0 {
 		s.Log(logger.Info, "recording index loaded for new paths (%d segments, %d new paths, %d from disk)",
 			st.Segments, st.Paths, st.DiskPaths)
 	}
-	if s.Index.NeedsRebuildCount() > 0 {
+	if s.Index != nil && s.Index.NeedsRebuildCount() > 0 {
 		s.kickBackgroundReconcile()
 	}
 }

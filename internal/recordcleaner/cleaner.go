@@ -81,7 +81,7 @@ func (c *Cleaner) getSegmentLister() SegmentLister {
 // Initialize initializes a Cleaner.
 func (c *Cleaner) Initialize() {
 	c.ctx, c.ctxCancel = context.WithCancel(context.Background())
-	c.chReloadPathConfs = make(chan map[string]*conf.Path)
+	c.chReloadPathConfs = make(chan map[string]*conf.Path, 1)
 	c.chReloadStorages = make(chan map[string]*conf.Storage)
 	c.chKick = make(chan struct{}, 1)
 	c.done = make(chan struct{})
@@ -113,7 +113,21 @@ func (c *Cleaner) Log(level logger.Level, format string, args ...any) {
 }
 
 // ReloadPathConfs is called by core.Core.
+// The latest configuration is kept and the caller is not blocked by a disk pass
+// already running on the cleaner goroutine.
 func (c *Cleaner) ReloadPathConfs(pathConfs map[string]*conf.Path) {
+	if c == nil || c.chReloadPathConfs == nil {
+		return
+	}
+	select {
+	case c.chReloadPathConfs <- pathConfs:
+		return
+	default:
+	}
+	select {
+	case <-c.chReloadPathConfs:
+	default:
+	}
 	select {
 	case c.chReloadPathConfs <- pathConfs:
 	case <-c.ctx.Done():

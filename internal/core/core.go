@@ -476,74 +476,44 @@ outer:
 
 		case req := <-p.chAPIConfigGlobalPatch:
 			newConf, err := p.doAPIConfigGlobalPatch(req.conf)
-			req.res <- err
-
-			if err == nil {
-				err = p.reloadConf(newConf)
-				if err != nil {
-					p.Log(logger.Error, "%s", err)
-					break outer
-				}
+			if err = p.acceptConfig(newConf, err, req.res); err != nil {
+				p.Log(logger.Error, "%s", err)
+				break outer
 			}
 
 		case req := <-p.chAPIConfigPathDefaultsPatch:
 			newConf, err := p.doAPIConfigPathDefaultsPatch(req.conf)
-			req.res <- err
-
-			if err == nil {
-				err = p.reloadConf(newConf)
-				if err != nil {
-					p.Log(logger.Error, "%s", err)
-					break outer
-				}
+			if err = p.acceptConfig(newConf, err, req.res); err != nil {
+				p.Log(logger.Error, "%s", err)
+				break outer
 			}
 
 		case req := <-p.chAPIConfigPathAdd:
 			newConf, err := p.doAPIConfigPathAdd(req.name, req.conf)
-			req.res <- err
-
-			if err == nil {
-				err = p.reloadConf(newConf)
-				if err != nil {
-					p.Log(logger.Error, "%s", err)
-					break outer
-				}
+			if err = p.acceptConfig(newConf, err, req.res); err != nil {
+				p.Log(logger.Error, "%s", err)
+				break outer
 			}
 
 		case req := <-p.chAPIConfigPathPatch:
 			newConf, err := p.doAPIConfigPathPatch(req.name, req.conf)
-			req.res <- err
-
-			if err == nil {
-				err = p.reloadConf(newConf)
-				if err != nil {
-					p.Log(logger.Error, "%s", err)
-					break outer
-				}
+			if err = p.acceptConfig(newConf, err, req.res); err != nil {
+				p.Log(logger.Error, "%s", err)
+				break outer
 			}
 
 		case req := <-p.chAPIConfigPathReplace:
 			newConf, err := p.doAPIConfigPathReplace(req.name, req.conf)
-			req.res <- err
-
-			if err == nil {
-				err = p.reloadConf(newConf)
-				if err != nil {
-					p.Log(logger.Error, "%s", err)
-					break outer
-				}
+			if err = p.acceptConfig(newConf, err, req.res); err != nil {
+				p.Log(logger.Error, "%s", err)
+				break outer
 			}
 
 		case req := <-p.chAPIConfigPathDelete:
 			newConf, err := p.doAPIConfigPathDelete(req.name)
-			req.res <- err
-
-			if err == nil {
-				err = p.reloadConf(newConf)
-				if err != nil {
-					p.Log(logger.Error, "%s", err)
-					break outer
-				}
+			if err = p.acceptConfig(newConf, err, req.res); err != nil {
+				p.Log(logger.Error, "%s", err)
+				break outer
 			}
 
 		case <-interrupt:
@@ -1172,7 +1142,10 @@ func (p *Core) createResources(initial bool) error {
 }
 
 func (p *Core) closeResources(newConf *conf.Conf) {
-	currentConf := p.conf.Load()
+	p.closeResourcesFrom(p.conf.Load(), newConf)
+}
+
+func (p *Core) closeResourcesFrom(currentConf *conf.Conf, newConf *conf.Conf) {
 
 	closeLogger := newConf == nil ||
 		newConf.LogLevel != currentConf.LogLevel ||
@@ -1640,13 +1613,32 @@ func (p *Core) closeResources(newConf *conf.Conf) {
 	}
 }
 
-func (p *Core) reloadConf(newConf *conf.Conf) error {
-	oldLogger := p.logger
-
-	p.closeResources(newConf)
-
+// acceptConfig stores a validated configuration and unblocks the API caller
+// before path, index and ONVIF work. The caller can list the new path while
+// that work is still running.
+func (p *Core) acceptConfig(newConf *conf.Conf, validateErr error, res chan error) error {
+	if validateErr != nil {
+		res <- validateErr
+		return nil
+	}
+	oldConf := p.conf.Load()
 	p.conf.Store(newConf)
 	p.persistConf(newConf)
+	res <- nil
+	return p.activateConf(oldConf, newConf)
+}
+
+func (p *Core) reloadConf(newConf *conf.Conf) error {
+	oldConf := p.conf.Load()
+	p.conf.Store(newConf)
+	p.persistConf(newConf)
+	return p.activateConf(oldConf, newConf)
+}
+
+func (p *Core) activateConf(oldConf *conf.Conf, newConf *conf.Conf) error {
+	oldLogger := p.logger
+
+	p.closeResourcesFrom(oldConf, newConf)
 
 	err := p.createResources(false)
 	if err != nil {

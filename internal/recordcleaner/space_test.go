@@ -419,6 +419,37 @@ func TestCleanerReclaimContinuesAcrossPasses(t *testing.T) {
 	require.NoError(t, err)
 }
 
+func TestReloadPathConfsDoesNotWaitForDiskPass(t *testing.T) {
+	var mu sync.Mutex
+	mu.Lock()
+
+	c := &Cleaner{
+		PathConfs: map[string]*conf.Path{},
+		Parent:    test.NilLogger,
+		MaintMu:   &mu,
+	}
+	c.Initialize()
+
+	done := make(chan struct{})
+	go func() {
+		c.ReloadPathConfs(map[string]*conf.Path{
+			"cam": {Name: "cam"},
+		})
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		mu.Unlock()
+		c.Close()
+		t.Fatal("ReloadPathConfs blocked while a cleanup pass held the maintenance lock")
+	}
+
+	mu.Unlock()
+	c.Close()
+}
+
 func TestCleanerMaintMuSerializes(t *testing.T) {
 	var mu sync.Mutex
 	var concurrent atomic.Int32

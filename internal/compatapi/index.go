@@ -498,7 +498,12 @@ func (idx *Index) EnablePersist(pathConfs map[string]*conf.Path) {
 // that were not previously indexed load their on-disk snapshot+journal, the
 // same way LoadFromDisk does at startup.
 func (idx *Index) ReloadPathConfs(pathConfs map[string]*conf.Path) IndexLoadStats {
-	var st IndexLoadStats
+	return idx.loadNewPaths(idx.stagePathConfs(pathConfs))
+}
+
+// stagePathConfs applies in-memory path configuration and returns recording
+// paths that were not indexed yet. Disk load of those paths is loadNewPaths.
+func (idx *Index) stagePathConfs(pathConfs map[string]*conf.Path) []string {
 	idx.mutex.Lock()
 	oldConfs := idx.pathConfs
 	idx.pathConfs = pathConfs
@@ -527,7 +532,6 @@ func (idx *Index) ReloadPathConfs(pathConfs map[string]*conf.Path) IndexLoadStat
 		idx.logInfo("recording index identity changed path=%s queued rebuild", name)
 	}
 
-	before := idx.SegmentCount()
 	newNames := make([]string, 0)
 	for _, pathName := range recordingPathNames(pathConfs) {
 		if _, ok := known[pathName]; ok {
@@ -535,20 +539,48 @@ func (idx *Index) ReloadPathConfs(pathConfs map[string]*conf.Path) IndexLoadStat
 		}
 		newNames = append(newNames, pathName)
 	}
-	for i, pathName := range newNames {
+	return newNames
+}
+
+// loadNewPaths reads the on-disk snapshot for paths staged by stagePathConfs.
+// A path removed from the configuration before its turn is skipped.
+func (idx *Index) loadNewPaths(names []string) IndexLoadStats {
+	var st IndexLoadStats
+	if idx == nil || len(names) == 0 {
+		return st
+	}
+	before := idx.SegmentCount()
+	seen := make(map[string]struct{}, len(names))
+	unique := make([]string, 0, len(names))
+	for _, pathName := range names {
+		if _, ok := seen[pathName]; ok {
+			continue
+		}
+		seen[pathName] = struct{}{}
+		unique = append(unique, pathName)
+	}
+	for i, pathName := range unique {
+		idx.mutex.RLock()
+		pe := idx.paths[pathName]
+		if pe != nil && pe.checkedDisk {
+			idx.mutex.RUnlock()
+			continue
+		}
+		pathConfs := idx.pathConfs
+		idx.mutex.RUnlock()
 		pathConf, _, err := conf.FindPathConf(pathConfs, pathName)
-		if err != nil {
+		if err != nil || pathConf == nil {
 			continue
 		}
 		st.Paths++
-		idx.logInfo("loading recording index path=%s (%d/%d)", pathName, i+1, len(newNames))
+		idx.logInfo("loading recording index path=%s (%d/%d)", pathName, i+1, len(unique))
 		tPath := time.Now()
 		ps := idx.loadPath(pathConf, pathName, nil)
 		if ps.fromDisk {
 			st.DiskPaths++
 		}
 		idx.logInfo("loaded recording index path=%s (%d/%d) fromDisk=%v segments=%d in %s",
-			pathName, i+1, len(newNames), ps.fromDisk, ps.segments, time.Since(tPath))
+			pathName, i+1, len(unique), ps.fromDisk, ps.segments, time.Since(tPath))
 	}
 	st.Segments = idx.SegmentCount() - before
 	return st

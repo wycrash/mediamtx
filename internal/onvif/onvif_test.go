@@ -375,3 +375,87 @@ func TestDebugLogsFullPacket(t *testing.T) {
 	got := log.joined()
 	require.Contains(t, got, `[path cam] [onvif] packet {"topic":"tns1:RuleEngine/MyDetector/Custom","operation":"Changed","camera":"2026-10-14T12:00:00Z","producer":"http://10.0.0.5/onvif/events","source":[{"name":"VideoSource","value":"vs1"}],"key":[{"name":"ObjectId","value":"7"}],"data":[{"name":"State","value":"true"}]}`)
 }
+
+type slowUnsub struct {
+	entered chan struct{}
+	release chan struct{}
+	once    sync.Once
+}
+
+func (s *slowUnsub) Done() <-chan struct{} { return nil }
+
+func (s *slowUnsub) Unsubscribe(ctx context.Context) error {
+	s.once.Do(func() { close(s.entered) })
+	select {
+	case <-s.release:
+	case <-ctx.Done():
+	}
+	return nil
+}
+
+type slowUnsubCamera struct {
+	sub slowUnsub
+}
+
+func (c *slowUnsubCamera) Discover(context.Context, time.Duration, string) ([]Found, error) {
+	return nil, nil
+}
+
+func (c *slowUnsubCamera) Probe(context.Context, string, string, string) (ProbeResult, error) {
+	return ProbeResult{}, errors.New("not used")
+}
+
+func (c *slowUnsubCamera) Subscribe(context.Context, string, string, string, string, SubscribeOpts, func(Message)) (Subscription, error) {
+	return &c.sub, nil
+}
+
+func TestReloadDoesNotWaitForUnsubscribe(t *testing.T) {
+	cam := &slowUnsubCamera{
+		sub: slowUnsub{
+			entered: make(chan struct{}),
+			release: make(chan struct{}),
+		},
+	}
+	svc := &Service{Camera: cam}
+	svc.Start(&conf.Conf{
+		Paths: map[string]*conf.Path{
+			"cam": {
+				Enabled:      true,
+				OnvifAddress: "http://10.0.0.5/onvif/device_service",
+				OnvifEvents:  true,
+			},
+		},
+	})
+	require.Eventually(t, func() bool {
+		for _, dev := range svc.Devices() {
+			if dev.Subscribed {
+				return true
+			}
+		}
+		return false
+	}, time.Second, 5*time.Millisecond)
+
+	done := make(chan struct{})
+	go func() {
+		svc.Reload(&conf.Conf{Paths: map[string]*conf.Path{}})
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		close(cam.sub.release)
+		svc.Close()
+		t.Fatal("Reload waited for ONVIF unsubscribe")
+	}
+
+	select {
+	case <-cam.sub.entered:
+	case <-time.After(2 * time.Second):
+		close(cam.sub.release)
+		svc.Close()
+		t.Fatal("unsubscribe did not start")
+	}
+	close(cam.sub.release)
+	svc.Close()
+}

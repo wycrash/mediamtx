@@ -135,6 +135,7 @@ type Service struct {
 	debug     atomic.Bool
 	paths     map[string]*conf.Path
 	sessions  map[string]*session
+	stopWG    sync.WaitGroup
 	discovery discoveryState
 }
 
@@ -173,12 +174,15 @@ func (s *Service) Close() {
 	for _, sess := range sessions {
 		<-sess.done
 	}
+	s.stopWG.Wait()
 	if job != nil {
 		<-job.done
 	}
 }
 
 // Reload applies a new configuration. Path-only changes keep healthy sessions.
+// Sessions that must stop are cancelled here; waiting for their unsubscribe
+// runs in the background so a path add or delete is not stuck on the camera.
 func (s *Service) Reload(c *conf.Conf) {
 	s.mu.Lock()
 	if s.closed {
@@ -187,18 +191,23 @@ func (s *Service) Reload(c *conf.Conf) {
 	}
 	s.applyLocked(c)
 	stop := s.takeStopsLocked()
-	s.mu.Unlock()
-
 	for _, sess := range stop {
 		sess.cancel()
-		<-sess.done
 	}
-
-	s.mu.Lock()
+	if len(stop) > 0 {
+		s.stopWG.Add(len(stop))
+	}
 	if !s.closed {
 		s.startMissingLocked()
 	}
 	s.mu.Unlock()
+
+	for _, sess := range stop {
+		go func(done <-chan struct{}) {
+			defer s.stopWG.Done()
+			<-done
+		}(sess.done)
+	}
 }
 
 // Enabled reports whether the service is running.
