@@ -127,6 +127,9 @@ func (s *Server) onRequest(ctx *gin.Context) {
 		pathName := strings.TrimSuffix(strings.TrimSuffix(pa, "/"), "/ranges.json")
 		s.onRangesJSON(ctx, pathName)
 
+	case strings.HasSuffix(pa, "/events.json"):
+		s.onEventsJSON(ctx, strings.TrimSuffix(pa, "/events.json"))
+
 	case strings.HasSuffix(pa, "/preview.mp4"):
 		pathName := strings.TrimSuffix(pa, "/preview.mp4")
 		s.onLatestPreview(ctx, pathName, "video/mp4", "snapshot.mp4")

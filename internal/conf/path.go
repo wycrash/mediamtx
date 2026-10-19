@@ -384,6 +384,17 @@ type Path struct {
 	RunOnUnread                string   `json:"runOnUnread"`
 	RunOnRecordSegmentCreate   string   `json:"runOnRecordSegmentCreate"`
 	RunOnRecordSegmentComplete string   `json:"runOnRecordSegmentComplete"`
+
+	// ONVIF. The path with onvifAddress owns the subscription.
+	// A second stream sets onvifPath to that path's name.
+
+	OnvifAddress      string `json:"onvifAddress"`      // Device service URL, for example http://192.168.1.100:8000. This path owns the subscription and the event journal.
+	OnvifUser         string `json:"onvifUser"`         // ONVIF username.
+	OnvifPass         string `json:"onvifPass"`         // ONVIF password.
+	OnvifEvents       bool   `json:"onvifEvents"`       // Subscribe to events. Ignored when onvifAddress is empty.
+	OnvifPath         string `json:"onvifPath"`         // Name of the path that owns the camera. Mutually exclusive with onvifAddress.
+	RunOnEvent        string `json:"runOnEvent"`        // Command run once for each stored event edge.
+	RunOnEventRestart bool   `json:"runOnEventRestart"` // Restart the command if it exits.
 }
 
 func (pconf *Path) setDefaults() {
@@ -392,6 +403,7 @@ func (pconf *Path) setDefaults() {
 	pconf.Source = "publisher"
 	pconf.SourceOnDemandStartTimeout = 10 * Duration(time.Second)
 	pconf.SourceOnDemandCloseAfter = 10 * Duration(time.Second)
+	pconf.OnvifEvents = false
 
 	// Always available
 	pconf.AlwaysAvailableRecorded = true
@@ -1060,6 +1072,51 @@ func (pconf *Path) validate(
 		return fmt.Errorf("'runOnDemand' and 'runOnUnDemand' can be used only when source is 'publisher'")
 	}
 
+	if err := pconf.validateOnvif(conf, name); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func (pconf *Path) validateOnvif(conf *Conf, name string) error {
+	if pconf.Regexp != nil && (pconf.OnvifAddress != "" || pconf.OnvifPath != "") {
+		return fmt.Errorf("a path with a regular expression does not support ONVIF")
+	}
+	if pconf.OnvifAddress != "" && pconf.OnvifPath != "" {
+		return fmt.Errorf("'onvifAddress' and 'onvifPath' cannot be used together")
+	}
+	if pconf.OnvifAddress != "" {
+		endpoint, key, err := ParseOnvifAddress(pconf.OnvifAddress)
+		if err != nil {
+			return fmt.Errorf("invalid 'onvifAddress': %w", err)
+		}
+		pconf.OnvifAddress = endpoint
+		for otherName, other := range conf.Paths {
+			if other == nil || other == pconf || other.OnvifAddress == "" {
+				continue
+			}
+			_, otherKey, err := ParseOnvifAddress(other.OnvifAddress)
+			if err != nil {
+				continue
+			}
+			if otherKey == key {
+				return fmt.Errorf("'onvifAddress' %s is used by both '%s' and '%s'", key, name, otherName)
+			}
+		}
+	}
+	if pconf.OnvifPath != "" {
+		if pconf.OnvifPath == name {
+			return fmt.Errorf("'onvifPath' cannot point at itself")
+		}
+		owner := conf.Paths[pconf.OnvifPath]
+		if owner == nil || owner.OnvifAddress == "" {
+			return fmt.Errorf("'onvifPath' '%s' must name a path with onvifAddress", pconf.OnvifPath)
+		}
+		if owner.OnvifPath != "" {
+			return fmt.Errorf("'onvifPath' '%s' must point at the path that owns the camera", pconf.OnvifPath)
+		}
+	}
 	return nil
 }
 

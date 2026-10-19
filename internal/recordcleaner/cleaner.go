@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/bluenviron/mediamtx/internal/conf"
+	"github.com/bluenviron/mediamtx/internal/eventstore"
 	"github.com/bluenviron/mediamtx/internal/logger"
 	"github.com/bluenviron/mediamtx/internal/recordstore"
 )
@@ -242,13 +243,17 @@ func (c *Cleaner) processPathAge(now time.Time, pathName string) {
 		return
 	}
 
+	end := now.Add(-time.Duration(pathConf.RecordDeleteAfter))
 	n, err := c.deleteExpiredSegments(now, pathName, pathConf)
 	if err != nil && !errors.Is(err, recordstore.ErrNoSegmentsFound) {
 		c.Log(logger.Warn, "path %s: %v", pathName, err)
-		return
-	}
-	if n > 0 {
+	} else if n > 0 {
 		c.deleteEmptyDirs(pathConf)
+	}
+	if pathConf.OnvifAddress != "" {
+		if err := eventstore.DeleteBefore(eventstore.LayoutFor(pathConf), end); err != nil {
+			c.Log(logger.Warn, "path %s: events: %v", pathName, err)
+		}
 	}
 }
 

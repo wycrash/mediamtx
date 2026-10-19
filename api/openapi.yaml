@@ -63,6 +63,243 @@ components:
         - $ref: "#/components/schemas/StaticSourceTypeSpecificSRT"
         - $ref: "#/components/schemas/StaticSourceTypeSpecificWebRTC"
 
+    OnvifFound:
+      type: object
+      description: One camera announced by WS-Discovery.
+      properties:
+        address:
+          type: string
+          description: First device service URL.
+        name:
+          type: string
+          description: Scope name. Omitted when the camera does not advertise one.
+        hardware:
+          type: string
+          description: Scope hardware. Omitted when the camera does not advertise one.
+        type:
+          type: string
+          description: camera, nvr, display, or analytics. Omitted when the device does not advertise a known type. A recorder wins over a transmitter.
+          enum: [camera, nvr, display, analytics]
+        xaddrs:
+          type: array
+          description: Device service URLs. Omitted when empty.
+          items:
+            type: string
+        owner:
+          type: string
+          description: Path that owns this camera. Empty when no configured path has this address.
+        paths:
+          type: array
+          description: Owner path and streams linked to it with onvifPath. Empty when owner is empty.
+          items:
+            type: string
+        rtsp:
+          type: boolean
+          description: True when the owner or a linked path has an RTSP source.
+
+    OnvifDiscovery:
+      type: object
+      description: Snapshot of the discovery scan. Poll while running is true.
+      properties:
+        running:
+          type: boolean
+          description: True while the scan is still listening.
+        devices:
+          type: array
+          items:
+            $ref: "#/components/schemas/OnvifFound"
+        error:
+          type: string
+          description: Set when the scan fails. Omitted after a successful scan.
+
+    OnvifProbeRequest:
+      type: object
+      required: [address]
+      properties:
+        address:
+          type: string
+          description: Camera URL, for example http://192.168.1.100:8000. The device service path is appended when missing.
+        user:
+          type: string
+        pass:
+          type: string
+          description: Used for this request only. It is not stored.
+
+    OnvifProfile:
+      type: object
+      description: Field names match the encoded Go struct.
+      properties:
+        Token:
+          type: string
+        Name:
+          type: string
+        Role:
+          type: string
+          description: main, sub, or an empty string for any other profile.
+        Width:
+          type: integer
+          format: int64
+        Height:
+          type: integer
+          format: int64
+        StreamURI:
+          type: string
+          description: RTSP URI returned by the camera, without injected credentials.
+
+    OnvifProbe:
+      type: object
+      description: Field names match the encoded Go struct. The password is not returned.
+      properties:
+        Endpoint:
+          type: string
+          description: Canonical device service URL.
+        Key:
+          type: string
+          description: scheme://host:port. Paths that share this key are one camera.
+        Manufacturer:
+          type: string
+        Model:
+          type: string
+        Firmware:
+          type: string
+        Serial:
+          type: string
+        Events:
+          type: boolean
+          description: True when the camera exposes an event service.
+        Topics:
+          type: array
+          description: Concrete event topics reported by GetEventProperties. Each entry is a path that can be used in onvifEventTopics.
+          items:
+            type: string
+        Profiles:
+          type: array
+          items:
+            $ref: "#/components/schemas/OnvifProfile"
+
+    OnvifStreamRequest:
+      type: object
+      properties:
+        profile:
+          type: string
+          description: main, sub, a profile token, or a profile name. Empty means main.
+        name:
+          type: string
+          description: Path name. The owner uses the request name when this is empty. Another stream becomes {name}-sub.
+        record:
+          type: boolean
+          nullable: true
+          description: Empty means false.
+        events:
+          type: boolean
+          nullable: true
+          description: Empty means true on the owner. The first stream with events true becomes the owner.
+
+    OnvifPathsAddRequest:
+      type: object
+      required: [name, address, streams]
+      properties:
+        name:
+          type: string
+          description: Name of the owner path, or of the single extra stream when the camera is already owned.
+        address:
+          type: string
+        user:
+          type: string
+        pass:
+          type: string
+          description: Stored on the owner path. It is not stored when the camera already has an owner.
+        streams:
+          type: array
+          minItems: 1
+          description: Only the listed streams are created.
+          items:
+            $ref: "#/components/schemas/OnvifStreamRequest"
+
+    OnvifPathsAdd:
+      type: object
+      properties:
+        paths:
+          type: array
+          items:
+            type: string
+
+    OnvifDevice:
+      type: object
+      description: Camera derived from configured paths. There is no separate device registry.
+      properties:
+        address:
+          type: string
+        owner:
+          type: string
+          description: Path that owns the subscription.
+        paths:
+          type: array
+          items:
+            type: string
+        subscribed:
+          type: boolean
+        eventsSupported:
+          type: boolean
+        lastError:
+          type: string
+          description: Omitted when the session has no error.
+        dropped:
+          type: integer
+          format: uint64
+          description: Notifications dropped because the event queue was full.
+
+    OnvifDeviceList:
+      type: object
+      properties:
+        devices:
+          type: array
+          items:
+            $ref: "#/components/schemas/OnvifDevice"
+
+    OnvifStatus:
+      type: object
+      properties:
+        enabled:
+          type: boolean
+        sessions:
+          type: integer
+          format: int64
+        dropped:
+          type: integer
+          format: uint64
+        unsupported:
+          type: integer
+          format: int64
+          description: Sessions whose camera has no event service.
+
+    OnvifEvent:
+      type: object
+      properties:
+        from:
+          type: integer
+          format: int64
+          description: Server receive time, unix seconds.
+        duration:
+          type: integer
+          format: int64
+          description: Seconds. Zero for a point event such as a line crossing.
+        class:
+          type: string
+          description: motion, line, field, input, tamper, or other.
+        topic:
+          type: string
+        source:
+          type: string
+
+    OnvifEventList:
+      type: object
+      properties:
+        events:
+          type: array
+          items:
+            $ref: "#/components/schemas/OnvifEvent"
+
     ErrorStatus:
       type: string
       enum:
@@ -103,12 +340,6 @@ components:
         - "no"
         - optional
         - strict
-
-    IndexEngine:
-      type: string
-      enum:
-        - hybrid
-        - inram
 
     MoQSessionState:
       type: string
@@ -242,6 +473,12 @@ components:
         - idle
         - read
         - publish
+
+    IndexEngine:
+      type: string
+      enum:
+        - inram
+        - hybrid
 
     RecordFormat:
       type: string
@@ -406,6 +643,7 @@ components:
           type: boolean
         compatAPIIndexEngine:
           $ref: "#/components/schemas/IndexEngine"
+          description: "inram: pin every day journal. hybrid: load days on demand."
         compatAPIIndexEngineHybridDay:
           type: integer
           format: int64
@@ -556,6 +794,51 @@ components:
         multicastSRTPPort:
           type: integer
           format: int64
+        onvif:
+          type: boolean
+          description: Enable discovery, probe and event subscriptions.
+        onvifDebug:
+          type: boolean
+          description: Log every ONVIF notification in full at info level.
+        onvifDiscoveryInterface:
+          type: string
+          description: Network interface name or IP for multicast discovery. Empty uses the default interface.
+        onvifDiscoveryTimeout:
+          type: string
+          description: How long one discovery scan listens.
+        onvifEventQueue:
+          type: integer
+          format: int64
+          description: In-memory queue between the pull callback and the journal.
+        onvifEventSyncEvery:
+          type: integer
+          format: int64
+          description: fsync the event journal after this many records.
+        onvifEventTopics:
+          type: array
+          description: Topic filter. Empty uses the built-in set. "*" subscribes to every topic.
+          items:
+            type: string
+        onvifMessageLimit:
+          type: integer
+          format: int64
+          description: Maximum notifications returned by one pull.
+        onvifProbeConcurrency:
+          type: integer
+          format: int64
+          description: Reserved.
+        onvifPullTimeout:
+          type: string
+          description: PullPoint long-poll timeout.
+        onvifReconnectPause:
+          type: string
+          description: Pause before subscribing again after an error.
+        onvifRenewMargin:
+          type: string
+          description: How long before expiry the subscription is renewed.
+        onvifSubscriptionDuration:
+          type: string
+          description: PullPoint subscription lifetime.
         playback:
           type: boolean
           description: Playback
@@ -890,62 +1173,6 @@ components:
           type: integer
           format: int64
 
-    CompatIndexRebuild:
-      type: object
-      properties:
-        all:
-          type: boolean
-          description: All is true when every recording path was queued.
-        queued:
-          type: integer
-          format: int64
-          description: Queued is how many paths are marked for rebuild after this request (deduplicated; concurrent requests coalesce into one worker).
-        status:
-          $ref: "#/components/schemas/OKStatus"
-          description: Status is always "ok" when the request was accepted.
-
-    CompatIndexStatus:
-      type: object
-      properties:
-        current:
-          type: string
-          description: Current is the path currently being processed. Empty when idle.
-        debug:
-          $ref: "#/components/schemas/CompatIndexDebug"
-          description: Debug holds hot-path counters for load diagnosis.
-        goroutines:
-          type: integer
-          format: int64
-          description: Goroutines is runtime.NumGoroutine().
-        heapAlloc:
-          type: integer
-          format: uint64
-          description: HeapAlloc is Go heap allocated bytes (runtime.MemStats.HeapAlloc).
-        pendingDayRepairs:
-          type: integer
-          format: int64
-          description: PendingDayRepairs is how many damaged day journals still need rebuild.
-        queue:
-          type: array
-          description: Queue is paths waiting for a forced rebuild (incomplete), excluding Current.
-          items:
-            type: string
-        queued:
-          type: integer
-          format: int64
-          description: Queued is len(Queue) plus 1 when Current is a forced rebuild target.
-        segments:
-          type: integer
-          format: int64
-          description: Segments is the number of in-memory index segments.
-        started:
-          type: string
-          description: Started is when the current worker pass began. Null when idle.
-          nullable: true
-        state:
-          $ref: "#/components/schemas/CompatIndexStatusState"
-          description: State is idle, rebuild (forced disk rebuild), or update (periodic edge scan).
-
     CompatIndexDebug:
       type: object
       properties:
@@ -986,6 +1213,68 @@ components:
         writeMetaAvgMs:
           type: number
           format: double
+
+    CompatIndexRebuild:
+      type: object
+      properties:
+        all:
+          type: boolean
+          description: All is true when every recording path was queued.
+        path:
+          type: string
+          description: Path is set when a single path was queued.
+        queued:
+          type: integer
+          format: int64
+          description: Queued is how many paths are marked for rebuild after this request (deduplicated; concurrent requests coalesce into one worker).
+        status:
+          $ref: "#/components/schemas/OKStatus"
+          description: Status is always "ok" when the request was accepted.
+
+    CompatIndexStatus:
+      type: object
+      properties:
+        current:
+          type: string
+          description: Current is the path currently being processed. Empty when idle.
+        debug:
+          type: object
+          description: Debug holds hot-path counters since process start (or last reset interval).
+          allOf:
+            - $ref: "#/components/schemas/CompatIndexDebug"
+          nullable: true
+        goroutines:
+          type: integer
+          format: int64
+          description: Goroutines is runtime.NumGoroutine().
+        heapAlloc:
+          type: integer
+          format: uint64
+          description: HeapAlloc is Go heap allocated bytes (runtime.MemStats.HeapAlloc).
+        pendingDayRepairs:
+          type: integer
+          format: int64
+          description: PendingDayRepairs is how many damaged day journals still need rebuild.
+        queue:
+          type: array
+          description: Queue is paths waiting for a forced rebuild (incomplete), excluding Current.
+          items:
+            type: string
+        queued:
+          type: integer
+          format: int64
+          description: Queued is len(Queue) plus 1 when Current is a forced rebuild target.
+        segments:
+          type: integer
+          format: int64
+          description: Segments is the number of in-memory index segments.
+        started:
+          type: string
+          description: Started is when the current worker pass began. Null when idle.
+          nullable: true
+        state:
+          $ref: "#/components/schemas/CompatIndexStatusState"
+          description: State is idle, rebuild (forced disk rebuild), or update (periodic edge scan).
 
     Info:
       type: object
@@ -1179,6 +1468,21 @@ components:
         name:
           type: string
           description: filled by Validate()
+        onvifAddress:
+          type: string
+          description: Device service URL, for example http://192.168.1.100:8000. This path owns the subscription and the event journal.
+        onvifEvents:
+          type: boolean
+          description: Subscribe to events. Ignored when onvifAddress is empty.
+        onvifPass:
+          type: string
+          description: ONVIF password.
+        onvifPath:
+          type: string
+          description: Name of the path that owns the camera. Mutually exclusive with onvifAddress.
+        onvifUser:
+          type: string
+          description: ONVIF username.
         overridePublisher:
           type: boolean
           description: Publisher source
@@ -1403,6 +1707,12 @@ components:
           type: boolean
         runOnDemandStartTimeout:
           type: string
+        runOnEvent:
+          type: string
+          description: Command run once for each stored event edge.
+        runOnEventRestart:
+          type: boolean
+          description: Restart the command if it exits.
         runOnInit:
           type: string
           description: Hooks
@@ -1518,7 +1828,7 @@ components:
         deleteUntilPercent:
           type: number
           format: double
-          description: When > 0, reclaim disk space by deleting oldest recordings until used space is <= this percent. Must be lower than maxUsedPercent. Recording continues at maxUsedPercent while this is set. 0 or unset keeps refuse-only behavior.
+          description: "When > 0, reclaim disk space by deleting oldest recordings until used space is <= this percent. Must be lower than maxUsedPercent. 0 or unset: refuse-only behavior at maxUsedPercent (no automatic deletes)."
           nullable: true
         disks:
           type: array
@@ -1528,11 +1838,11 @@ components:
         maxUsedPercent:
           type: number
           format: double
-          description: Threshold for disk used space (%). Without deleteUntilPercent, skip the disk when used >= this (0 = ENOSPC only). With deleteUntilPercent > 0, do not refuse writes; start deleting oldest segments so new recordings can continue.
+          description: "Threshold for disk used space (%). Without deleteUntilPercent: skip the disk when used >= this value (0 = ENOSPC only). With deleteUntilPercent > 0: do not refuse writes; start deleting oldest segments when used >= this value so new recordings can continue."
           nullable: true
         strategy:
           $ref: "#/components/schemas/StorageStrategy"
-          description: How to pick a disk for a new recording segment (roundRobin, fillFirst).
+          description: How to pick a disk for a new recording segment (roundRobin, fillFirst). roundRobin alternates disks independently for each path.
 
     PathList:
       type: object
@@ -3059,6 +3369,9 @@ components:
     SystemMetricsDisk:
       type: object
       properties:
+        error:
+          type: string
+          description: Error is set when Status is "error".
         freeBytes:
           type: integer
           format: uint64
@@ -3067,6 +3380,9 @@ components:
         readBytesPerSec:
           type: number
           format: double
+        status:
+          type: string
+          description: Status is "ok" when MediaMTX can write to the disk, "error" when the volume is missing, hung, or skipped after a write failure.
         totalBytes:
           type: integer
           format: uint64
@@ -3079,16 +3395,6 @@ components:
         writeBytesPerSec:
           type: number
           format: double
-        status:
-          type: string
-          description: ok when the disk is writable, error when it is missing or MediaMTX
-            cannot write to it.
-          enum:
-            - ok
-            - error
-        error:
-          type: string
-          description: Set when status is error.
 
     SystemMetricsMemory:
       type: object
@@ -3706,6 +4012,261 @@ paths:
                 $ref: "#/components/schemas/Error"
         "404":
           description: path not found.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "500":
+          description: server error.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
+  /v3/onvif/discover/start:
+    post:
+      operationId: onvifDiscoverStart
+      tags: [ONVIF]
+      summary: starts an ONVIF discovery scan.
+      description: The body is empty. Duration and interface come from onvifDiscoveryTimeout and onvifDiscoveryInterface. Poll /v3/onvif/discover/result while running is true.
+      responses:
+        "200":
+          description: the scan has started.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OnvifDiscovery"
+        "409":
+          description: ONVIF is disabled, or a scan is already running.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
+  /v3/onvif/discover/stop:
+    post:
+      operationId: onvifDiscoverStop
+      tags: [ONVIF]
+      summary: stops the discovery scan.
+      description: Returns the cameras found so far. The body is empty.
+      responses:
+        "200":
+          description: the scan has stopped.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OnvifDiscovery"
+        "409":
+          description: ONVIF is disabled.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
+  /v3/onvif/discover/result:
+    get:
+      operationId: onvifDiscoverResult
+      tags: [ONVIF]
+      summary: returns the current discovery scan.
+      description: Cameras are published about once per second while the scan is running.
+      responses:
+        "200":
+          description: the request was successful.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OnvifDiscovery"
+        "409":
+          description: ONVIF is disabled.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
+  /v3/onvif/probe:
+    post:
+      operationId: onvifProbe
+      tags: [ONVIF]
+      summary: reads identity, profiles and stream URIs from one camera.
+      description: The password is not stored and is not written to the log.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/OnvifProbeRequest"
+      responses:
+        "200":
+          description: the request was successful.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OnvifProbe"
+        "400":
+          description: the body is not JSON.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "409":
+          description: ONVIF is disabled.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "502":
+          description: the address is invalid or the camera did not answer within 30s.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
+  /v3/onvif/paths/add:
+    post:
+      operationId: onvifPathsAdd
+      tags: [ONVIF]
+      summary: creates paths for the streams listed in the request.
+      description: |
+        An empty streams list is rejected. The owner is the first stream with events true, otherwise the first stream.
+        A later add of the same address does not open a second subscription. The new path receives onvifPath pointing at the existing owner.
+        If a generated name already exists, the request is rejected.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/OnvifPathsAddRequest"
+      responses:
+        "200":
+          description: the paths were created.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OnvifPathsAdd"
+        "400":
+          description: invalid request, or a path name is already taken.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "409":
+          description: ONVIF is disabled.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "502":
+          description: the camera did not answer the probe.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
+  /v3/onvif/devices:
+    get:
+      operationId: onvifDevices
+      tags: [ONVIF]
+      summary: lists cameras derived from paths.
+      description: Each item is the path that owns onvifAddress, plus paths linked to it with onvifPath.
+      responses:
+        "200":
+          description: the request was successful.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OnvifDeviceList"
+        "409":
+          description: ONVIF is disabled.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
+  /v3/onvif/status:
+    get:
+      operationId: onvifStatus
+      tags: [ONVIF]
+      summary: returns ONVIF subscription counters.
+      description: ""
+      responses:
+        "200":
+          description: the request was successful.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OnvifStatus"
+        "409":
+          description: ONVIF is disabled.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
+  /{path}/events.json:
+    get:
+      operationId: onvifEvents
+      tags: [ONVIF]
+      servers:
+        - url: http://localhost:8877
+          description: Compat API address (compatAPIAddress).
+      summary: returns stored ONVIF events for a path.
+      description: |
+        Served by the Compat API, not by port 9997. A path with onvifPath reads the owner journal.
+        Time bounds are unix seconds, the same parameters as ranges.json.
+        sort orders by the event start. desc is newest first and is the default.
+        limit is applied after sorting, so the default keeps the newest events.
+      parameters:
+        - name: path
+          in: path
+          required: true
+          description: Path name. A name may contain slashes.
+          schema:
+            type: string
+        - name: opened_at_gte
+          in: query
+          description: Include events at or after this unix time.
+          schema:
+            type: integer
+            format: int64
+        - name: opened_at_lt
+          in: query
+          description: Include events before this unix time.
+          schema:
+            type: integer
+            format: int64
+        - name: class
+          in: query
+          description: motion, line, field, input, tamper, or other.
+          schema:
+            type: string
+        - name: sort
+          in: query
+          description: asc is oldest first. desc is newest first. Omitted or any other value means desc.
+          schema:
+            type: string
+            enum: [asc, desc]
+            default: desc
+        - name: limit
+          in: query
+          description: Maximum number of events. Default 1000, maximum 10000. Applied after sort.
+          schema:
+            type: integer
+            format: int64
+      responses:
+        "200":
+          description: the request was successful.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OnvifEventList"
+        "400":
+          description: invalid path.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "401":
+          description: authentication failed.
           content:
             application/json:
               schema:

@@ -350,6 +350,22 @@ type Conf struct {
 	CompatAPIIndexEngine          IndexEngine `json:"compatAPIIndexEngine"`          // inram: pin every day journal. hybrid: load days on demand.
 	CompatAPIIndexEngineHybridDay int         `json:"compatAPIIndexEngineHybridDay"` // Days of segment index kept in RAM when engine is hybrid. If >= archive depth, same as inram.
 
+	// ONVIF control and events.
+
+	Onvif                     bool     `json:"onvif"`                     // Enable discovery, probe and event subscriptions.
+	OnvifDebug                bool     `json:"onvifDebug"`                // Log every ONVIF notification in full at info level.
+	OnvifDiscoveryTimeout     Duration `json:"onvifDiscoveryTimeout"`     // How long one discovery scan listens.
+	OnvifDiscoveryInterface   string   `json:"onvifDiscoveryInterface"`   // Network interface name or IP for multicast discovery. Empty uses the default interface.
+	OnvifProbeConcurrency     int      `json:"onvifProbeConcurrency"`     // Reserved.
+	OnvifPullTimeout          Duration `json:"onvifPullTimeout"`          // PullPoint long-poll timeout.
+	OnvifMessageLimit         int      `json:"onvifMessageLimit"`         // Maximum notifications returned by one pull.
+	OnvifSubscriptionDuration Duration `json:"onvifSubscriptionDuration"` // PullPoint subscription lifetime.
+	OnvifRenewMargin          Duration `json:"onvifRenewMargin"`          // How long before expiry the subscription is renewed.
+	OnvifReconnectPause       Duration `json:"onvifReconnectPause"`       // Pause before subscribing again after an error.
+	OnvifEventQueue           int      `json:"onvifEventQueue"`           // In-memory queue between the pull callback and the journal.
+	OnvifEventSyncEvery       int      `json:"onvifEventSyncEvery"`       // fsync the event journal after this many records.
+	OnvifEventTopics          []string `json:"onvifEventTopics"`          // Topic filter. Empty uses the built-in set. "*" subscribes to every topic.
+
 	// RTSP server
 	RTSP                  bool             `json:"rtsp"`
 	RTSPDisable           *bool            `json:"rtspDisable,omitempty" deprecated:"true"`
@@ -514,6 +530,17 @@ func (conf *Conf) setDefaults() {
 	conf.CompatAPIIndexUpdateInterval = 10 * Duration(time.Minute)
 	conf.CompatAPIIndexEngine = IndexEngineHybrid
 	conf.CompatAPIIndexEngineHybridDay = 1
+
+	conf.OnvifDiscoveryTimeout = 5 * Duration(time.Second)
+	conf.OnvifProbeConcurrency = 8
+	conf.OnvifPullTimeout = 30 * Duration(time.Second)
+	conf.OnvifMessageLimit = 64
+	conf.OnvifSubscriptionDuration = Duration(time.Hour)
+	conf.OnvifRenewMargin = 5 * Duration(time.Minute)
+	conf.OnvifReconnectPause = 5 * Duration(time.Second)
+	conf.OnvifEventQueue = 256
+	conf.OnvifEventSyncEvery = 32
+	conf.OnvifEventTopics = []string{}
 
 	// RTSP server
 	conf.RTSP = true
@@ -893,6 +920,33 @@ func (conf *Conf) Validate(l logger.Writer) error {
 		}
 		if !conf.HLS {
 			return fmt.Errorf("'hls' must be enabled when compatAPI is enabled (live playlists are served by the HLS muxer)")
+		}
+	}
+
+	if conf.Onvif {
+		if conf.OnvifDiscoveryTimeout <= 0 {
+			return fmt.Errorf("'onvifDiscoveryTimeout' must be > 0")
+		}
+		if conf.OnvifProbeConcurrency < 1 {
+			return fmt.Errorf("'onvifProbeConcurrency' must be >= 1")
+		}
+		if conf.OnvifPullTimeout <= 0 {
+			return fmt.Errorf("'onvifPullTimeout' must be > 0")
+		}
+		if conf.OnvifMessageLimit < 1 {
+			return fmt.Errorf("'onvifMessageLimit' must be >= 1")
+		}
+		if conf.OnvifSubscriptionDuration <= conf.OnvifRenewMargin {
+			return fmt.Errorf("'onvifSubscriptionDuration' must be greater than 'onvifRenewMargin'")
+		}
+		if conf.OnvifReconnectPause < 0 {
+			return fmt.Errorf("'onvifReconnectPause' must be >= 0")
+		}
+		if conf.OnvifEventQueue < 1 {
+			return fmt.Errorf("'onvifEventQueue' must be >= 1")
+		}
+		if conf.OnvifEventSyncEvery < 1 {
+			return fmt.Errorf("'onvifEventSyncEvery' must be >= 1")
 		}
 	}
 

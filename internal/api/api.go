@@ -95,6 +95,7 @@ type API struct {
 	RTMPSServer    defs.APIRTMPServer
 	HLSServer      defs.APIHLSServer
 	CompatServer   defs.APICompatServer
+	Onvif          onvifController
 	WebRTCServer   defs.APIWebRTCServer
 	SRTServer      defs.APISRTServer
 	MoQServer      defs.APIMoQServer
@@ -141,6 +142,13 @@ func (a *API) Initialize() error {
 	group.PATCH("/config/paths/patch/*name", a.onConfigPathsPatch)
 	group.POST("/config/paths/replace/*name", a.onConfigPathsReplace)
 	group.DELETE("/config/paths/delete/*name", a.onConfigPathsDelete)
+	group.POST("/onvif/discover/start", a.onOnvifDiscoverStart)
+	group.POST("/onvif/discover/stop", a.onOnvifDiscoverStop)
+	group.GET("/onvif/discover/result", a.onOnvifDiscoverResult)
+	group.POST("/onvif/probe", a.onOnvifProbe)
+	group.POST("/onvif/paths/add", a.onOnvifPathsAdd)
+	group.GET("/onvif/devices", a.onOnvifDevices)
+	group.GET("/onvif/status", a.onOnvifStatus)
 
 	group.GET("/paths/list", a.onPathsList)
 	group.GET("/paths/get/*name", a.onPathsGet)
@@ -452,5 +460,15 @@ func (a *API) SetCompatServer(cs defs.APICompatServer) {
 	}
 	a.mutex.Lock()
 	a.CompatServer = cs
+	a.mutex.Unlock()
+}
+
+// SetOnvif attaches the ONVIF service. A nil service disables the routes.
+func (a *API) SetOnvif(svc onvifController) {
+	if a == nil {
+		return
+	}
+	a.mutex.Lock()
+	a.Onvif = svc
 	a.mutex.Unlock()
 }

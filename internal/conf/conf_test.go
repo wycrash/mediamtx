@@ -92,6 +92,7 @@ func TestConfFromFile(t *testing.T) {
 			RPICameraMJPEGQuality:      60,
 			RunOnDemandStartTimeout:    5 * Duration(time.Second),
 			RunOnDemandCloseAfter:      10 * Duration(time.Second),
+			OnvifEvents:                false,
 		}, pa)
 	})
 

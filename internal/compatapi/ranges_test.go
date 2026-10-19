@@ -215,6 +215,9 @@ func TestGenerateM3U8(t *testing.T) {
 	require.Contains(t, body, "c.ts")
 	require.Contains(t, body, "#EXT-X-DISCONTINUITY")
 	require.Contains(t, body, "#EXT-X-PROGRAM-DATE-TIME:2025-09-21T15:00:00.000+03:00")
+	// Hole at +40s: PDT is the file start, not origin+2*segment (15:00:20).
+	require.Contains(t, body, "#EXT-X-PROGRAM-DATE-TIME:2025-09-21T15:00:40.000+03:00")
+	require.NotContains(t, body, "#EXT-X-PROGRAM-DATE-TIME:2025-09-21T15:00:20.000+03:00")
 	require.Contains(t, body, "#EXT-X-ENDLIST")
 }
 
@@ -342,6 +345,9 @@ func TestGenerateArchiveM3U8FMP4DiscontinuityOnGap(t *testing.T) {
 	require.Contains(t, body, "b.mp4?hls=media&sn=0&td=0")
 	require.Contains(t, body, "#EXTINF:1.000,")
 	require.NotContains(t, body, "#EXT-X-BYTERANGE")
+	require.Contains(t, body, "#EXT-X-PROGRAM-DATE-TIME:1970-01-01T00:16:40.000+00:00")
+	require.Contains(t, body, "#EXT-X-PROGRAM-DATE-TIME:1970-01-01T00:17:40.000+00:00")
+	require.NotContains(t, body, "#EXT-X-PROGRAM-DATE-TIME:1970-01-01T00:16:41.000+00:00")
 }
 
 func TestFormatProgramDateTimeUTC(t *testing.T) {
@@ -485,9 +491,10 @@ func TestGenerateArchiveM3U8IndexedFMP4NoDisk(t *testing.T) {
 	require.NotContains(t, body, "skip.mp4")
 	require.NotContains(t, body, "#EXT-X-DISCONTINUITY")
 	require.NotContains(t, body, "#EXT-X-START")
-	// PDT follows playlist time, not the later file's Start (12s).
+	// 2s hole: PDT is the file start (preview time), not origin+EXTINF.
 	require.Contains(t, body, "#EXT-X-PROGRAM-DATE-TIME:1970-01-01T00:16:40.000+00:00")
-	require.Contains(t, body, "#EXT-X-PROGRAM-DATE-TIME:1970-01-01T00:16:50.000+00:00")
+	require.Contains(t, body, "#EXT-X-PROGRAM-DATE-TIME:1970-01-01T00:16:52.000+00:00")
+	require.NotContains(t, body, "#EXT-X-PROGRAM-DATE-TIME:1970-01-01T00:16:50.000+00:00")
 }
 
 func TestGenerateArchiveM3U8IndexedFMP4UsesExactDuration(t *testing.T) {
@@ -534,6 +541,36 @@ func TestGenerateArchiveM3U8IndexedStartOffsetAndMonotonicPDT(t *testing.T) {
 	require.NotContains(t, body, "#EXT-X-DISCONTINUITY")
 	require.Contains(t, body, "a.mp4?hls=media&sn=0&td=0")
 	require.Contains(t, body, "b.mp4?hls=media&sn=2&td=10000")
+}
+
+func TestGenerateArchiveM3U8IndexedFMP4PDTJumpsAcrossHole(t *testing.T) {
+	base := time.Unix(1000, 0).UTC()
+	body := GenerateArchiveM3U8Indexed(conf.RecordFormatFMP4, []*IndexedSegment{
+		{
+			Rel:   "a.mp4",
+			Start: base,
+			fmp4:  fmp4SegMeta{Duration: 60 * time.Second, MoofCount: 2, Ready: true},
+		},
+		{
+			Rel:   "b.mp4",
+			Start: base.Add(60 * time.Second),
+			fmp4:  fmp4SegMeta{Duration: 5 * time.Second, MoofCount: 1, Ready: true},
+		},
+		{
+			// Dropout ends the segment early. The next file starts 50s later —
+			// under the discontinuity threshold for a 1 minute segment (90s),
+			// but the timeline must not keep summing EXTINF across the hole.
+			Rel:   "c.mp4",
+			Start: base.Add(115 * time.Second),
+			fmp4:  fmp4SegMeta{Duration: 60 * time.Second, MoofCount: 2, Ready: true},
+		},
+	}, time.Minute, 0, 0, time.Time{})
+
+	require.NotContains(t, body, "#EXT-X-DISCONTINUITY")
+	require.Contains(t, body, "#EXT-X-PROGRAM-DATE-TIME:1970-01-01T00:16:40.000+00:00")
+	require.Contains(t, body, "#EXT-X-PROGRAM-DATE-TIME:1970-01-01T00:17:40.000+00:00")
+	require.Contains(t, body, "#EXT-X-PROGRAM-DATE-TIME:1970-01-01T00:18:35.000+00:00")
+	require.NotContains(t, body, "#EXT-X-PROGRAM-DATE-TIME:1970-01-01T00:17:45.000+00:00")
 }
 
 func TestGenerateArchiveM3U8IndexedMatchesDisk(t *testing.T) {

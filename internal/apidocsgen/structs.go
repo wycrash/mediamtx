@@ -59,6 +59,10 @@ var structs = []struct {
 		typ:          reflect.TypeOf(defs.APIHLSSessionList{}),
 	},
 	{
+		externalName: "CompatIndexDebug",
+		typ:          reflect.TypeOf(defs.APICompatIndexDebug{}),
+	},
+	{
 		externalName: "CompatIndexRebuild",
 		typ:          reflect.TypeOf(defs.APICompatIndexRebuild{}),
 	},
@@ -627,8 +631,12 @@ func generateStructSchema(rt reflect.Type, descriptions map[string]string) (open
 		name, _, _ := strings.Cut(jsonTag, ",")
 		deprecated := field.Tag.Get("deprecated") == "true"
 
-		if name == "" || name == "-" || name == "pathDefaults" || name == "paths" ||
-			(strings.Contains(jsonTag, ",omitempty") && !deprecated) {
+		if name == "" || name == "-" || name == "pathDefaults" || name == "paths" {
+			continue
+		}
+		// Config structs use omitempty for deprecated and patch-only fields.
+		// API response structs keep those fields so the schema matches the payload.
+		if strings.Contains(jsonTag, ",omitempty") && !deprecated && !strings.HasSuffix(rt.PkgPath(), "/internal/defs") {
 			continue
 		}
 

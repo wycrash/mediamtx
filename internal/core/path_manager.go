@@ -46,6 +46,14 @@ func pathConfCanBeUpdated(oldPathConf *conf.Path, newPathConf *conf.Path) bool {
 	clone.RecordDeleteAfter = newPathConf.RecordDeleteAfter
 	clone.RecordSkipTracks = newPathConf.RecordSkipTracks
 
+	clone.OnvifAddress = newPathConf.OnvifAddress
+	clone.OnvifUser = newPathConf.OnvifUser
+	clone.OnvifPass = newPathConf.OnvifPass
+	clone.OnvifEvents = newPathConf.OnvifEvents
+	clone.OnvifPath = newPathConf.OnvifPath
+	clone.RunOnEvent = newPathConf.RunOnEvent
+	clone.RunOnEventRestart = newPathConf.RunOnEventRestart
+
 	clone.RPICameraBrightness = newPathConf.RPICameraBrightness
 	clone.RPICameraContrast = newPathConf.RPICameraContrast
 	clone.RPICameraSaturation = newPathConf.RPICameraSaturation

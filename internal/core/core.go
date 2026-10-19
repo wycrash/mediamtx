@@ -32,6 +32,7 @@ import (
 	"github.com/bluenviron/mediamtx/internal/externalcmd"
 	"github.com/bluenviron/mediamtx/internal/logger"
 	"github.com/bluenviron/mediamtx/internal/metrics"
+	"github.com/bluenviron/mediamtx/internal/onvif"
 	"github.com/bluenviron/mediamtx/internal/playback"
 	"github.com/bluenviron/mediamtx/internal/pprof"
 	"github.com/bluenviron/mediamtx/internal/recordcleaner"
@@ -255,6 +256,7 @@ type Core struct {
 	rtmpsServer      *rtmp.Server
 	hlsServer        *hls.Server
 	compatServer     *compatapi.Server
+	onvifService     *onvif.Service
 	webRTCServer     *webrtc.Server
 	srtServer        *srt.Server
 	moqServer        *moq.Server
@@ -1144,6 +1146,17 @@ func (p *Core) createResources(initial bool) error {
 		p.api = i
 	}
 
+	if currentConf.Onvif && p.onvifService == nil {
+		p.onvifService = &onvif.Service{
+			Parent: p,
+			Pool:   p.externalCmdPool,
+		}
+		p.onvifService.Start(currentConf)
+	}
+	if p.api != nil && p.onvifService != nil {
+		p.api.SetOnvif(p.onvifService)
+	}
+
 	if initial && p.confPath != "" {
 		if _, err = os.Stat(p.confPath); err == nil {
 			cf := &confwatcher.ConfWatcher{FilePath: p.confPath}
@@ -1265,6 +1278,25 @@ func (p *Core) closeResources(newConf *conf.Conf) {
 	}
 	if !closePathManager && !reflect.DeepEqual(newConf.Paths, currentConf.Paths) {
 		p.pathManager.ReloadPathConfs(newConf.Paths)
+	}
+
+	closeOnvif := newConf == nil ||
+		newConf.Onvif != currentConf.Onvif ||
+		newConf.OnvifDiscoveryTimeout != currentConf.OnvifDiscoveryTimeout ||
+		newConf.OnvifDiscoveryInterface != currentConf.OnvifDiscoveryInterface ||
+		newConf.OnvifProbeConcurrency != currentConf.OnvifProbeConcurrency ||
+		newConf.OnvifPullTimeout != currentConf.OnvifPullTimeout ||
+		newConf.OnvifMessageLimit != currentConf.OnvifMessageLimit ||
+		newConf.OnvifSubscriptionDuration != currentConf.OnvifSubscriptionDuration ||
+		newConf.OnvifRenewMargin != currentConf.OnvifRenewMargin ||
+		newConf.OnvifReconnectPause != currentConf.OnvifReconnectPause ||
+		newConf.OnvifEventQueue != currentConf.OnvifEventQueue ||
+		newConf.OnvifEventSyncEvery != currentConf.OnvifEventSyncEvery ||
+		!slices.Equal(newConf.OnvifEventTopics, currentConf.OnvifEventTopics) ||
+		newConf.RTSPAddress != currentConf.RTSPAddress
+	if !closeOnvif && p.onvifService != nil &&
+		(newConf.OnvifDebug != currentConf.OnvifDebug || !reflect.DeepEqual(newConf.Paths, currentConf.Paths)) {
+		p.onvifService.Reload(newConf)
 	}
 
 	closeRTSPServer := newConf == nil ||
@@ -1552,6 +1584,14 @@ func (p *Core) closeResources(newConf *conf.Conf) {
 	if closePathManager && p.pathManager != nil {
 		p.pathManager.close()
 		p.pathManager = nil
+	}
+
+	if closeOnvif && p.onvifService != nil {
+		if p.api != nil {
+			p.api.SetOnvif(nil)
+		}
+		p.onvifService.Close()
+		p.onvifService = nil
 	}
 
 	// Full stop: flush the DVR index after recorders have closed current

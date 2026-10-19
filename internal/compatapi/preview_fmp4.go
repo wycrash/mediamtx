@@ -164,13 +164,17 @@ func previewFMP4PartAt(parts []fmp4MediaPart, at time.Duration) (fmp4MediaPart, 
 	return last, found
 }
 
-// ExtractPreviewFMP4 extracts a video keyframe from a recorded fMP4 segment.
-// at is the media offset from the segment start; the last IDR at or before at is used.
+// ExtractPreviewFMP4 extracts the video frame at `at` from a recorded fMP4 segment.
+// at is the media offset from the segment start. When the GOP cannot be cut,
+// the last IDR at or before at is used.
 // When at <= 0, the first keyframe of the file is returned (same as mpegts).
 func ExtractPreviewFMP4(fpath string, at time.Duration) ([]byte, error) {
 	from := int64(0)
 	if at > 0 {
 		if parts, err := loadFMP4MediaParts(fpath); err == nil {
+			if mp4, err := extractPreviewFMP4Exact(fpath, parts, at); err == nil {
+				return mp4, nil
+			}
 			if p, ok := previewFMP4PartAt(parts, at); ok {
 				from = p.Off
 			}

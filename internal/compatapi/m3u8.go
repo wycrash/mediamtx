@@ -235,8 +235,10 @@ func writeM3U8MPEGTS(
 			}
 		}
 
+		var pdt time.Time
+		pdt, origin, elapsed = alignPlaylistPDT(origin, elapsed, seg.Start)
 		fmt.Fprintf(&b, "#EXTINF:%.1f,\n", extinf)
-		fmt.Fprintf(&b, "#EXT-X-PROGRAM-DATE-TIME:%s\n", formatProgramDateTime(origin.Add(elapsed), timeOffsetMinutes))
+		fmt.Fprintf(&b, "#EXT-X-PROGRAM-DATE-TIME:%s\n", formatProgramDateTime(pdt, timeOffsetMinutes))
 		b.WriteString(names[i])
 		b.WriteByte('\n')
 
@@ -562,6 +564,18 @@ func segmentDurationForPlaylist(
 	return dur
 }
 
+// alignPlaylistPDT is the PROGRAM-DATE-TIME of this segment.
+// Any file start later than the media clock is a hole, including 1–2s at a
+// segment boundary. PDT uses that file start so playback matches preview.
+// An earlier start is left on the media clock so PDT does not run backwards.
+func alignPlaylistPDT(origin time.Time, elapsed time.Duration, start time.Time) (time.Time, time.Time, time.Duration) {
+	pdt := origin.Add(elapsed)
+	if start.IsZero() || !start.After(pdt) {
+		return pdt, origin, elapsed
+	}
+	return start, start, 0
+}
+
 func writePlaylistStart(b *strings.Builder, firstStart, windowStart time.Time) {
 	if windowStart.IsZero() || firstStart.IsZero() || !windowStart.After(firstStart) {
 		return
@@ -661,8 +675,10 @@ func writeM3U8FMP4(
 			fmt.Fprintf(&b, "#EXT-X-MAP:URI=\"%s?hls=init\"\n", info.name)
 		}
 
+		var pdt time.Time
+		pdt, origin, elapsed = alignPlaylistPDT(origin, elapsed, info.start)
 		fmt.Fprintf(&b, "#EXTINF:%.3f,\n", info.duration.Seconds())
-		fmt.Fprintf(&b, "#EXT-X-PROGRAM-DATE-TIME:%s\n", formatProgramDateTime(origin.Add(elapsed), timeOffsetMinutes))
+		fmt.Fprintf(&b, "#EXT-X-PROGRAM-DATE-TIME:%s\n", formatProgramDateTime(pdt, timeOffsetMinutes))
 		b.WriteString(fmp4MediaURI(info, seq, fileTdMs))
 		b.WriteByte('\n')
 

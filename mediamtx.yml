@@ -288,6 +288,40 @@ compatAPIIndexEngine: hybrid
 compatAPIIndexEngineHybridDay: 1
 
 ###############################################
+# Global settings -> ONVIF
+
+# Enable ONVIF discovery, probe and event subscriptions.
+# Events are stored next to the recording index of the path that owns onvifAddress.
+onvif: false
+# Log every ONVIF notification in full at info level: topic, operation, time, source, key and data.
+onvifDebug: false
+# WS-Discovery wait.
+onvifDiscoveryTimeout: 5s
+# Interface name or IPv4 address used as the WS-Discovery probe source.
+# Empty follows the default IPv4 route. A scan logs the source address,
+# the bound socket and every UDP reply.
+onvifDiscoveryInterface: ""
+# Parallel probes while enriching a discovery result. Reserved for callers.
+onvifProbeConcurrency: 8
+# PullPoint long-poll. The camera returns as soon as an event is available.
+onvifPullTimeout: 30s
+# Messages taken from the camera in one pull.
+onvifMessageLimit: 64
+# Subscription lifetime. The client renews it automatically.
+onvifSubscriptionDuration: 1h
+# How early to renew the subscription.
+onvifRenewMargin: 5m
+# Pause before reconnecting a failed subscription.
+onvifReconnectPause: 5s
+# Per-camera queue. A full queue drops the event and counts it.
+onvifEventQueue: 256
+# fsync the event journal after this many records, or after one second.
+onvifEventSyncEvery: 32
+# Topic filter. Empty uses the built-in motion, line, field, input and tamper set.
+# "*" subscribes to every topic.
+onvifEventTopics: []
+
+###############################################
 # Global settings -> RTSP server
 
 # Enable the RTSP server, which allows to publish and read streams with the RTSP protocol.
@@ -970,6 +1004,21 @@ pathDefaults:
   # * G1, G2, ...: regular expression groups, if path name is
   #   a regular expression.
   runOnRecordSegmentComplete:
+
+  # ONVIF device service URL (http://host:port). This path owns the subscription.
+  # Leave empty on a second stream and set onvifPath to the owner path name.
+  onvifAddress:
+  onvifUser:
+  onvifPass:
+  # Subscribe to events. Ignored when onvifAddress is empty.
+  onvifEvents: false
+  # Name of the path that owns the camera. Do not set together with onvifAddress.
+  onvifPath:
+  # Command to run when a stored event edge is written.
+  # * MTX_PATH, MTX_EVENT_TIME, MTX_EVENT_CLASS, MTX_EVENT_TOPIC
+  # * MTX_EVENT_STATE, MTX_EVENT_OPERATION, MTX_EVENT_SOURCE, MTX_EVENT_DATA
+  runOnEvent:
+  runOnEventRestart: false
 
 ###############################################
 # Path settings
